@@ -95,6 +95,8 @@ describe('SessionService', () => {
   // The engine-lifecycle verbs/state moved out of SessionService (god-object split); the white-box
   // pokes below target the lifecycle owner directly, the public-API tests stay on `service`.
   let lifecycle: SessionEngineLifecycle;
+  /** The real registry the service writes to, read directly for the live-engine proxy snapshot. */
+  let registry: EngineRegistry;
   let repository: jest.Mocked<Partial<Repository<Session>>>;
   let messageRepository: jest.Mocked<Partial<Repository<Message>>>;
   let dataSource: jest.Mocked<Partial<DataSource>>;
@@ -264,6 +266,7 @@ describe('SessionService', () => {
 
     service = module.get<SessionService>(SessionService);
     lifecycle = module.get<SessionEngineLifecycle>(SessionEngineLifecycle);
+    registry = module.get<EngineRegistry>(EngineRegistry);
   });
 
   // ── shutdown ──────────────────────────────────────────────────────
@@ -1151,6 +1154,18 @@ describe('SessionService', () => {
       expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', {
         status: SessionStatus.INITIALIZING,
       });
+    });
+
+    // Anything the gateway fetches on a running session's behalf has to leave through the proxy that
+    // session actually started with, which the row alone cannot answer: PATCH /proxy edits the row
+    // without restarting the engine (#1626).
+    it('records the proxy the engine was created with alongside the engine', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(createMockSession({ proxyUrl: 'socks5://p.invalid:1080' }));
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+
+      await service.start('sess-uuid-1');
+
+      expect(registry.proxyUrl('sess-uuid-1')).toBe('socks5://p.invalid:1080');
     });
 
     it('should throw BadRequestException if session already started', async () => {

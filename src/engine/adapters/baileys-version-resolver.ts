@@ -23,8 +23,7 @@ export interface BaileysVersionResolverOptions {
 }
 
 export interface ResolveOptions {
-  /** Global-fetch dispatcher for the session proxy. null means the session is proxied through a scheme
-   *  fetch cannot use, so both remote tiers are skipped rather than fetched direct around the proxy. */
+  /** Global-fetch dispatcher for the session proxy; undefined on an unproxied session (direct). */
   dispatcher?: unknown;
 }
 
@@ -53,20 +52,14 @@ export class BaileysVersionResolver {
       return envVersion;
     }
 
-    if (resolveOptions.dispatcher === null) {
-      this.options.logger.log('Remote WhatsApp Web version lookup is not supported through this proxy scheme', {
-        sessionId: this.options.sessionId,
-      });
-    } else {
-      const waWebVersion = await this.resolveFromWaWeb(b, resolveOptions);
-      if (waWebVersion) {
-        return waWebVersion;
-      }
+    const waWebVersion = await this.resolveFromWaWeb(b, resolveOptions);
+    if (waWebVersion) {
+      return waWebVersion;
+    }
 
-      const baileysVersion = await this.resolveFromBaileys(b, resolveOptions);
-      if (baileysVersion) {
-        return baileysVersion;
-      }
+    const baileysVersion = await this.resolveFromBaileys(b, resolveOptions);
+    if (baileysVersion) {
+      return baileysVersion;
     }
 
     const cachedVersion = this.resolveFromDiskCache();

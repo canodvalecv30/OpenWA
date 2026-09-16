@@ -577,7 +577,9 @@ export class SessionEngineLifecycle {
       proxyUrl: session.proxyUrl || undefined,
       proxyType: session.proxyType || undefined,
     });
-    this.engines.set(id, engine);
+    // The proxy is registered with the engine, not re-read from the row later: it is the egress this
+    // engine will use until it is replaced, and a fetch made on the session's behalf must match it.
+    this.engines.set(id, engine, session.proxyUrl || undefined);
     // Presence subscriptions live on the socket, so a fresh engine has none — whatever the previous
     // connection last reported is now unverifiable and would be served as if it were current.
     this.presence.clear(id);

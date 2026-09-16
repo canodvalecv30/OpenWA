@@ -24,7 +24,7 @@ function imageMessage(id: string, fileLength: number): WAMessage {
   };
 }
 
-function build(dispatcher?: object | null): { events: BaileysEvents; warns: string[] } {
+function build(dispatcher?: object): { events: BaileysEvents; warns: string[] } {
   const warns: string[] = [];
   const events = new BaileysEvents({
     getSocket: () => ({ updateMediaMessage: jest.fn() }) as unknown as WASocket,
@@ -179,13 +179,19 @@ describe('BaileysEvents media download through a session proxy', () => {
     );
   });
 
-  it('never downloads direct when the proxy scheme has no fetch dispatcher', async () => {
-    const { events, warns } = build(null);
+  // An unproxied session passes no dispatcher at all, which is Baileys' own default, and the
+  // download must not start carrying an empty options object instead.
+  it('passes no fetch options for an unproxied session', async () => {
+    downloadMediaMessage.mockResolvedValue({
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('IMG');
+      },
+    });
+    const { events } = build(undefined);
 
-    const incoming = await events.mapMessage(imageMessage('SOCKS4', 3), 'imageMessage');
+    await events.mapMessage(imageMessage('DIRECT', 3), 'imageMessage');
 
-    expect(downloadMediaMessage).not.toHaveBeenCalled();
-    expect(incoming.media).toEqual({ mimetype: 'image/png', filename: undefined, omitted: true, sizeBytes: 3 });
-    expect(warns).toEqual([expect.stringContaining('download failed')]);
+    expect(downloadMediaMessage).toHaveBeenCalledWith(expect.anything(), 'stream', {}, expect.anything());
   });
 });

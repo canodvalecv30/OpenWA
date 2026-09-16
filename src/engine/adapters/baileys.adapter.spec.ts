@@ -159,6 +159,7 @@ import { ChatLabelsUnsupportedError } from '../../common/errors/chat-labels-unsu
 import { Boom } from '@hapi/boom';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
+import * as safeLinkPreview from './safe-link-preview';
 
 const fakeStore = {
   put: jest.fn().mockResolvedValue(undefined),
@@ -1670,6 +1671,59 @@ describe('BaileysAdapter messaging', () => {
     expect(res).toEqual({ id: 'OUT1', timestamp: 1700000001 });
   });
 
+  /** An adapter for a session started behind a proxy, which every fetch it makes must leave through. */
+  const proxiedAdapter = async (): Promise<BaileysAdapter> => {
+    const adapter = new BaileysAdapter({
+      sessionId: 'sess-1',
+      dbSessionId: 'db-uuid-1',
+      authDir: './data/baileys',
+      messageStore: fakeStore,
+      proxyUrl: 'socks5://proxy.invalid:1080',
+    });
+    await adapter.initialize({});
+    fakeSock.fire('connection.update', { connection: 'open' });
+    return adapter;
+  };
+
+  /** Run the preview generator the last send handed Baileys, the way the library itself would. */
+  const runPreviewGenerator = async (): Promise<void> => {
+    const calls = fakeSock.sendMessage.mock.calls as Array<[unknown, unknown, { getUrlInfo: (t: string) => unknown }]>;
+    await calls[calls.length - 1][2].getUrlInfo('https://example.com');
+  };
+
+  // The preview generator fetches a URL out of the message text, which is caller-supplied egress
+  // like a media URL: on a proxied session it must leave through the session proxy (#1626).
+  it('generates the link preview of a text send through the session proxy', async () => {
+    const preview = jest.spyOn(safeLinkPreview, 'generateSafeLinkPreview').mockResolvedValue(undefined);
+    fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
+    const adapter = await proxiedAdapter();
+
+    await adapter.sendTextMessage('628111@s.whatsapp.net', 'see https://example.com');
+    await runPreviewGenerator();
+
+    expect(preview).toHaveBeenCalledWith('https://example.com', { sessionProxyUrl: 'socks5://proxy.invalid:1080' });
+    preview.mockRestore();
+  });
+
+  // Every OTHER text-bearing send (an edit, a reply) shares one options builder, so it carries the
+  // same responsibility as a plain text send and reaches more routes.
+  it('generates the link preview of an edit through the session proxy', async () => {
+    const preview = jest.spyOn(safeLinkPreview, 'generateSafeLinkPreview').mockResolvedValue(undefined);
+    const own = {
+      key: { id: 'TARGET', remoteJid: '628111@s.whatsapp.net', fromMe: true },
+      message: { conversation: 'hi' },
+    };
+    fakeStore.getMessage.mockResolvedValue(own);
+    fakeSock.sendMessage.mockResolvedValue({ key: { ...own.key }, messageTimestamp: 1700000010 });
+    const adapter = await proxiedAdapter();
+
+    await adapter.editMessage('628111@s.whatsapp.net', 'TARGET', 'see https://example.com');
+    await runPreviewGenerator();
+
+    expect(preview).toHaveBeenCalledWith('https://example.com', { sessionProxyUrl: 'socks5://proxy.invalid:1080' });
+    preview.mockRestore();
+  });
+
   it('emits onMessageCreate for the own send so message.sent fires (parity with the wwjs engine)', async () => {
     const onMessageCreate = jest.fn();
     // A realistic own-send return: fromMe + remoteJid + content, which the API-send echo path maps.
@@ -3152,7 +3206,7 @@ describe('BaileysAdapter media sends', () => {
     (loadRemoteMediaBuffer as jest.Mock).mockResolvedValue({ data: Buffer.from([9]), mimetype: 'video/mp4' });
     const adapter = await ready();
     await adapter.sendVideoMessage('628111@s.whatsapp.net', { mimetype: '', data: 'https://cdn.example/v.mp4' });
-    expect(loadRemoteMediaBuffer).toHaveBeenCalledWith('https://cdn.example/v.mp4');
+    expect(loadRemoteMediaBuffer).toHaveBeenCalledWith('https://cdn.example/v.mp4', undefined);
     expect(fakeSock.sendMessage).toHaveBeenCalledWith('628111@s.whatsapp.net', {
       video: Buffer.from([9]),
       caption: undefined,
@@ -3235,6 +3289,25 @@ describe('BaileysAdapter media sends', () => {
       sticker: webp,
       mentions: ['62811@s.whatsapp.net'],
     });
+  });
+
+  // A URL send is made by the gateway, not by the socket, so nothing else makes it follow the
+  // session's egress proxy: the adapter has to hand its own proxy to the fetch (#1626).
+  it('fetches a URL data string through the session proxy on a proxied session', async () => {
+    (loadRemoteMediaBuffer as jest.Mock).mockResolvedValue({ data: Buffer.from([9]), mimetype: 'video/mp4' });
+    const adapter = new BaileysAdapter({
+      sessionId: 'sess-1',
+      dbSessionId: 'db-uuid-1',
+      authDir: './data/baileys',
+      messageStore: fakeStore,
+      proxyUrl: 'socks5://proxy.invalid:1080',
+    });
+    await adapter.initialize({});
+    fakeSock.fire('connection.update', { connection: 'open' });
+
+    await adapter.sendVideoMessage('628111@s.whatsapp.net', { mimetype: '', data: 'https://cdn.example/v.mp4' });
+
+    expect(loadRemoteMediaBuffer).toHaveBeenCalledWith('https://cdn.example/v.mp4', 'socks5://proxy.invalid:1080');
   });
 
   it('uses the caller-declared mimetype over the fetched content-type for a URL', async () => {
@@ -5182,6 +5255,32 @@ describe('BaileysAdapter proxy support', () => {
     expect(lastSocketConfig().agent).toBeInstanceOf(SocksProxyAgent);
   });
 
+  // SOCKS4 has no authentication step, so a credentialed socks4 URL is not the login the operator
+  // thinks it is: the proxy answers "request rejected", which reads like an unreachable host.
+  it('warns that a credentialed socks4 proxy cannot authenticate', async () => {
+    const adapter = proxied('socks4://user:pass@proxy.example:1080');
+    const logger = (adapter as unknown as { logger: { warn: (m: string) => void } }).logger;
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await adapter.initialize(noopCallbacks());
+
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/SOCKS4 proxy, which has no authentication/));
+    warn.mockRestore();
+  });
+
+  it('does not warn for a credential-less socks4 proxy, or for credentials on socks5', async () => {
+    for (const url of ['socks4://proxy.example:1080', 'socks5://user:pass@proxy.example:1080']) {
+      const adapter = proxied(url);
+      const logger = (adapter as unknown as { logger: { warn: (m: string) => void } }).logger;
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+      await adapter.initialize(noopCallbacks());
+
+      expect(warn).not.toHaveBeenCalledWith(expect.stringMatching(/SOCKS4/));
+      warn.mockRestore();
+    }
+  });
+
   it('hands the version lookup a fetch dispatcher, not the socket agent', async () => {
     await proxied('http://user:pass@proxy.example:8080').initialize(noopCallbacks());
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -5190,10 +5289,12 @@ describe('BaileysAdapter proxy support', () => {
     expect(options.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
   });
 
-  it('skips the remote version lookup rather than going direct for a socks4 proxy', async () => {
+  it('hands the version lookup a dispatcher for a socks4 proxy too, instead of skipping it', async () => {
     await proxied('socks4://proxy.example:1080').initialize(noopCallbacks());
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    expect(jest.requireMock('@whiskeysockets/baileys').fetchLatestBaileysVersion).not.toHaveBeenCalled();
+    const lookup = jest.requireMock('@whiskeysockets/baileys').fetchLatestBaileysVersion as jest.Mock;
+    const [[options]] = lookup.mock.calls as Array<[{ dispatcher?: unknown }]>;
+    expect(options.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
   });
 
   it('hands the socket config a fetch dispatcher, for the downloads Baileys runs itself', async () => {
@@ -5202,11 +5303,12 @@ describe('BaileysAdapter proxy support', () => {
     expect(options.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
   });
 
-  it('leaves the socket fetch options at the library default for a socks4 proxy', async () => {
-    // Global fetch has no SOCKS4 transport, so there is nothing to hand it; these downloads keep the
-    // direct behaviour they have always had rather than being broken outright.
+  it('hands the socket config a fetch dispatcher for a socks4 proxy too', async () => {
+    // The SOCKS connector covers socks4, so the fetches Baileys runs off this config (history sync,
+    // app-state blobs, a product card image) no longer leave direct on a socks4 session.
     await proxied('socks4://proxy.example:1080').initialize(noopCallbacks());
-    expect(lastSocketConfig().options).toEqual({});
+    const options = lastSocketConfig().options as { dispatcher?: unknown };
+    expect(options.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
   });
 
   it('leaves agent/fetchAgent unset and the fetch options at the library default without a proxyUrl', async () => {

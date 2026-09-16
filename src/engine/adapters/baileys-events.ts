@@ -99,8 +99,8 @@ export interface BaileysEventsHost {
   normalizedSelfJid(): string;
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   loadLib(): Promise<typeof BaileysLib>;
-  /** Session proxy dispatcher for the media download: undefined = direct, null = proxy fetch cannot use. */
-  getFetchDispatcher(): Dispatcher | null | undefined;
+  /** Session proxy dispatcher for the media download; undefined = direct. */
+  getFetchDispatcher(): Dispatcher | undefined;
   /** Unix-seconds timestamp of the last 'open' connection.update — the live-vs-history discriminator. */
   readonly connectedAt: number;
   /** The adapter's inbound media download gate (shared so the bound holds across all inbound paths). */
@@ -756,12 +756,8 @@ export class BaileysEvents {
     maxBytes: number,
   ): Promise<Buffer | { overflowBytes: number } | null> {
     // A proxied session must not fetch media around its proxy (#859). Baileys reads the dispatcher
-    // from the nested `options` (a top-level one is ignored); a proxy scheme fetch cannot use fails
-    // the download, which the caller turns into the omitted marker.
+    // from the nested `options`; a top-level one is ignored.
     const dispatcher = this.host.getFetchDispatcher();
-    if (dispatcher === null) {
-      throw new Error('Media download is not supported through this proxy scheme');
-    }
     // Hold the stream handle in the outer scope so the timeout can destroy it. A genuine
     // download/read error still rejects (propagating to the caller's catch as before).
     let stream: (AsyncIterable<Buffer> & { destroy?: () => void }) | undefined;

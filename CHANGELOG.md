@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The PostgreSQL data connection is pinned to UTC: parameters bind as UTC, naive timestamps read back as UTC, every pooled connection sets its session `TimeZone`, and boot fails when the effective zone is not UTC year round.
+- Credentials on a `socks4://` session proxy are reported at session start as unauthenticatable: SOCKS4 sends the user name as the connect request's user id and drops the password.
 
 ### Fixed
 
@@ -28,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An archive a **PostgreSQL** gateway outside UTC exported before this release is shifted the other way, and restoring it moved the whole table, `DEFAULT now()` columns included: the export read every value back through the local-time parser and the import bound the resulting ISO text into a column that drops the zone, so each restore took the table one offset backward. No row in such a table is correct, and the conversion above would move those rows a further offset the wrong way. Where the table holds nothing but restored rows, apply the inverse once per restore taken: `UPDATE sessions SET "createdAt" = ("createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta';`. Where it also holds rows written after the restore, no blanket conversion is safe.
 - Re-export after upgrading for an archive whose stamps are the instants they claim; restoring a pre-release archive carries its shift in as it is.
 - A WebSocket client can now be disconnected with an `UNAUTHORIZED` frame up to a minute after its key changed, where before only the node that processed the change disconnected it; reconnect and resubscribe on that frame. A rename, and the key's usage counters, evict nobody.
+- A caller-supplied URL leaves through the session proxy from this release. Set `SESSION_PROXY_URL_FETCH=false` when a session proxy is a WhatsApp-only route that cannot reach arbitrary media hosts.
+
+### Security
+
+- Baileys sessions with a SOCKS4 proxy fetch through it instead of connecting direct: inbound media, the WhatsApp Web version lookup, the initial-sync payloads and a product card's image URL, which 0.23.5 routed through HTTP, HTTPS and SOCKS5 proxies only ([#1626](https://github.com/rmyndharis/OpenWA/issues/1626)).
+- A media URL passed to a send route or to `POST /api/sessions/{sessionId}/media/convert`, and the link preview of a text send, are fetched through the named session's egress proxy on both engines, instead of leaving from the gateway's own address ([#1626](https://github.com/rmyndharis/OpenWA/issues/1626)).
 
 ## [0.23.5] - 2026-09-15
 

@@ -6,12 +6,13 @@ import type { Socket } from 'net';
 import * as qrcode from 'qrcode';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import { Dispatcher1Wrapper, ProxyAgent, type Dispatcher } from 'undici';
+import { type Dispatcher } from 'undici';
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { WASocket } from '@whiskeysockets/baileys';
 import type { ILogger } from '@whiskeysockets/baileys/lib/Utils/logger.js';
 import { EngineEventCallbacks, EngineStatus } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { createProxyDispatcher, hasUnauthenticatableSocks4Credentials } from '../../common/security/proxy-dispatcher';
 import { type createLogger } from '../../common/services/logger.service';
 import { BaileysAdapterConfig } from '../types/baileys.types';
 import { createBaileysLogger } from './baileys-logger';
@@ -110,35 +111,6 @@ export function createProxyAgent(proxyUrl: string, connectTimeoutMs = PROXY_CONN
 }
 
 /**
- * Build the global-fetch dispatcher for a session egress proxy, used by Baileys' media download, the
- * version lookup and the socket's own `options` fetch init. Global fetch accepts only an undici
- * dispatcher, never a Node http Agent, and Node's bundled undici predates the handler API of the
- * installed one, so the agent is wrapped to speak the older interface. undici has no SOCKS4 transport:
- * null tells the caller to skip the request rather than send it direct.
- */
-export function createProxyDispatcher(proxyUrl: string): Dispatcher | null {
-  const { protocol, username, password } = new URL(proxyUrl);
-  if (protocol === 'http:' || protocol === 'https:') {
-    return new Dispatcher1Wrapper(new ProxyAgent(proxyUrl));
-  }
-  if (protocol === 'socks5:') {
-    // undici hands SOCKS5 the URL credentials still percent-encoded (it decodes them only for the HTTP
-    // Proxy-Authorization header), so a password written as `p%40ss` would fail auth. Pass them decoded;
-    // the options object is not a literal because undici's typings omit these two runtime options.
-    const options = {
-      uri: proxyUrl,
-      username: decodeURIComponent(username) || undefined,
-      password: decodeURIComponent(password) || undefined,
-    };
-    return new Dispatcher1Wrapper(new ProxyAgent(options));
-  }
-  if (protocol === 'socks4:') {
-    return null;
-  }
-  throw new Error(`Unsupported proxy protocol for the baileys engine: ${protocol}`);
-}
-
-/**
  * Connection lifecycle extracted from BaileysAdapter: connect/reconnect with capped backoff, QR
  * rendering, logout with the remove-companion-device ACK, terminal-close handling, and the state
  * behind them (sock, status, reconnect counters, the lazily-loaded library). The adapter keeps the
@@ -221,7 +193,7 @@ export class BaileysLifecycle {
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   private lib?: typeof BaileysLib;
   /** The session proxy's fetch dispatcher, built once: the proxy URL is fixed for the adapter's life. */
-  private dispatcher?: Dispatcher | null;
+  private dispatcher?: Dispatcher;
 
   constructor(private readonly host: BaileysLifecycleHost) {
     this.versionResolver = new BaileysVersionResolver({
@@ -236,19 +208,13 @@ export class BaileysLifecycle {
     return (this.lib ??= await import('@whiskeysockets/baileys'));
   }
 
-  /**
-   * Dispatcher for Baileys' global-fetch calls: undefined without a proxy (direct), null when the
-   * proxy scheme has no fetch transport, so the caller must skip the request instead of going direct.
-   */
-  fetchDispatcher(): Dispatcher | null | undefined {
+  /** Dispatcher for Baileys' global-fetch calls: undefined without a proxy (direct). */
+  fetchDispatcher(): Dispatcher | undefined {
     const { proxyUrl } = this.host.config;
     if (!proxyUrl) {
       return undefined;
     }
-    if (this.dispatcher === undefined) {
-      this.dispatcher = createProxyDispatcher(proxyUrl);
-    }
-    return this.dispatcher;
+    return (this.dispatcher ??= createProxyDispatcher(proxyUrl));
   }
 
   async initialize(): Promise<void> {
@@ -302,6 +268,13 @@ export class BaileysLifecycle {
       const { protocol, host } = new URL(this.host.config.proxyUrl);
       // Credential-stripped, matching the wwjs adapter's log line (#628).
       this.host.logger.log(`Using proxy: ${protocol}//${host}`, { sessionId: this.host.config.sessionId });
+      if (hasUnauthenticatableSocks4Credentials(this.host.config.proxyUrl)) {
+        this.host.logger.warn(
+          `Proxy for session ${this.host.config.sessionId} has credentials on a SOCKS4 proxy, which has no ` +
+            `authentication step: the user name is sent as the connect request's user id and the password is ` +
+            `dropped. Use a socks5, http or https proxy, or an IP-authorized one.`,
+        );
+      }
     }
     const b = await this.loadLib();
     const { state, saveCreds } = await b.useMultiFileAuthState(this.host.authPath);
@@ -371,8 +344,7 @@ export class BaileysLifecycle {
       // The same dispatcher for the fetches Baileys runs off this config itself: the history-sync
       // payload, the app-state external blobs, and a URL handed to a send (a product card image).
       // Without it they leave direct from the host IP even on a proxied session. `{}` is Baileys' own
-      // default for the key, and is what an unproxied session gets, as does a SOCKS4 one: it has no
-      // fetch transport at all, so these keep going direct there as they always have.
+      // default for the key, and is what an unproxied session gets.
       options: (fetchDispatcher ? { dispatcher: fetchDispatcher } : {}) as RequestInit,
       // Enable the initial sync. Baileys defaults `shouldSyncHistoryMessage` to `() => !!syncFullHistory`,
       // so leaving both unset disables ALL history + app-state sync - no contacts, chats, recent history,

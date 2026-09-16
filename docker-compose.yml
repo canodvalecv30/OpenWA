@@ -215,6 +215,7 @@ services:
       - MEDIA_DOWNLOAD_MAX_BYTES=${MEDIA_DOWNLOAD_MAX_BYTES:-}
       - MEDIA_DOWNLOAD_TIMEOUT_MS=${MEDIA_DOWNLOAD_TIMEOUT_MS:-}
       - INBOUND_MEDIA_CONCURRENCY=${INBOUND_MEDIA_CONCURRENCY:-}
+      - SESSION_PROXY_URL_FETCH=${SESSION_PROXY_URL_FETCH:-}
       # Server-side media conversion (opt-in). The image ships ffmpeg, but without these forwards
       # the feature could not be switched on from .env at all.
       - MEDIA_CONVERSION_ENABLED=${MEDIA_CONVERSION_ENABLED:-}

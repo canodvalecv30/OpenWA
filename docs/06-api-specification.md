@@ -552,13 +552,22 @@ network cannot reach WhatsApp directly. Set `proxyUrl`/`proxyType` on the same r
 > WebSocket never connects, **no QR code is ever delivered**, and `POST /api/sessions/:sessionId/start`
 > returns `504 Gateway Timeout` after ~30s. Leave `proxyUrl` unset unless you genuinely need a proxy.
 
-On the Baileys engine, with `socks5`, `http` or `https`, the proxy also carries everything the engine fetches
-over HTTP: inbound media, the WhatsApp Web version lookup, the history-sync and app-state payloads of the
-initial sync, and a product card's `imageUrl`. A `socks4` proxy carries the WebSocket and media uploads only,
-because the HTTP client has no SOCKS4 transport: inbound media is not downloaded (it arrives as the omitted
-marker) and the WhatsApp Web version is not looked up remotely, while the initial-sync payloads and a product
-card's `imageUrl` are still fetched directly. On every proxy scheme, a media URL you pass to a send or to
-`POST /api/media/convert` is fetched by the gateway itself, directly, not through the session proxy.
+On the Baileys engine the proxy carries everything the engine fetches over HTTP, on all four schemes: inbound
+media, the WhatsApp Web version lookup, the history-sync and app-state payloads of the initial sync, and a
+product card's `imageUrl`. SOCKS4 has no authentication step, so credentials in a `socks4://` URL are not a
+login: the user name travels as the connect request's user id and the password is dropped, which a warning
+says at session start. Use `socks5`, `http` or `https` for a proxy that needs a password.
+
+A URL **you** supply is fetched through the session proxy too, on both engines: the media URL of a send, the
+`url` of `POST /api/sessions/:sessionId/media/convert/voice|video`, and the link preview of a text send. The
+session named in the request decides which proxy that is: the one its running engine started with, or, when
+the session is not running, the one stored on its row. Set `SESSION_PROXY_URL_FETCH=false` to fetch those URLs
+from the gateway's own address instead, for a proxy that only routes to WhatsApp. The SSRF guard applies
+either way: the scheme and the destination are checked before any socket is opened, and the checked addresses
+are what a SOCKS proxy is asked to connect to, in resolver order, so a proxy that routes only one address
+family still reaches a dual-stack host (a `socks4` proxy is always given an IPv4 one, the only family that
+protocol carries). Behind an HTTP or HTTPS proxy the destination is named in the `CONNECT` line and resolved
+by the proxy, so the connection there cannot be pinned to the address that was vetted.
 
 **Response** `201`
 
@@ -6364,6 +6373,11 @@ endpoints run — on a source install it must be present, or they answer `503`.
 
 Nothing is converted implicitly: sends behave exactly as before unless a caller runs media through
 these endpoints first and posts the result.
+
+A `url` is fetched by the gateway through the egress proxy of the session in the path, exactly as a
+send by URL is (see "Per-session egress proxy" under `POST /api/sessions`); `SESSION_PROXY_URL_FETCH=false`
+sends it direct instead. ffmpeg never sees the URL either way: it is handed bytes this gateway already
+fetched and checked.
 
 > **Why voice conversion matters.** WhatsApp renders a playable voice-note bubble only for Ogg/Opus.
 > Posting MP3 bytes to `send-audio` with `ptt: true` sends those bytes as they are, so the recipient
