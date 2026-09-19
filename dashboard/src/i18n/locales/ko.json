@@ -305,7 +305,7 @@
       "created": "생성일",
       "lastActive": "마지막 활동",
       "autoRejectCalls": "통화 자동 거절",
-      "autoRejectCallsHint": "수신 통화가 울리는 즉시 거절됩니다. call.received 웹훅은 그전에 그대로 전송됩니다. 다음 통화부터 적용되며 재시작이 필요하지 않습니다."
+      "autoRejectCallsHint": "수신 통화가 울리는 즉시 거절됩니다. call.received 웹훅은 그전에 그대로 전송됩니다. 다음 통화부터 적용되며 재시작이 필요하지 않습니다. Baileys 엔진에서만 동작합니다. whatsapp-web.js에서는 통화를 거절할 수 없습니다."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -379,6 +379,7 @@
       "phoneLabel": "전화번호",
       "phonePlaceholder": "예: 919876543210",
       "phoneHint": "국제 형식(국가 코드 + 번호)으로 숫자만 입력하세요(+, 공백, 하이픈 제외).",
+      "relinkWarning": "whatsapp-web.js 엔진에서는 이미 연결된 세션이 있는 번호로 코드를 요청하면 WhatsApp이 해당 기기의 연결을 해제할 수 있습니다. 그 세션을 유지해야 한다면 QR 탭을 사용하세요.",
       "invalidPhone": "올바른 전화번호를 입력하세요: 6~15자리 숫자, 국가 코드로 시작, 기호 없이.",
       "generateButton": "페어링 코드 생성",
       "generating": "페어링 코드를 생성하는 중...",
@@ -393,7 +394,8 @@
     },
     "start": {
       "teardownPendingTitle": "세션 시작 중",
-      "teardownPending": "이 세션의 자격 증명 해체가 아직 진행 중입니다. 잠시 기다린 후 다시 시도하세요."
+      "teardownPending": "이 세션의 자격 증명 해체가 아직 진행 중입니다. 잠시 기다린 후 다시 시도하세요.",
+      "errorTitle": "시작 실패"
     },
     "restriction": {
       "reachout_timelock": "새 대화 차단됨",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "보낸 사람",
         "recipient": "받는 사람",
+        "chatId": "채팅 ID",
         "body": "메시지 본문",
         "type": "메시지 유형",
         "isGroup": "그룹 채팅 여부",

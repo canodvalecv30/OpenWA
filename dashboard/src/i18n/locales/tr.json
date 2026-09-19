@@ -285,7 +285,8 @@
     },
     "start": {
       "teardownPendingTitle": "Oturum Başlatılıyor",
-      "teardownPending": "Bu oturum için bir kimlik bilgisi sıfırlama işlemi devam ediyor. Lütfen biraz bekleyip tekrar deneyin."
+      "teardownPending": "Bu oturum için bir kimlik bilgisi sıfırlama işlemi devam ediyor. Lütfen biraz bekleyip tekrar deneyin.",
+      "errorTitle": "Başlatma Başarısız"
     },
     "qr": {
       "title": "QR Kodunu Tara",
@@ -309,7 +310,7 @@
       "created": "Oluşturuldu",
       "lastActive": "Son Görülme",
       "autoRejectCalls": "Aramaları otomatik reddet",
-      "autoRejectCallsHint": "Gelen aramalar çaldığı anda reddedilir. call.received webhook'u yine de ilk olarak tetiklenir. Bir sonraki arama için geçerlidir — yeniden başlatma gerekmez."
+      "autoRejectCallsHint": "Gelen aramalar çaldığı anda reddedilir. call.received webhook'u yine de ilk olarak tetiklenir. Bir sonraki arama için geçerlidir — yeniden başlatma gerekmez. Yalnızca Baileys motorunda: whatsapp-web.js aramaları reddedemez."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -383,6 +384,7 @@
       "phoneLabel": "Telefon Numarası",
       "phonePlaceholder": "ör. 905XXXXXXXXX",
       "phoneHint": "Uluslararası formatta (+, boşluk veya tire olmadan) yalnızca rakamlar (ülke kodu + numara).",
+      "relinkWarning": "whatsapp-web.js motorunda, halihazırda bağlı bir oturumu olan bir numara için kod istemek WhatsApp'ın o cihazın bağlantısını kesmesine yol açabilir. O oturumun açık kalması gerekiyorsa QR sekmesini kullanın.",
       "invalidPhone": "Geçerli bir telefon numarası girin: 6–15 basamak, başta ülke kodu, sembolsüz.",
       "generateButton": "Eşleme Kodu Oluştur",
       "generating": "Eşleme kodu oluşturuluyor...",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "Gönderen",
         "recipient": "Alıcı",
+        "chatId": "Sohbet kimliği",
         "body": "Mesaj içeriği",
         "type": "Mesaj türü",
         "isGroup": "Grup sohbeti mi",

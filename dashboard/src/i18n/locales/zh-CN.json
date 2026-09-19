@@ -305,7 +305,7 @@
       "created": "创建时间",
       "lastActive": "上次活跃",
       "autoRejectCalls": "自动拒接来电",
-      "autoRejectCallsHint": "来电响铃后立即拒接。call.received webhook 仍会先行触发。下一通来电起生效，无需重启。"
+      "autoRejectCallsHint": "来电响铃后立即拒接。call.received webhook 仍会先行触发。下一通来电起生效，无需重启。仅限 Baileys 引擎：whatsapp-web.js 无法拒接来电。"
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -379,6 +379,7 @@
       "phoneLabel": "电话号码",
       "phonePlaceholder": "例如：919876543210",
       "phoneHint": "仅填数字（不含 +、空格或连字符），使用国际格式（国家/地区代码 + 号码）。",
+      "relinkWarning": "在 whatsapp-web.js 引擎上，为已经有关联会话的号码请求配对码，可能会导致 WhatsApp 解除该设备的关联。如果该会话必须保持运行，请改用二维码标签页。",
       "invalidPhone": "请输入有效的电话号码：6–15 位数字，国家/地区代码在前，不含任何符号。",
       "generateButton": "生成配对码",
       "generating": "正在生成配对码...",
@@ -393,7 +394,8 @@
     },
     "start": {
       "teardownPendingTitle": "会话启动中",
-      "teardownPending": "此会话的凭据拆除仍在处理中。请稍候再试。"
+      "teardownPending": "此会话的凭据拆除仍在处理中。请稍候再试。",
+      "errorTitle": "启动失败"
     },
     "restriction": {
       "reachout_timelock": "新会话被阻止",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "发送者",
         "recipient": "接收者",
+        "chatId": "聊天 ID",
         "body": "消息正文",
         "type": "消息类型",
         "isGroup": "是群聊",

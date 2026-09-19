@@ -93,11 +93,6 @@ export class BaileysAdapter implements IWhatsAppEngine {
   private set sock(value: WASocket | null) {
     this.lifecycle.sock = value;
   }
-  /** Unix-seconds timestamp of the last 'open' connection.update — the events delegate's
-   *  live-vs-history discriminator, read live; the value is owned by the lifecycle delegate. */
-  private get connectedAt(): number {
-    return this.lifecycle.connectedAt;
-  }
   /** Live-call cache handle — the map is owned by the events delegate (call events + rejectCall);
    *  lifecycle teardown clears it so a late rejectCall() reports not-found on a dead socket. The
    *  adapter keeps this alias for the unmodified spec, which reads `adapter.liveCalls` via a cast. */
@@ -120,13 +115,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     // is added once here, not to nine per-delegate bags. Each delegate keeps its own narrow Host
     // interface, which this literal satisfies structurally - least privilege stays enforceable.
     const delegates: { events?: BaileysEvents } = {};
-    const connectedAt = (): number => this.connectedAt;
     const host: BaileysEngineHost = {
-      // An object-literal getter's `this` is the literal itself, so the live connectedAt read goes
-      // through the arrow closure above, which captures the adapter.
-      get connectedAt() {
-        return connectedAt();
-      },
       getSocket: () => this.sock!,
       getSocketOrNull: () => this.sock,
       logger: this.logger,
@@ -185,6 +174,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       logContactEvent: (event, records) => this.events.logContactEvent(event, records),
       handleGroupParticipantsUpdate: event => this.events.handleGroupParticipantsUpdate(event),
       handleGroupsUpdate: updates => this.events.handleGroupsUpdate(updates),
+      handleGroupsUpsert: groups => this.events.handleGroupsUpsert(groups),
       handleGroupJoinRequest: event => this.events.handleGroupJoinRequest(event),
       handleCallEvents: calls => this.events.handleCallEvents(calls),
       handlePresenceUpdate: update => this.events.handlePresenceUpdate(update),

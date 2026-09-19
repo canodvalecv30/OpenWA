@@ -44,6 +44,12 @@ export interface SessionEngineWiringHost {
   /** Liveness gate: true only while `engine` is still the live engine registered for `id`. */
   isLiveEngine(id: string, engine: IWhatsAppEngine): boolean;
   /**
+   * True while an operator-initiated teardown (stop/logout/forceKill) is retiring exactly this
+   * engine instance. Its DISCONNECTED is that teardown's own, reported before the eviction; the verb
+   * announces the settled one once the engine is gone.
+   */
+  isOperatorTeardown(id: string, engine: IWhatsAppEngine): boolean;
+  /**
    * Ownership gate: true while this node may still speak for `id`. Orthogonal to isLiveEngine —
    * between a lapsed lease and the teardown the heartbeat schedules, isLiveEngine is still true
    * while this is already false. TRUE when no ownership service is wired (single process).
@@ -347,6 +353,13 @@ export class SessionEngineEventWiring {
         };
         const newStatus = statusMap[engineState];
         if (!newStatus) return;
+        // An operator-initiated teardown reports DISCONNECTED on entry, before the engine is
+        // evicted: whatsapp-web.js sets the status and only then awaits browser.close(). Announced
+        // here it would tell every consumer the session is down while GET /sessions still reports
+        // the engine as loaded, and the verb's own write after the eviction is dropped as a
+        // duplicate, so the settled view would never be announced at all. Skipped for the exact
+        // instance being torn down; stop/logout/forceKill each write DISCONNECTED afterwards.
+        if (newStatus === SessionStatus.DISCONNECTED && host.isOperatorTeardown(id, engine)) return;
         // A FAILED reported inside a service-level reconnect's init window is parked with onError.
         const persist = (): void => persistStatus(newStatus);
         if (newStatus === SessionStatus.FAILED && host.parkReconnectInitFailure(id, persist)) return;

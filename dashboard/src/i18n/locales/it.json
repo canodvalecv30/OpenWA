@@ -305,7 +305,7 @@
       "created": "Creata",
       "lastActive": "Ultima Attività",
       "autoRejectCalls": "Rifiuta automaticamente le chiamate",
-      "autoRejectCallsHint": "Le chiamate in arrivo vengono rifiutate appena squillano. Il webhook call.received viene comunque inviato prima. Si applica alla prossima chiamata — nessun riavvio necessario."
+      "autoRejectCallsHint": "Le chiamate in arrivo vengono rifiutate appena squillano. Il webhook call.received viene comunque inviato prima. Si applica alla prossima chiamata — nessun riavvio necessario. Solo con il motore Baileys: whatsapp-web.js non può rifiutare le chiamate."
     },
     "proxy": {
       "title": "Configurazione proxy",
@@ -379,6 +379,7 @@
       "phoneLabel": "Numero di Telefono",
       "phonePlaceholder": "es., 919876543210",
       "phoneHint": "Solo cifre (senza +, spazi o trattini) in formato internazionale (prefisso del paese + numero).",
+      "relinkWarning": "Sul motore whatsapp-web.js, richiedere un codice per un numero che ha già una sessione collegata può far sì che WhatsApp scolleghi quel dispositivo. Usa la scheda QR se quella sessione deve restare attiva.",
       "invalidPhone": "Inserisci un numero di telefono valido: 6–15 cifre, prefisso del paese per primo, senza simboli.",
       "generateButton": "Genera codice di abbinamento",
       "generating": "Generazione del codice di abbinamento in corso...",
@@ -393,7 +394,8 @@
     },
     "start": {
       "teardownPendingTitle": "Avvio sessione",
-      "teardownPending": "Uno smontaggio delle credenziali per questa sessione è ancora in corso. Attendi un momento e riprova."
+      "teardownPending": "Uno smontaggio delle credenziali per questa sessione è ancora in corso. Attendi un momento e riprova.",
+      "errorTitle": "Avvio Fallito"
     },
     "restriction": {
       "reachout_timelock": "Nuove chat bloccate",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "Mittente",
         "recipient": "Destinatario",
+        "chatId": "ID chat",
         "body": "Corpo del messaggio",
         "type": "Tipo di messaggio",
         "isGroup": "È una chat di gruppo",

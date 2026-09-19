@@ -14,6 +14,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { ConfigService } from '@nestjs/config';
 import { SessionService, AUTOSTART_THROTTLE_MS } from './session.service';
 import { SessionOwnershipService } from './session-ownership.service';
@@ -6088,6 +6089,55 @@ describe('SessionService', () => {
         status: SessionStatus.DISCONNECTED,
       });
     });
+
+    // whatsapp-web.js reports DISCONNECTED synchronously on entry to its teardown and only then
+    // awaits browser.close(), so the engine is still registered when the callback fires. Announcing
+    // there tells every consumer the session is down while GET /sessions still answers
+    // engineLoaded: true, and the write after the eviction is dropped as a duplicate, so the
+    // corrected view is never announced at all.
+    it('announces the stop only after the engine is evicted', async () => {
+      const session = createMockSession();
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+
+      await service.start('sess-uuid-1');
+      const callbacks = (mockEngine.initialize.mock.calls as [EngineEventCallbacks][])[0][0];
+
+      const engineStillRegistered: boolean[] = [];
+      (eventsGateway.emitSessionStatus as jest.Mock).mockImplementation((id: string) => {
+        engineStillRegistered.push(registry.has(id));
+      });
+      mockEngine.disconnect.mockImplementation(async () => {
+        callbacks.onStateChanged?.(EngineStatus.DISCONNECTED);
+        await Promise.resolve(); // the real teardown awaits browser.close() after reporting
+      });
+
+      await service.stop('sess-uuid-1');
+
+      const emits = (eventsGateway.emitSessionStatus as jest.Mock).mock.calls as [string, SessionStatus][];
+      const disconnectedEmits = emits.filter(c => c[1] === SessionStatus.DISCONNECTED);
+      expect(disconnectedEmits).toHaveLength(1);
+      expect(engineStillRegistered).toEqual([false]);
+    });
+
+    // The suppression is keyed to the engine instance being torn down, so a mark left behind by a
+    // stop that never ran cannot mute a later disconnect the session really had.
+    it('still announces a disconnect after a stop that failed to find the session', async () => {
+      const session = createMockSession();
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      await service.start('sess-uuid-1');
+      const callbacks = (mockEngine.initialize.mock.calls as [EngineEventCallbacks][])[0][0];
+
+      (repository.findOne as jest.Mock).mockResolvedValueOnce(null);
+      await expect(service.stop('sess-uuid-1')).rejects.toThrow(NotFoundException);
+
+      (eventsGateway.emitSessionStatus as jest.Mock).mockClear();
+      callbacks.onStateChanged?.(EngineStatus.DISCONNECTED);
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(eventsGateway.emitSessionStatus).toHaveBeenCalledWith('sess-uuid-1', SessionStatus.DISCONNECTED);
+    });
   });
 
   // ── getQRCode ─────────────────────────────────────────────────────
@@ -6981,6 +7031,32 @@ describe('SessionService', () => {
 
       expect(webhookService.dispatch).toHaveBeenCalledWith('sess-uuid-1', 'call.received', expect.anything());
       expect(eventsGateway.emitCallReceived).toHaveBeenCalledTimes(1);
+    });
+
+    // whatsapp-web.js refuses rejectCall because a rejection it sent did not stop the call ringing.
+    // The log must say the auto-reject failed, never that the call was rejected.
+    it('an engine that refuses rejectCall logs the failed auto-reject warn, not Auto-rejected, and still dispatches call.received', async () => {
+      const onCall = await startAndCaptureCallCallback({ autoRejectCalls: true });
+      mockEngine.rejectCall.mockRejectedValue(new EngineNotSupportedError('rejectCall'));
+      const logger = (lifecycle as unknown as { logger: { log: () => void; warn: () => void } }).logger;
+      const log = jest.spyOn(logger, 'log');
+      const warn = jest.spyOn(logger, 'warn');
+
+      try {
+        onCall(callEvent());
+        await flush();
+
+        expect(warn).toHaveBeenCalledWith(
+          'Failed to auto-reject incoming call',
+          expect.objectContaining({ sessionId: 'sess-uuid-1', callId: 'CALL1', action: 'call_auto_reject_failed' }),
+        );
+        expect(log).not.toHaveBeenCalledWith('Auto-rejected incoming call', expect.anything());
+        expect(webhookService.dispatch).toHaveBeenCalledWith('sess-uuid-1', 'call.received', expect.anything());
+        expect(eventsGateway.emitCallReceived).toHaveBeenCalledTimes(1);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
     });
 
     it('drops the event when it arrives from a stale (superseded) engine', async () => {

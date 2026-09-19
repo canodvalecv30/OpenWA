@@ -241,6 +241,17 @@ export class SessionEngineLifecycle {
   // engine B the control action did not capture.
   private readonly pendingInitialStatuses = new Map<string, { engine: IWhatsAppEngine; promise: Promise<void> }>();
 
+  // The engine an operator-initiated teardown (stop/logout/forceKill) is currently retiring, keyed
+  // by id and holding the EXACT instance. An adapter reports DISCONNECTED synchronously on entry to
+  // its teardown, before the engine is evicted (whatsapp-web.js then awaits browser.close(), which
+  // takes seconds), so that report is announced while GET /sessions still answers
+  // `engineLoaded: true`, and the verb's own DISCONNECTED write afterwards is dropped by the
+  // broadcaster's de-dup, leaving the corrected view unannounced. The wiring consults this to skip
+  // the engine-driven DISCONNECTED for the instance being torn down; the verb announces it after the
+  // eviction. Identity-keyed, never on the id alone: a replacement engine from a concurrent start()
+  // must still announce, and a mark outliving a refused verb must not mute a later real disconnect.
+  private readonly operatorTeardowns = new Map<string, IWhatsAppEngine>();
+
   // The ONE-SHOT budget for an automatic stuck-auth credential reset, hoisted out of the adapter
   // instance and keyed by session id. recoverFromStuckAuth() (a generation that authenticated but
   // never reached readiness) claims this synchronously before it wipes LocalAuth; a claim returns true
@@ -319,6 +330,7 @@ export class SessionEngineLifecycle {
     // promise and add settlement hops the retirement-race specs assert against).
     this.wiringHost = {
       isLiveEngine: (id, engine) => this.isLiveEngine(id, engine),
+      isOperatorTeardown: (id, engine) => this.operatorTeardowns.get(id) === engine,
       ownsSession: id => this.ownsSession(id),
       handleEngineReady: (id, engine, phone, pushName) => this.handleEngineReady(id, engine, phone, pushName),
       rejectRebind: (id, engine, sessionName, previousPhone, incomingPhone) =>
@@ -380,6 +392,7 @@ export class SessionEngineLifecycle {
       purgeAuthDirsIfDeleted: id => this.purgeAuthDirsIfDeleted(id),
       updateStatus: (id, status) => this.updateStatus(id, status),
       stoppingSessions: this.stoppingSessions,
+      operatorTeardowns: this.operatorTeardowns,
       reconnectStates: this.reconnectStates,
       stuckAuthRecoveryUsed: this.stuckAuthRecoveryUsed,
       initializingSessions: this.initializingSessions,

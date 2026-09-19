@@ -271,20 +271,36 @@ export function Templates() {
                   const templatePlaceholders = extractPlaceholders(template);
                   const isSelected = editingTemplate?.id === template.id;
                   return (
-                    <button
+                    <div
                       key={template.id}
-                      className={`template-list-item ${isSelected ? 'selected' : ''}`}
-                      onClick={() => openEdit(template)}
-                      type="button"
+                      className={`template-list-row ${canWrite ? 'deletable' : ''}`}
+                      role="listitem"
                     >
-                      <span className="template-list-title">{template.name}</span>
-                      <span className="template-list-body">{template.body}</span>
-                      <span className="template-list-meta">
-                        {templatePlaceholders.length > 0
-                          ? templatePlaceholders.map(key => `{{${key}}}`).join(' ')
-                          : t('templates.noPlaceholders')}
-                      </span>
-                    </button>
+                      <button
+                        className={`template-list-item ${isSelected ? 'selected' : ''}`}
+                        onClick={() => openEdit(template)}
+                        type="button"
+                      >
+                        <span className="template-list-title">{template.name}</span>
+                        <span className="template-list-body">{template.body}</span>
+                        <span className="template-list-meta">
+                          {templatePlaceholders.length > 0
+                            ? templatePlaceholders.map(key => `{{${key}}}`).join(' ')
+                            : t('templates.noPlaceholders')}
+                        </span>
+                      </button>
+                      {canWrite && (
+                        <button
+                          className="icon-btn danger template-list-delete"
+                          title={t('common.delete')}
+                          aria-label={t('common.delete')}
+                          onClick={() => setDeleteTarget(template)}
+                          type="button"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
                   );
                 })}
               </div>

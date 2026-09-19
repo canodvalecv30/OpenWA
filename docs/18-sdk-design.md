@@ -327,10 +327,10 @@ Media bodies share the `SendMediaRequest` shape: `{ chatId, url? | base64?, mime
 
 #### `calls`
 
-| Method       | Signature                       | Description                                                                                  |
-| ------------ | ------------------------------- | -------------------------------------------------------------------------------------------- |
-| `rejectCall` | `rejectCall(sessionId, callId)` | Reject a ringing incoming call (`callId` comes from the `call.received` event). **OPERATOR** |
-| `createLink` | `createLink(sessionId, body)`   | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**      |
+| Method       | Signature                       | Description                                                                                                                                   |
+| ------------ | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rejectCall` | `rejectCall(sessionId, callId)` | Reject a ringing incoming call (`callId` comes from the `call.received` event). **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `createLink` | `createLink(sessionId, body)`   | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**                                                       |
 
 #### `media`
 
@@ -696,10 +696,10 @@ Resources are accessed as properties on the client (e.g. `client.messages`). All
 
 #### `client.calls`
 
-| Method        | Signature                                           | Description                                                                             |
-| ------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `reject_call` | `reject_call(session_id, call_id) -> SuccessResult` | Reject a ringing incoming call. **OPERATOR**                                            |
-| `create_link` | `create_link(session_id, body) -> CallLinkResponse` | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR** |
+| Method        | Signature                                           | Description                                                                                   |
+| ------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `reject_call` | `reject_call(session_id, call_id) -> SuccessResult` | Reject a ringing incoming call. **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `create_link` | `create_link(session_id, body) -> CallLinkResponse` | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**       |
 
 #### `client.media`
 
@@ -1040,10 +1040,10 @@ All payloads are associative arrays; all listed methods are synchronous and retu
 
 #### `calls`
 
-| Method       | Signature                                              | Description                                                                                  |
-| ------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `rejectCall` | `rejectCall(string $sessionId, string $callId): array` | Reject a ringing incoming call (404 when it is not found or no longer ringing). **OPERATOR** |
-| `createLink` | `createLink(string $sessionId, array $body): array`    | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**      |
+| Method       | Signature                                              | Description                                                                                                                                   |
+| ------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rejectCall` | `rejectCall(string $sessionId, string $callId): array` | Reject a ringing incoming call (404 when it is not found or no longer ringing). **Baileys only**: whatsapp-web.js answers `501`. **OPERATOR** |
+| `createLink` | `createLink(string $sessionId, array $body): array`    | Create a shareable WhatsApp call link (`startTime` is epoch MILLISECONDS). **OPERATOR**                                                       |
 
 #### `media`
 

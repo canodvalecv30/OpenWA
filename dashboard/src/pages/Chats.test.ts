@@ -504,6 +504,30 @@ test('a typed draft survives closing and reopening the room', async () => {
   assert.equal(input.value, 'draft survives');
 });
 
+test('Escape closes the open room, and is left alone while a dialog owns it', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  const { container } = renderChats();
+
+  await screen.findByText('Main (15551234567)');
+  fireEvent.click(await screen.findByText('Alice'));
+  await within(container.querySelector('.room-messages') as HTMLElement).findByText('hello from alice');
+
+  // A modal owns Escape while it is open: the room must survive it, or closing a dialog would also
+  // throw away the conversation behind it.
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  document.body.appendChild(dialog);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  assert.ok(screen.queryByRole('button', { name: 'Back' }), 'Escape closed the room while a dialog was open');
+
+  dialog.remove();
+  fireEvent.keyDown(document, { key: 'Escape' });
+  await waitFor(() =>
+    assert.equal(screen.queryByRole('button', { name: 'Back' }), null, 'Escape did not close the room'),
+  );
+});
+
 // Stage a file in the open room and wait for the preview banner. A non-image type is used on
 // purpose: the image branch calls URL.createObjectURL, which JSDOM does not implement.
 //

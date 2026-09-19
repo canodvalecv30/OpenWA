@@ -1161,6 +1161,7 @@ curl -X POST "$BASE/api/sessions/$SESSION_ID/webhooks" \
     "filters": {
       "conditions": [
         { "field": "sender", "operator": "is", "value": ["1234567890@c.us"] },
+        { "field": "chatId", "operator": "is", "value": ["120363000000000000@g.us"] },
         { "field": "body", "operator": "contains", "value": "invoice" }
       ]
     },

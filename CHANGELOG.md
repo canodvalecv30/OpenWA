@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Webhook and automation filters accept a `chatId` condition, so a webhook can be scoped to specific groups or chats instead of only to a sender ([#1634](https://github.com/rmyndharis/OpenWA/issues/1634)). Thanks @krishshah9944.
+- The dashboard Templates list has a delete button on each row, so a template can be deleted without opening it in the editor first. Like the editor's delete button, it shows only for keys that can write templates. Thanks @C24212.
+- On the dashboard Chats page, Escape closes the open chat, channel or status viewer and returns to the list. It leaves the key alone while a dialog, a menu or the media viewer is open, since those handle Escape themselves. Thanks @C24212.
+
 ### Changed
 
 - The PostgreSQL data connection is pinned to UTC: parameters bind as UTC, naive timestamps read back as UTC, every pooled connection sets its session `TimeZone`, and boot fails when the effective zone is not UTC year round.
@@ -14,14 +20,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys sessions no longer drop the inbound messages WhatsApp queued while they were down. The offline replay is tagged `append`, which the upsert handler treated as history and skipped for anything older than the reconnect, so every message sent during an outage was never stored and never dispatched ([#1660](https://github.com/rmyndharis/OpenWA/issues/1660)). Thanks @fransarni for the report.
+- A whatsapp-web.js session that comes up without its page-side call hook says so in the log instead of silently never reporting an incoming call. The hook is installed last in the same page evaluate as the message listeners, so the session stays healthy for messages either way ([#1655](https://github.com/rmyndharis/OpenWA/issues/1655)).
+- Stopping, unlinking or force-killing a session announces `session.status: disconnected` after the engine is released, not while it is still tearing down, so a dashboard tab or a webhook consumer no longer learns the session is down in the one moment the API still reports its engine as loaded. On whatsapp-web.js that window lasted as long as Chromium took to close, and left an open QR modal on a dead code with the started actions still offered ([#1649](https://github.com/rmyndharis/OpenWA/issues/1649)).
+- The dashboard blanks a session's displayed QR code as soon as the session disconnects, so a code minted by a connection that is gone is never left on screen to be scanned ([#1649](https://github.com/rmyndharis/OpenWA/issues/1649)).
+- A pairing-code request whose retry budget runs out on a reloading WhatsApp Web page answers `503` instead of `500`, so a client can tell a retryable transport failure from a broken gateway ([#1654](https://github.com/rmyndharis/OpenWA/issues/1654)).
+- A re-delivery of an already-persisted ingress event is answered with the route's declared ack, the same response the first delivery received, instead of a hardcoded `200 duplicate` that bypassed the ack entirely. A provider that validates the ack no longer fails on the retry path dedup exists for ([#1638](https://github.com/rmyndharis/OpenWA/issues/1638)).
+- The `session-alive` preflight's `503` carries a `Retry-After`, so a provider that retries a 503 only when that header is present comes back instead of failing the call; the rejection writes no dedup row, so the retry is treated as a new delivery ([#1639](https://github.com/rmyndharis/OpenWA/issues/1639)).
+- A `429` from a rate-limit window carries a plain `Retry-After` in seconds alongside the existing `Retry-After-<window>`, which no HTTP client reads. The suffixed names stay, since they are what identify which window shed the request ([#1639](https://github.com/rmyndharis/OpenWA/issues/1639)).
+- An ingress route's declared ack `content-type` reaches the provider instead of being overwritten with `text/plain`, so a provider that requires `application/json` on a 200 or 202 accepts the ack; a type a browser could execute is still forced to `text/plain` ([#1637](https://github.com/rmyndharis/OpenWA/issues/1637)). Thanks @wesamdev for the report.
 - Restoring a data archive into PostgreSQL from a gateway that does not run in UTC no longer shifts every timestamp by the host offset, and no longer shifts it again on each further restore ([#1624](https://github.com/rmyndharis/OpenWA/issues/1624)).
 - Retention sweeps on PostgreSQL delete the rows their window names instead of taking up to the host's UTC offset of younger rows with them, and the `today` message counts cover the host's local day.
 - Session leases on PostgreSQL compare as instants across nodes in different time zones and across a daylight-saving change.
 - Live WebSocket sockets are re-validated against the API-key table once a minute, so a key deleted, revoked, expired or narrowed on another node or by a direct database write drops its sockets there too, and a socket that connected while its key was being revoked no longer keeps that authorization for the life of the connection ([#1625](https://github.com/rmyndharis/OpenWA/issues/1625)).
 - A WebSocket subscribe whose socket is evicted while it is in flight no longer registers its rooms after the disconnect.
+- The dashboard no longer opens a QR modal after a start that left the session without an engine.
+- A failed start in the dashboard that left no engine shows the gateway's error in a toast.
+- The dashboard closes a session's QR modal when the session fails, or disconnects with no engine left, instead of leaving it spinning.
+- The dashboard disables a session's Start and Reconnect buttons while its start request is in flight.
+- whatsapp-web.js sessions no longer report a call rejection that did not stop the call: the call reject route answers `501` and `autoRejectCalls` logs a failed auto-reject.
+- A Baileys session added to or joining a group emits `group.join`, as whatsapp-web.js already did.
+
+### Documentation
+
+- The pairing-code route, the phone-pairing example and the dashboard's phone tab warn that on whatsapp-web.js a code requested for a number that already has a linked session can end with WhatsApp unlinking that device; the capability matrix records the measurement ([#1653](https://github.com/rmyndharis/OpenWA/issues/1653)).
+- The docs and the OpenAPI field descriptions scope `maxReconnectAttempts` and `reconnectBaseDelay` to the gateway's own reconnect: on Baileys that is only the reconnect after a logged-out close, since the engine retries every other drop itself, with a fixed 1s to 60s backoff and no attempt cap ([#1651](https://github.com/rmyndharis/OpenWA/issues/1651)).
+- The docs, the README, the OpenAPI field descriptions and the dashboard's auto-reject hint mark call rejection, `autoRejectCalls` and the call outcome events as Baileys only, and `call.received` as not reliable on whatsapp-web.js ([#1118](https://github.com/rmyndharis/OpenWA/discussions/1118)). Thanks @etondeengole for the report.
 
 ### Upgrade notes (behavior changes)
 
+- A repeat ingress delivery is no longer distinguishable by its response. A route with no declared `response` answers `202 accepted` where it answered `200 duplicate`, and a route with a declared ack answers that ack, including a non-2xx one, so a provider retrying such a route no longer stops after the first retry. The `ingress_events` dedup row remains the record of which deliveries were repeats.
+- A client that honours `Retry-After` now sees one on every rate-limit `429`, where before it saw only the suffixed `Retry-After-<window>` and typically ignored it. When the `long` window sheds a request that value can be up to an hour, so a client that sleeps for it will now wait rather than retry immediately.
 - PostgreSQL deployments: the data connection issues `SET TIME ZONE 'UTC'` per connection and verifies the result at boot. A deployment where that cannot hold (a pooler that drops session state) now fails to start, naming the effective zone; set the default instead with `ALTER DATABASE "<database>" SET TimeZone='UTC'`. SQLite deployments, and any gateway already running in UTC, are unaffected and no data moves.
 - PostgreSQL deployments whose **gateway** ran outside UTC before this release: the twelve columns the app writes itself hold that host's local wall time and now read as UTC, so they appear shifted by the offset. They are `sessions.connectedAt`, `sessions.lastActiveAt`, `sessions.claimedAt`, `sessions.leaseExpiresAt`, `webhooks.lastTriggeredAt`, `webhook_outbox_events.lastAttemptAt`, `ingress_events.lastDispatchAt`, `message_batches.started_at`, `message_batches.completed_at`, `lid_mappings.updatedAt`, `chat_states.updatedAt` and `baileys_stored_messages.createdAt`. The last three carry a `DEFAULT now()` that never fires, because their only writer passes the value. With the gateway stopped, convert each with the host's old zone, which resolves daylight saving per row: `UPDATE sessions SET "connectedAt" = ("connectedAt" AT TIME ZONE 'Asia/Jakarta') AT TIME ZONE 'UTC' WHERE "connectedAt" IS NOT NULL;`. `claimedAt` and `leaseExpiresAt` are cluster runtime state: clear them, do not convert them, with every node stopped and before the first start on this release, or the lease reads shifted by the old offset and the session is unusable until it lapses. East of UTC it reads hours into the future, so every node treats the session as held elsewhere and `POST /sessions/{id}/start` answers `409`; west of UTC it reads already lapsed, so a peer can adopt a session that is still running. `UPDATE sessions SET "nodeId" = NULL, "claimedAt" = NULL, "leaseExpiresAt" = NULL, "nodeUrl" = NULL;`. Leaving `lid_mappings.updatedAt` and `chat_states.updatedAt` unconverted also mis-ranks the boot preload of both caches, which orders by that column under a cap.
 - The remaining eighteen `createdAt`/`updatedAt` columns are written by PostgreSQL itself (`DEFAULT now()`) in the **server's** zone, not the gateway's. On a UTC server, which is the image default and what the bundled Compose file starts, they are already correct and must not be converted; convert them only if the server itself ran outside UTC, with the server's old zone.
@@ -30,9 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-export after upgrading for an archive whose stamps are the instants they claim; restoring a pre-release archive carries its shift in as it is.
 - A WebSocket client can now be disconnected with an `UNAUTHORIZED` frame up to a minute after its key changed, where before only the node that processed the change disconnected it; reconnect and resubscribe on that frame. A rename, and the key's usage counters, evict nobody.
 - A caller-supplied URL leaves through the session proxy from this release. Set `SESSION_PROXY_URL_FETCH=false` when a session proxy is a WhatsApp-only route that cannot reach arbitrary media hosts.
+- whatsapp-web.js: `POST /api/sessions/{sessionId}/calls/{callId}/reject` answers `501` instead of a `200` that did not stop the call from ringing.
 
 ### Security
 
+- `adm-zip` moves to `0.6.1`, which bounds the memory a declared uncompressed size can ask for (GHSA-7q85-xj36-vmfc) and stops extraction following symlinks out of the target directory. The plugin installer reads entries one at a time under its own byte cap rather than extracting the archive, so neither vector was reachable there.
 - Baileys sessions with a SOCKS4 proxy fetch through it instead of connecting direct: inbound media, the WhatsApp Web version lookup, the initial-sync payloads and a product card's image URL, which 0.23.5 routed through HTTP, HTTPS and SOCKS5 proxies only ([#1626](https://github.com/rmyndharis/OpenWA/issues/1626)).
 - A media URL passed to a send route or to `POST /api/sessions/{sessionId}/media/convert`, and the link preview of a text send, are fetched through the named session's egress proxy on both engines, instead of leaving from the gateway's own address ([#1626](https://github.com/rmyndharis/OpenWA/issues/1626)).
 
@@ -122,7 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The amd64 image moves from Chrome for Testing 146 to 153, so every amd64 rollback to 0.23.4 or earlier crosses a browser major; the arm64 image runs the chromium Debian ships at build time, whose major can differ between releases.
 - A `LOG_LEVEL` other than `error`, `warn`, `info`, `debug` or `verbose` now stops the boot instead of logging at info.
 - Multi-node deployments run the lapsed-status correction even with `AUTO_START_SESSIONS` off, so every node needs a synced clock and, on PostgreSQL, one time zone without daylight saving (`TZ=UTC` recommended); otherwise live sessions can be marked disconnected (see `docs/13-horizontal-scaling.md`).
-- A session with an explicit `maxReconnectAttempts` now stops in `failed` once those attempts run out during an outage; before, a limit above about 6 at the default base delay was never reached and the session retried indefinitely.
+- A session with an explicit `maxReconnectAttempts` now stops in `failed` once the gateway's reconnect attempts run out during an outage; before, a limit above about 6 at the default base delay was never reached and the session retried indefinitely. On Baileys this covers only the reconnect after a logged-out close: every other drop is retried inside the engine, with its own backoff and no cap.
 - A dashboard or client signed in with a `VIEWER` key no longer receives the pairing QR over the `/events` WebSocket, matching the OPERATOR role `GET /api/sessions/{sessionId}/qr` already required.
 - Installing from source now needs Node.js 22.19 or newer; the published Docker image is unaffected.
 - Python SDK: `ChatHistoryMessage` marks the keys the contract always sends as required and narrows `type` and `kind` to literals, so a hand-built partial dict or a plain `str` assigned to either no longer type-checks.

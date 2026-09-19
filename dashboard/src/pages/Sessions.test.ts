@@ -97,6 +97,9 @@ function resetFetchCalls(): void {
   proxyGetFails = false;
   sessionListFailures = 0;
   distinctFailureMessages = false;
+  startFailure = null;
+  startGate = null;
+  startResult = null;
 }
 
 function findFetchCall(method: string, path: string): FetchCall | undefined {
@@ -104,9 +107,9 @@ function findFetchCall(method: string, path: string): FetchCall | undefined {
 }
 
 // URL router for every endpoint the page can reach. Anything else 404s loudly instead of resolving
-// into a confusing downstream failure. Lifecycle actions (start/stop/logout/force-kill/pairing-code)
-// are stubbed generically even though none of the three cases below trigger them, per the brief's
-// endpoint list — a future case exercising them should not need to touch this stub.
+// into a confusing downstream failure. Lifecycle actions (start/stop/logout/force-kill) share one stub
+// that answers with a stopped row; `startFailure`, `startResult` and `startGate` below change how a start
+// answers.
 // Mutable so a test can set the starting value and observe what a PATCH wrote back.
 let sessionConfig = { autoRejectCalls: false, maxReconnectAttempts: null as number | null, reconnectBaseDelay: 5000 };
 let configPatchFails = false;
@@ -115,6 +118,14 @@ let proxyGetFails = false;
 let sessionListFailures = 0;
 // Whether each failed read carries its own message, as a 502, a 504 and a dropped connection do.
 let distinctFailureMessages = false;
+// When set, POST .../start answers with this error, first applying `leaves` to the session's row: the
+// state the gateway was left in, which is what the page reads back after the failure.
+let startFailure: { status: number; message: string; leaves?: Partial<Session> } | null = null;
+// When set, a successful POST .../start answers with the session's row merged with `answer`, and applies
+// `leaves` (by default `answer` itself) to the row the page reads back, instead of answering a stopped row.
+let startResult: { answer: Partial<Session>; leaves?: Partial<Session> } | null = null;
+// When set, POST .../start answers, whichever way it answers, only once this settles.
+let startGate: Promise<void> | null = null;
 let sessionProxy = {
   enabled: false,
   proxyType: null as string | null,
@@ -224,7 +235,21 @@ function installFetchStub(): void {
     if (method === 'POST' && lifecycleMatch) {
       const found = SESSIONS.find(s => s.id === lifecycleMatch[1]);
       const base = found ?? SESSION_STALE_ENGINE;
-      return Promise.resolve(jsonResponse({ ...base, status: 'disconnected', engineLoaded: false }));
+      const isStart = lifecycleMatch[2] === 'start';
+      const answer = (): Response => {
+        if (isStart && startFailure) {
+          if (found) Object.assign(found, startFailure.leaves);
+          return jsonResponse({ message: startFailure.message }, startFailure.status);
+        }
+        if (isStart && startResult) {
+          const answered = { ...base, ...startResult.answer };
+          if (found) Object.assign(found, startResult.leaves ?? startResult.answer);
+          return jsonResponse(answered);
+        }
+        return jsonResponse({ ...base, status: 'disconnected', engineLoaded: false });
+      };
+      if (isStart && startGate) return startGate.then(answer);
+      return Promise.resolve(answer());
     }
 
     return Promise.resolve(jsonResponse({ message: `unstubbed ${method} ${path}` }, 404));
@@ -429,6 +454,26 @@ test('a typed pairing phone number survives toggling to the QR tab and back', as
   );
 });
 
+// Nothing server-side refuses a pairing code for a number linked elsewhere, so the panel has to say
+// what it can cost before the operator types one.
+test('the phone pairing tab warns that a code can unlink an existing session', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  renderSessions();
+
+  await screen.findByText('new-device');
+  const qrCard = screen.getByText('new-device').closest('.session-card') as HTMLElement;
+  fireEvent.click(within(qrCard).getByRole('button', { name: 'Show QR' }));
+  await screen.findByAltText('QR');
+
+  fireEvent.click(screen.getByRole('tab', { name: 'Link with Phone Number' }));
+
+  assert.ok(
+    screen.getByText(/can make WhatsApp unlink that device/i),
+    'the phone pairing tab offered a code with no warning',
+  );
+});
+
 test('stopping a session dismisses its own open QR modal', async () => {
   const { screen, fireEvent, within, waitFor } = rtl;
   resetFetchCalls();
@@ -479,6 +524,324 @@ test('Reconnect on a qr_ready card with no engine loaded starts the session', as
     await waitFor(() => {
       assert.ok(findFetchCall('POST', '/api/sessions/sess-orphan-1/start'), 'expected a POST to the start endpoint');
     });
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+test('a start that answers with its engine up opens the QR modal', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  startResult = { answer: { status: 'initializing', engineLoaded: true } };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-started-1', name: 'started', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('started')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+
+    await screen.findByRole('dialog');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A start can answer 200 with an engine that is gone by the time the list is read back: a stop that landed
+// while it ran retires it, and an engine can fail right after answering. The re-read decides, not the
+// answer, since a QR modal over that session could only spin.
+test('a start whose re-read shows no engine opens no QR modal', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  startResult = {
+    answer: { status: 'initializing', engineLoaded: true },
+    leaves: { status: 'created', engineLoaded: false },
+  };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-retired-1', name: 'retired', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('retired')).closest('.session-card') as HTMLElement;
+    const startButton = (): HTMLButtonElement => within(card).getByRole('button', { name: 'Start' });
+    fireEvent.click(startButton());
+    // The button is released in the same update that would open the modal, so once it is enabled again
+    // the handler has finished and the modal's state is settled.
+    await waitFor(() => assert.ok(findFetchCall('POST', '/api/sessions/sess-retired-1/start')));
+    await waitFor(() => assert.ok(!startButton().disabled));
+    assert.ok(!screen.queryByRole('dialog'), 'a QR modal opened for a start that left no engine');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A failed re-read says nothing about the engine, so a start the gateway accepted still opens the modal.
+test('a start whose re-read fails still opens the QR modal', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  startResult = {
+    answer: { status: 'initializing', engineLoaded: true },
+    leaves: { status: 'created', engineLoaded: false },
+  };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-unread-1', name: 'unread', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('unread')).closest('.session-card') as HTMLElement;
+    sessionListFailures = 1;
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+
+    await screen.findByRole('dialog');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A start refused before any engine exists (the concurrency cap) leaves no engine behind. A QR modal
+// opened over that session can only spin, since its poll waits for a qr_ready that never comes, and the
+// refusal itself is recorded nowhere the operator could find it.
+test('a start refused without an engine shows the error instead of a QR modal', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  startFailure = { status: 400, message: 'Maximum concurrent sessions reached (1)' };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-capped-1', name: 'capped', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('capped')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+
+    const alert = await screen.findByRole('alert');
+    assert.ok(alert.classList.contains('toast-error'), 'the start failure was not shown as an error toast');
+    within(alert).getByText('Start Failed');
+    within(alert).getByText('Maximum concurrent sessions reached (1)');
+    await waitFor(() => {
+      assert.ok(findFetchCall('POST', '/api/sessions/sess-capped-1/start'));
+    });
+    assert.ok(!screen.queryByRole('dialog'), 'a QR modal opened for a session with no engine');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A reverse proxy can time out a start the gateway is still carrying out. The engine is registered, so
+// the QR modal is still where the operator should wait.
+test('a start that errors while its engine is coming up still opens the QR modal', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  startFailure = {
+    status: 504,
+    message: 'Gateway Timeout',
+    leaves: { status: 'initializing', engineLoaded: true },
+  };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-slow-1', name: 'slow-start', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('slow-start')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+
+    await screen.findByRole('dialog');
+    assert.ok(!screen.queryByRole('alert'), 'a start still in flight was reported as failed');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// The toast carries what the gateway answered for THIS start. The row's lastError is left to the card:
+// it can be the terse cause behind a diagnostic 504, or a reason left from an earlier attempt.
+test('a failed start reports the gateway answer, not the row lastError', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  startFailure = {
+    status: 504,
+    message: 'WhatsApp Web authentication timed out.',
+    leaves: { status: 'failed', engineLoaded: false, lastError: 'auth timeout' },
+  };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-nolaunch-1', name: 'no-launch', status: 'created', engineLoaded: false });
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('no-launch')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+
+    const alert = await screen.findByRole('alert');
+    within(alert).getByText('WhatsApp Web authentication timed out.');
+    assert.ok(!within(alert).queryByText('auth timeout'), 'the toast showed the row lastError');
+    assert.ok(!screen.queryByRole('dialog'), 'a QR modal opened for a session with no engine');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A start can wait seconds before its engine exists (a logout teardown still settling), with nothing on
+// the card to show it. A second click would be refused as "already starting" while the first succeeds.
+test('Start and Reconnect stay disabled while that session start is in flight', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  let release: () => void = () => undefined;
+  startGate = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  SESSIONS.push(
+    { ...SESSION_QR, id: 'sess-pending-1', name: 'pending-start', status: 'created', engineLoaded: false },
+    { ...SESSION_QR, id: 'sess-pending-2', name: 'pending-reconnect', status: 'failed', engineLoaded: false },
+  );
+  const starts = (id: string): number =>
+    fetchCalls.filter(c => c.method === 'POST' && c.path === `/api/sessions/${id}/start`).length;
+  try {
+    renderSessions();
+
+    const startCard = (await screen.findByText('pending-start')).closest('.session-card') as HTMLElement;
+    const reconnectCard = screen.getByText('pending-reconnect').closest('.session-card') as HTMLElement;
+    const startButton = (): HTMLButtonElement => within(startCard).getByRole('button', { name: 'Start' });
+    const reconnectButton = (): HTMLButtonElement => within(reconnectCard).getByRole('button', { name: 'Reconnect' });
+
+    fireEvent.click(startButton());
+    await waitFor(() => assert.ok(startButton().disabled, 'Start stayed clickable during its start'));
+    assert.ok(!reconnectButton().disabled, 'a start disabled another session');
+    fireEvent.click(startButton());
+    assert.equal(starts('sess-pending-1'), 1);
+
+    fireEvent.click(reconnectButton());
+    await waitFor(() => assert.ok(reconnectButton().disabled, 'Reconnect stayed clickable during its start'));
+
+    release();
+    await waitFor(() =>
+      assert.ok(!startButton().disabled && !reconnectButton().disabled, 'a button stayed disabled after its start'),
+    );
+  } finally {
+    SESSIONS.pop();
+    SESSIONS.pop();
+  }
+});
+
+function pushSessionStatus(sessionId: string, status: string): void {
+  const socket = lastSocket();
+  assert.ok(socket, 'expected the page to have opened a socket');
+  rtl.act(() => {
+    socket.receive('message', {
+      type: 'event',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      payload: { event: 'session.status', sessionId, data: { status } },
+    });
+  });
+}
+
+// Every FAILED write evicts the engine, so the modal can never show a code again. Covers a start that
+// returned 200 and failed afterwards, which is the only way a QR-stage failure surfaces on Baileys.
+test('a failed status push closes that session QR modal', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  renderSessions();
+
+  const card = (await screen.findByText('new-device')).closest('.session-card') as HTMLElement;
+  fireEvent.click(within(card).getByRole('button', { name: 'Show QR' }));
+  await screen.findByAltText('QR');
+
+  pushSessionStatus(SESSION_STALE_ENGINE.id, 'failed');
+  assert.ok(screen.queryByRole('dialog'), "another session's failure closed this QR modal");
+
+  pushSessionStatus(SESSION_QR.id, 'failed');
+
+  await waitFor(() => assert.ok(!screen.queryByRole('dialog'), 'the QR modal stayed open after its session failed'));
+});
+
+// `disconnected` covers both an engine inside its reconnect backoff and one that is gone, so the modal
+// closes only once the re-read says there is no engine.
+test('a disconnected push closes the QR modal once the re-read shows no engine', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  const row: Session = { ...SESSION_QR, id: 'sess-dropped-1', name: 'dropped', status: 'qr_ready', engineLoaded: true };
+  SESSIONS.push(row);
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('dropped')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Show QR' }));
+    await screen.findByAltText('QR');
+
+    Object.assign(row, { status: 'disconnected', engineLoaded: false });
+    pushSessionStatus(row.id, 'disconnected');
+
+    await waitFor(() => assert.ok(!screen.queryByRole('dialog'), 'the QR modal stayed open with no engine left'));
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+test('a disconnected push keeps the QR modal while the engine is still registered', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  const row: Session = { ...SESSION_QR, id: 'sess-backoff-1', name: 'backoff', status: 'qr_ready', engineLoaded: true };
+  SESSIONS.push(row);
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('backoff')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Show QR' }));
+    await screen.findByAltText('QR');
+
+    row.status = 'disconnected';
+    pushSessionStatus(row.id, 'disconnected');
+
+    // The push drops engineLoaded, so the card offers Start until the re-read restores it and brings Stop
+    // back: once Stop is there, the re-read has been applied.
+    await within(card).findByRole('button', { name: 'Stop' });
+    assert.ok(screen.queryByRole('dialog'), 'the QR modal closed while the engine was still registered');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// The code on screen belongs to the connection that just dropped, so it is cleared even when the
+// modal stays: the engine reconnects and pushes a fresh one, and a dead code must not be scannable
+// in the meantime.
+test('a disconnected push blanks the displayed QR code', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  const row: Session = { ...SESSION_QR, id: 'sess-blank-1', name: 'blanked', status: 'qr_ready', engineLoaded: true };
+  SESSIONS.push(row);
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('blanked')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Show QR' }));
+    await screen.findByAltText('QR');
+
+    row.status = 'disconnected';
+    pushSessionStatus(row.id, 'disconnected');
+
+    await waitFor(() => assert.ok(!screen.queryByAltText('QR'), 'the dead QR code stayed on screen'));
+    assert.ok(screen.queryByRole('dialog'), 'the QR modal closed while the engine was still registered');
+  } finally {
+    SESSIONS.pop();
+  }
+});
+
+// A re-read that fails says nothing about the engine, so the modal stays.
+test('a disconnected push keeps the QR modal when the re-read fails', async () => {
+  const { screen, fireEvent, within, act } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  const row: Session = { ...SESSION_QR, id: 'sess-unknown-1', name: 'unknown', status: 'qr_ready', engineLoaded: true };
+  SESSIONS.push(row);
+  try {
+    renderSessions();
+
+    const card = (await screen.findByText('unknown')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Show QR' }));
+    await screen.findByAltText('QR');
+
+    sessionListFailures = 1;
+    pushSessionStatus(row.id, 'disconnected');
+
+    await screen.findByText('gateway unavailable');
+    // Let the re-read's continuation run and any state it sets render before looking.
+    await act(() => new Promise<void>(resolve => setTimeout(resolve, 0)));
+    assert.ok(screen.queryByRole('dialog'), 'the QR modal closed on a re-read that failed');
   } finally {
     SESSIONS.pop();
   }

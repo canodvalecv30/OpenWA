@@ -305,7 +305,7 @@
       "created": "Erstellt",
       "lastActive": "Zuletzt aktiv",
       "autoRejectCalls": "Anrufe automatisch ablehnen",
-      "autoRejectCallsHint": "Eingehende Anrufe werden abgelehnt, sobald sie klingeln. Der Webhook call.received wird trotzdem zuerst ausgelöst. Gilt ab dem nächsten Anruf — kein Neustart nötig."
+      "autoRejectCallsHint": "Eingehende Anrufe werden abgelehnt, sobald sie klingeln. Der Webhook call.received wird trotzdem zuerst ausgelöst. Gilt ab dem nächsten Anruf — kein Neustart nötig. Nur mit der Baileys-Engine: whatsapp-web.js kann keine Anrufe ablehnen."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -379,6 +379,7 @@
       "phoneLabel": "Telefonnummer",
       "phonePlaceholder": "z. B. 491701234567",
       "phoneHint": "Nur Ziffern im internationalen Format (Ländervorwahl + Nummer), ohne +, Leerzeichen oder Bindestriche.",
+      "relinkWarning": "Auf der whatsapp-web.js-Engine kann eine Code-Anfrage für eine Nummer, die bereits eine verknüpfte Sitzung hat, dazu führen, dass WhatsApp dieses Gerät trennt. Nutze den QR-Tab, wenn diese Sitzung aktiv bleiben muss.",
       "invalidPhone": "Gib eine gültige Telefonnummer ein: 6–15 Ziffern, zuerst die Ländervorwahl, keine Sonderzeichen.",
       "generateButton": "Kopplungscode erstellen",
       "generating": "Kopplungscode wird erstellt...",
@@ -393,7 +394,8 @@
     },
     "start": {
       "teardownPendingTitle": "Sitzung wird gestartet",
-      "teardownPending": "Ein Anmeldedatenabbau für diese Sitzung läuft noch. Warten Sie einen Moment und versuchen Sie es erneut."
+      "teardownPending": "Ein Anmeldedatenabbau für diese Sitzung läuft noch. Warten Sie einen Moment und versuchen Sie es erneut.",
+      "errorTitle": "Start fehlgeschlagen"
     },
     "restriction": {
       "reachout_timelock": "Neue Chats blockiert",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "Absender",
         "recipient": "Empfänger",
+        "chatId": "Chat-ID",
         "body": "Nachrichteninhalt",
         "type": "Nachrichtentyp",
         "isGroup": "Ist Gruppenchat",

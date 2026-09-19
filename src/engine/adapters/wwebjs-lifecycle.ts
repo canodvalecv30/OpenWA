@@ -8,6 +8,7 @@ import {
   EngineStatus,
 } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { type createLogger } from '../../common/services/logger.service';
 import { MAX_TIMER_MS } from '../../config/configuration';
 import { resolveWebVersionPin } from '../wa-web-version';
@@ -16,6 +17,7 @@ import { killOrphanedChromiumProcesses, removeStaleSingletonFiles } from './chro
 import { isSupportedProxyUrl, buildProxyLaunchConfig } from './wwebjs-proxy';
 import { BACKPORT_MISSING_MESSAGE, isBackportMissing } from './wwebjs-backport-check';
 import { unappliedPatches, unappliedPatchesMessage } from './engine-patch-status';
+import { reportMissingCallHook } from './wwebjs-call-hook-check';
 import { type WhatsAppWebJsConfig } from './whatsapp-web-js.adapter';
 import { AUTH_FAILURE_REASON, STALE_PROFILE_ADVICE } from '../terminal-engine-failure';
 import { wwjsAuthDir } from '../auth-dir-paths';
@@ -122,7 +124,7 @@ export interface WwebjsLifecycleHost {
   /** Arm / disarm the onboarding-modal watcher (./wwebjs-onboarding). */
   startOnboardingWatcher(): void;
   clearOnboardingWatcher(): void;
-  /** Drop every cached live-call handle — the client they point at is going away. */
+  /** Drop every cached ringing call id: the client that saw those calls is going away. */
   clearLiveCalls(): void;
   /** Stand-in promise for the LocalAuth profile removal (./wwebjs-stuck-auth), routed through the
    *  adapter's own method so an instance-level replacement stays authoritative. */
@@ -706,8 +708,8 @@ export class WwebjsLifecycle {
   isPageTransportError(error: unknown): boolean {
     // An HttpException is never a dead page. It is an error THIS application constructed, and its
     // message carries caller-supplied text verbatim: MessageNotFoundError reads
-    // `Message ${messageId} not found in chat ${chatId}`, and GroupNotFoundError, LabelNotFoundError,
-    // ChannelNotFoundError and CallNotFoundError have the same shape. Matching the pattern against
+    // `Message ${messageId} not found in chat ${chatId}`, and GroupNotFoundError, LabelNotFoundError
+    // and ChannelNotFoundError have the same shape. Matching the pattern against
     // one of those hands the CALLER the classifier. A request naming a messageId of "Target closed"
     // made its own 404 read as a transport death: the session was torn down and reconnected, and the
     // caller got a 503. The reactions read needs no role at all, so the lowest-privilege key could
@@ -786,6 +788,17 @@ export class WwebjsLifecycle {
     // gets the companion unlinked (~5m later → disconnected: LOGOUT, #982). Dismiss it best-effort
     // and fall back to ACTION_REQUIRED. Started after READY so a non-ready session never arms it.
     this.host.startOnboardingWatcher();
+    // whatsapp-web.js installs its incoming-call hook as the LAST statement of the same page
+    // evaluate that registers the message listeners, and that evaluate has no try/catch: a module
+    // that stops resolving earlier in it leaves the message bridge live and the call hook absent.
+    // The session then looks healthy, keeps delivering messages, and reports no call at all. Warn
+    // once per ready rather than leaving that silent; nothing else changes, since only detection is
+    // lost. Fire-and-forget: a diagnostic must never delay or fail the promotion to READY.
+    void reportMissingCallHook(
+      (this.client as unknown as { pupPage?: { evaluate: <T>(fn: () => T) => Promise<T> } } | null)?.pupPage,
+      this.host.logger,
+      this.host.config.sessionId,
+    );
   }
 
   /** The single status-transition funnel: latches disconnectReported, fires the callback, re-emits
@@ -812,8 +825,7 @@ export class WwebjsLifecycle {
 
   private beginClientTeardown(): Client | null {
     this.tearingDown = true;
-    // Any cached call handle is dead once the client goes away — drop them all so a later
-    // rejectCall() reports not-found instead of acting on a destroyed page.
+    // The cached ringing call ids belong to the client that is going away, so drop them all.
     this.host.clearLiveCalls();
     // Before the clientless early-return: a teardown must always close the navigation window, or a
     // stale stamp could grace the next generation's probe (single-use contract notwithstanding).
@@ -1074,7 +1086,13 @@ export class WwebjsLifecycle {
         }
       }
     }
-    // Every attempt hit a transient navigation/timeout: surface the last one rather than a hang.
-    throw lastError;
+    // Every attempt hit a transient navigation/timeout, so the budget ran out on the transport rather
+    // than on anything the caller sent. Reported as EngineTransportError (503) so a caller reads it as
+    // retryable: a plain Error here surfaced as a 500, which says the gateway is broken and that
+    // retrying is pointless. The last attempt's reason rides along as the detail.
+    throw new EngineTransportError(
+      `Pairing code could not be generated after ${PAIRING_CODE_MAX_ATTEMPTS} attempts: ` +
+        `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
   }
 }

@@ -116,7 +116,7 @@ export function createProxyAgent(proxyUrl: string, connectTimeoutMs = PROXY_CONN
  * behind them (sock, status, reconnect counters, the lazily-loaded library). The adapter keeps the
  * public IWhatsAppEngine members as thin forwarders and injects this narrow host surface via
  * closures, so the delegate never touches adapter state directly; the two state fields the rest of
- * the adapter reads live (`sock`, `connectedAt`) are public here and aliased by adapter accessors.
+ * the adapter reads live (`sock`) are public here and aliased by adapter accessors.
  */
 export interface BaileysLifecycleHost {
   readonly logger: ReturnType<typeof createLogger>;
@@ -141,6 +141,7 @@ export interface BaileysLifecycleHost {
   logContactEvent: BaileysEvents['logContactEvent'];
   handleGroupParticipantsUpdate: BaileysEvents['handleGroupParticipantsUpdate'];
   handleGroupsUpdate: BaileysEvents['handleGroupsUpdate'];
+  handleGroupsUpsert: BaileysEvents['handleGroupsUpsert'];
   handleGroupJoinRequest: BaileysEvents['handleGroupJoinRequest'];
   handleCallEvents: BaileysEvents['handleCallEvents'];
   handlePresenceUpdate: BaileysEvents['handlePresenceUpdate'];
@@ -173,10 +174,6 @@ export class BaileysLifecycle {
   /** Live Baileys socket, null when disconnected. Public so the adapter's `sock` accessor can alias
    *  it (an unmodified spec pokes `adapter.sock` through a cast; delegate hosts read it live). */
   sock: WASocket | null = null;
-  /** Unix-seconds timestamp of the last 'open' connection.update, used to distinguish a genuinely
-   *  live message misfiled as 'append' (see BaileysEvents.handleMessagesUpsert) from real history backfill.
-   *  Public so the adapter can alias it for the events delegate's live read. */
-  connectedAt = 0;
   private status: EngineStatus = EngineStatus.DISCONNECTED;
   private qrCode: string | null = null;
   private phoneNumber: string | null = null;
@@ -302,7 +299,7 @@ export class BaileysLifecycle {
     }
 
     // An internal reconnect (transient drop) overwrites this.sock WITHOUT going through
-    // disconnect/logout/destroy, so the previous socket's WebSocket and the 15 ev listeners we
+    // disconnect/logout/destroy, so the previous socket's WebSocket and the 16 ev listeners we
     // register below would leak on every reconnect. Tear the prior socket down first. Detach OUR
     // connection.update listener BEFORE end(): Baileys' own end() synchronously emits a synthetic
     // connection.update {connection:'close'}, which — if still wired — would re-enter
@@ -322,6 +319,7 @@ export class BaileysLifecycle {
         previous.ev.removeAllListeners('lid-mapping.update');
         previous.ev.removeAllListeners('group-participants.update');
         previous.ev.removeAllListeners('groups.update');
+        previous.ev.removeAllListeners('groups.upsert');
         previous.ev.removeAllListeners('group.join-request');
         previous.ev.removeAllListeners('call');
         previous.ev.removeAllListeners('presence.update');
@@ -432,6 +430,7 @@ export class BaileysLifecycle {
     });
     sock.ev.on('group-participants.update', event => this.host.handleGroupParticipantsUpdate(event));
     sock.ev.on('groups.update', updates => this.host.handleGroupsUpdate(updates));
+    sock.ev.on('groups.upsert', groups => this.host.handleGroupsUpsert(groups));
     sock.ev.on('group.join-request', event => this.host.handleGroupJoinRequest(event));
     sock.ev.on('messaging-history.set', history => {
       this.host.upsertContacts(history.contacts);
@@ -505,10 +504,6 @@ export class BaileysLifecycle {
       this.pushName = this.sock?.user?.name ?? null;
       // I4: reset the reconnect counter on a successful connection.
       this.reconnectAttempts = 0;
-      // Small backward buffer for clock skew between this host and WhatsApp's server (messageTimestamp
-      // is WA's clock, Date.now() is ours) — without it, a message sent right at reconnect time could
-      // land a couple seconds "before" connectedAt and be misjudged as history.
-      this.connectedAt = Math.floor(Date.now() / 1000) - 10;
       this.setStatus(EngineStatus.READY);
       this.host.getOnReady()?.(this.phoneNumber ?? '', this.pushName ?? '');
       // WhatsApp only PUSHES a timelock when it changes, so a gateway that starts (or reconnects)

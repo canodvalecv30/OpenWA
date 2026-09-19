@@ -31,6 +31,7 @@ export interface SessionPairing {
   handleCloseQRModal: () => void;
   applyQrPush: (event: { sessionId: string; qrCode: string }) => void;
   dismissQrForSession: (sessionId: string) => void;
+  clearQrCodeForSession: (sessionId: string) => void;
 }
 
 /**
@@ -191,6 +192,14 @@ export function useSessionPairing({ sessions, sessionsRef, reloadSessions }: Use
     setQrData(current => (current?.sessionId === sessionId ? null : current));
   }, []);
 
+  // Blank the displayed code while keeping the modal open, for a disconnect whose engine is still
+  // registered (an engine-internal reconnect): the code on screen was minted by a connection that is
+  // now gone, so scanning it cannot work. The modal falls back to its loading state, and the poll
+  // fills it again once the session is back at `qr_ready` with a fresh code.
+  const clearQrCodeForSession = useCallback((sessionId: string) => {
+    setQrData(current => (current?.sessionId === sessionId ? { ...current, qrCode: '' } : current));
+  }, []);
+
   return {
     qrData,
     pairingMode,
@@ -206,5 +215,6 @@ export function useSessionPairing({ sessions, sessionsRef, reloadSessions }: Use
     handleCloseQRModal,
     applyQrPush,
     dismissQrForSession,
+    clearQrCodeForSession,
   };
 }

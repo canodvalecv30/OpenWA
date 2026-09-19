@@ -195,6 +195,40 @@ describe('evaluateFilters', () => {
     });
   });
 
+  describe('chatId (conversation scoping so a webhook can allowlist specific groups)', () => {
+    it('matches an explicit chatId on the payload', () => {
+      const f = filters({ field: 'chatId', operator: 'is', value: ['120@g.us'] });
+      expect(evaluateFilters(f, 'message.received', msg({ chatId: '120@g.us', from: 'part@c.us' }))).toBe(true);
+      expect(evaluateFilters(f, 'message.received', msg({ chatId: '999@g.us', from: 'part@c.us' }))).toBe(false);
+    });
+
+    // `from` is the sender on a DM and this session on an outbound message, so reading it as the
+    // conversation would scope the filter to the wrong chat. A payload without chatId matches
+    // nothing rather than guessing.
+    it('does not read from as the conversation when chatId is absent', () => {
+      const f = filters({ field: 'chatId', operator: 'is', value: ['120@g.us'] });
+      expect(
+        evaluateFilters(f, 'message.received', msg({ from: '120@g.us', author: 'part@c.us', isGroup: true })),
+      ).toBe(false);
+    });
+
+    it('supports isNot and multi-value allowlists', () => {
+      const allow = filters({ field: 'chatId', operator: 'is', value: ['120@g.us', '121@g.us'] });
+      expect(evaluateFilters(allow, 'message.received', msg({ chatId: '121@g.us' }))).toBe(true);
+      expect(evaluateFilters(allow, 'message.received', msg({ chatId: '999@g.us' }))).toBe(false);
+
+      const deny = filters({ field: 'chatId', operator: 'isNot', value: ['120@g.us'] });
+      expect(evaluateFilters(deny, 'message.received', msg({ chatId: '120@g.us' }))).toBe(false);
+      expect(evaluateFilters(deny, 'message.received', msg({ chatId: '999@g.us' }))).toBe(true);
+    });
+
+    it('scopes message.revoked / edited payloads that only carry chatId', () => {
+      const f = filters({ field: 'chatId', operator: 'is', value: ['120@g.us'] });
+      expect(evaluateFilters(f, 'message.revoked', { chatId: '120@g.us' })).toBe(true);
+      expect(evaluateFilters(f, 'message.edited', { chatId: '999@g.us', body: 'x' })).toBe(false);
+    });
+  });
+
   describe('kind (chat kind, so a channel can be singled out where isGroup cannot)', () => {
     // The reporter's case: a webhook subscribed to message.received also gets channel posts, and
     // isGroup=false cannot tell a channel from a 1:1 chat. `kind` rides the received payload.

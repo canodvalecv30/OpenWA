@@ -305,7 +305,7 @@
       "created": "Créé le",
       "lastActive": "Dernière activité",
       "autoRejectCalls": "Rejeter automatiquement les appels",
-      "autoRejectCallsHint": "Les appels entrants sont refusés dès qu'ils sonnent. Le webhook call.received est tout de même émis avant. S'applique au prochain appel — aucun redémarrage nécessaire."
+      "autoRejectCallsHint": "Les appels entrants sont refusés dès qu'ils sonnent. Le webhook call.received est tout de même émis avant. S'applique au prochain appel — aucun redémarrage nécessaire. Moteur Baileys uniquement : whatsapp-web.js ne peut pas refuser les appels."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -379,6 +379,7 @@
       "phoneLabel": "Numéro de téléphone",
       "phonePlaceholder": "ex. : 919876543210",
       "phoneHint": "Chiffres uniquement (sans +, espaces ni tirets) au format international (indicatif du pays + numéro).",
+      "relinkWarning": "Sur le moteur whatsapp-web.js, demander un code pour un numéro qui a déjà une session liée peut amener WhatsApp à dissocier cet appareil. Utilisez l'onglet QR si cette session doit rester active.",
       "invalidPhone": "Saisissez un numéro de téléphone valide : 6 à 15 chiffres, indicatif du pays en premier, sans symboles.",
       "generateButton": "Générer le code de liaison",
       "generating": "Génération du code de liaison...",
@@ -393,7 +394,8 @@
     },
     "start": {
       "teardownPendingTitle": "Démarrage de la session",
-      "teardownPending": "Un nettoyage d'identifiants pour cette session est encore en cours. Patientez un instant et réessayez."
+      "teardownPending": "Un nettoyage d'identifiants pour cette session est encore en cours. Patientez un instant et réessayez.",
+      "errorTitle": "Échec du démarrage"
     },
     "restriction": {
       "reachout_timelock": "Nouvelles discussions bloquées",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "Expéditeur",
         "recipient": "Destinataire",
+        "chatId": "ID du chat",
         "body": "Corps du message",
         "type": "Type de message",
         "isGroup": "Est une discussion de groupe",

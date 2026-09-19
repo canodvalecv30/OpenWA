@@ -285,7 +285,8 @@
     },
     "start": {
       "teardownPendingTitle": "Session Starting",
-      "teardownPending": "A credential teardown for this session is still settling. Wait a moment and try again."
+      "teardownPending": "A credential teardown for this session is still settling. Wait a moment and try again.",
+      "errorTitle": "Start Failed"
     },
     "qr": {
       "title": "Scan QR Code",
@@ -309,7 +310,7 @@
       "created": "Created",
       "lastActive": "Last Active",
       "autoRejectCalls": "Auto-reject calls",
-      "autoRejectCallsHint": "Incoming calls are declined as soon as they ring. The call.received webhook still fires first. Applies to the next call — no restart needed."
+      "autoRejectCallsHint": "Incoming calls are declined as soon as they ring. The call.received webhook still fires first. Applies to the next call — no restart needed. Baileys engine only: whatsapp-web.js cannot reject calls."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -383,6 +384,7 @@
       "phoneLabel": "Phone Number",
       "phonePlaceholder": "e.g., 919876543210",
       "phoneHint": "Digits only (no +, spaces, or dashes) in international format (country code + number).",
+      "relinkWarning": "On the whatsapp-web.js engine, requesting a code for a number that already has a linked session can make WhatsApp unlink that device. Use the QR tab if that session must stay up.",
       "invalidPhone": "Enter a valid phone number: 6–15 digits, country code first, no symbols.",
       "generateButton": "Generate Pairing Code",
       "generating": "Generating pairing code...",
@@ -431,6 +433,7 @@
       "fields": {
         "sender": "Sender",
         "recipient": "Recipient",
+        "chatId": "Chat ID",
         "body": "Message body",
         "type": "Message type",
         "isGroup": "Is group chat",

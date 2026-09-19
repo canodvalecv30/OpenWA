@@ -9,6 +9,7 @@ import { Template } from '../template/entities/template.entity';
 import { BaileysStoredMessage } from '../../engine';
 import { EngineFactory } from '../../engine/engine.factory';
 import { EngineRegistry } from '../../engine/engine-registry.service';
+import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { SessionErrorStore } from './session-error-store.service';
 import { SessionRestrictionStore } from './session-restriction-store.service';
 import { PresenceStore } from './presence-store.service';
@@ -62,6 +63,8 @@ export interface SessionEngineControlsHost {
   /** Ownership gate, same contract as SessionEngineWiringHost.ownsSession. */
   ownsSession(id: string): boolean;
   stoppingSessions: Set<string>;
+  /** The engine each operator-initiated teardown is retiring; see the lifecycle field of the same name. */
+  operatorTeardowns: Map<string, IWhatsAppEngine>;
   reconnectStates: Map<string, ReconnectState>;
   stuckAuthRecoveryUsed: Set<string>;
   initializingSessions: Set<string>;
@@ -93,6 +96,7 @@ export class SessionEngineControls {
   private readonly fences: SessionLifecycleFences;
   private readonly broadcaster: SessionStatusBroadcaster;
   private readonly stoppingSessions: Set<string>;
+  private readonly operatorTeardowns: Map<string, IWhatsAppEngine>;
   private readonly reconnectStates: Map<string, ReconnectState>;
   private readonly stuckAuthRecoveryUsed: Set<string>;
   private readonly initializingSessions: Set<string>;
@@ -110,6 +114,7 @@ export class SessionEngineControls {
     this.fences = host.fences;
     this.broadcaster = host.broadcaster;
     this.stoppingSessions = host.stoppingSessions;
+    this.operatorTeardowns = host.operatorTeardowns;
     this.reconnectStates = host.reconnectStates;
     this.stuckAuthRecoveryUsed = host.stuckAuthRecoveryUsed;
     this.initializingSessions = host.initializingSessions;
@@ -283,38 +288,49 @@ export class SessionEngineControls {
     // behaviour: a later start() clears it; it guards against a late reconnect resurrecting the id.)
     const engine = this.engines.get(id);
     if (engine) {
-      // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
-      // write so a delayed pre-initialize status update can never settle after the retirement and
-      // become the last persisted status. Identity-checked: only the captured engine's promise.
-      await this.fences.awaitInitialStatus(id, engine);
-      let tornDown = await this.fences.teardownEngineSafely(id, engine, e => e.disconnect(), 'disconnect');
-      if (!tornDown) {
-        // The graceful disconnect threw or timed out, so the engine may be half-attached (a leaked
-        // Chromium process or a live socket). Escalate to the hard kill — the same forceDestroy()
-        // forceKill() uses for a wedged engine — before reporting the stop.
-        this.logger.warn(`Graceful disconnect failed for session ${session.name}; escalating to force-destroy`, {
-          sessionId: id,
-          action: 'stop_escalate_force_destroy',
-        });
-        tornDown = await this.fences.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
-      }
-      // Reconciled regardless of the outcome: a wedged engine must not keep holding a concurrency
-      // slot or read as "already started" to a later start().
-      this.engines.deleteIfLive(id, engine);
-      if (!tornDown) {
-        // The hard kill failed too, so the engine's process may still be alive. Local state is
-        // settled (Map reconciled, status DISCONNECTED — mirroring logout()'s incomplete path), but
-        // the stop is reported as incomplete instead of claimed clean: a retryable 502 with a stable
-        // code, and no success log (the controller audits SESSION_STOPPED only after this resolves).
-        await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
-        throw new BadGatewayException({
-          statusCode: HttpStatus.BAD_GATEWAY,
-          message:
-            'Session was stopped locally, but the engine teardown did not complete — the engine ' +
-            'process may still be running. Retry the stop; restart the node to reap a leaked process.',
-          error: 'Bad Gateway',
-          code: 'SESSION_STOP_INCOMPLETE',
-        });
+      // This teardown's own DISCONNECTED is not announced from the engine callback (see
+      // operatorTeardowns): the adapter reports it before the eviction, so consumers would learn the
+      // session is down while it still reads as engine-loaded. The write below announces it instead.
+      this.operatorTeardowns.set(id, engine);
+      try {
+        // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
+        // write so a delayed pre-initialize status update can never settle after the retirement and
+        // become the last persisted status. Identity-checked: only the captured engine's promise.
+        await this.fences.awaitInitialStatus(id, engine);
+        let tornDown = await this.fences.teardownEngineSafely(id, engine, e => e.disconnect(), 'disconnect');
+        if (!tornDown) {
+          // The graceful disconnect threw or timed out, so the engine may be half-attached (a leaked
+          // Chromium process or a live socket). Escalate to the hard kill — the same forceDestroy()
+          // forceKill() uses for a wedged engine — before reporting the stop.
+          this.logger.warn(`Graceful disconnect failed for session ${session.name}; escalating to force-destroy`, {
+            sessionId: id,
+            action: 'stop_escalate_force_destroy',
+          });
+          tornDown = await this.fences.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
+        }
+        // Reconciled regardless of the outcome: a wedged engine must not keep holding a concurrency
+        // slot or read as "already started" to a later start().
+        this.engines.deleteIfLive(id, engine);
+        if (!tornDown) {
+          // The hard kill failed too, so the engine's process may still be alive. Local state is
+          // settled (Map reconciled, status DISCONNECTED — mirroring logout()'s incomplete path), but
+          // the stop is reported as incomplete instead of claimed clean: a retryable 502 with a stable
+          // code, and no success log (the controller audits SESSION_STOPPED only after this resolves).
+          await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
+          throw new BadGatewayException({
+            statusCode: HttpStatus.BAD_GATEWAY,
+            message:
+              'Session was stopped locally, but the engine teardown did not complete — the engine ' +
+              'process may still be running. Retry the stop; restart the node to reap a leaked process.',
+            error: 'Bad Gateway',
+            code: 'SESSION_STOP_INCOMPLETE',
+          });
+        }
+      } finally {
+        // Identity-checked, so a verb that captured a different instance keeps its own mark.
+        if (this.operatorTeardowns.get(id) === engine) {
+          this.operatorTeardowns.delete(id);
+        }
       }
     }
 
@@ -372,15 +388,24 @@ export class SessionEngineControls {
     // Cancel any reconnection attempts
     this.host.cancelReconnect(id);
 
-    // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
-    // write so a delayed pre-initialize status update can never settle after the retirement.
-    await this.fences.awaitInitialStatus(id, engine);
-    // The credential fence is keyed by session NAME (see awaitPendingTeardown). Captured immutably
-    // here so a raw logout that outlives its deadline race is tracked under the right name even if
-    // the row is later deleted/recreated.
-    const unlinked = await this.fences.teardownEngineSafely(id, engine, e => e.logout(), 'logout', session.name);
-    this.engines.deleteIfLive(id, engine);
-    await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
+    // Announced by the write below rather than from the engine callback, as in stop().
+    this.operatorTeardowns.set(id, engine);
+    let unlinked: boolean;
+    try {
+      // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
+      // write so a delayed pre-initialize status update can never settle after the retirement.
+      await this.fences.awaitInitialStatus(id, engine);
+      // The credential fence is keyed by session NAME (see awaitPendingTeardown). Captured immutably
+      // here so a raw logout that outlives its deadline race is tracked under the right name even if
+      // the row is later deleted/recreated.
+      unlinked = await this.fences.teardownEngineSafely(id, engine, e => e.logout(), 'logout', session.name);
+      this.engines.deleteIfLive(id, engine);
+      await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
+    } finally {
+      if (this.operatorTeardowns.get(id) === engine) {
+        this.operatorTeardowns.delete(id);
+      }
+    }
 
     if (!unlinked) {
       this.logger.warn(`Session stopped locally but the logout operation did not complete: ${session.name}`, {
@@ -439,17 +464,25 @@ export class SessionEngineControls {
     this.stoppingSessions.add(id);
     this.host.cancelReconnect(id);
 
-    // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
-    // write so a delayed pre-initialize status update can never settle after the retirement.
-    await this.fences.awaitInitialStatus(id, engine);
-    await this.fences.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
-    this.engines.deleteIfLive(id, engine);
+    // Announced by the write below rather than from the engine callback, as in stop().
+    this.operatorTeardowns.set(id, engine);
+    try {
+      // Await THIS engine's in-flight INITIALIZING write before teardown / the final DISCONNECTED
+      // write so a delayed pre-initialize status update can never settle after the retirement.
+      await this.fences.awaitInitialStatus(id, engine);
+      await this.fences.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
+      this.engines.deleteIfLive(id, engine);
 
-    this.logger.warn(`Session force-killed: ${session.name}`, {
-      sessionId: id,
-      action: 'force_kill',
-    });
-    await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
+      this.logger.warn(`Session force-killed: ${session.name}`, {
+        sessionId: id,
+        action: 'force_kill',
+      });
+      await this.host.updateStatus(id, SessionStatus.DISCONNECTED);
+    } finally {
+      if (this.operatorTeardowns.get(id) === engine) {
+        this.operatorTeardowns.delete(id);
+      }
+    }
     return this.requireSession(id);
   }
 

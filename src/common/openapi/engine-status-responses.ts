@@ -44,6 +44,19 @@ export const PAIRING_NOT_READY_409 =
   "WebSocket's close timeout (30 s); retry, and the status follows shortly.";
 
 /**
+ * `EngineTransportError` (503) on `POST /sessions/:sessionId/pairing-code`, where the whatsapp-web.js
+ * engine bounds each attempt and retries the navigation shapes: WhatsApp Web reloads its QR page every
+ * few seconds while unpaired, so a request can land mid-navigation. Only an exhausted retry budget is
+ * reported here. A refusal WhatsApp itself sends is not navigation-shaped and propagates on the first
+ * attempt instead.
+ */
+export const PAIRING_TRANSPORT_503 =
+  'The pairing code could not be generated: every attempt landed while WhatsApp Web was reloading its ' +
+  'own page, so the request never reached WhatsApp. The condition is transient and the request is ' +
+  "worth retrying; the last attempt's reason is carried in the message. The Baileys engine does not " +
+  'answer this, having no page to reload.';
+
+/**
  * The catalog and status services pass a `NotFoundException` factory to `EngineRegistry.require()`
  * instead of taking its `BadRequestException` default, so on those routes an unstarted session is a
  * 404 rather than the 400 every other engine module answers. Documented rather than changed: the

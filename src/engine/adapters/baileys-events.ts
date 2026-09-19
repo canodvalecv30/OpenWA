@@ -38,6 +38,7 @@ import type { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter'
 import { type createLogger } from '../../common/services/logger.service';
 import { createSilentLogger } from './baileys-logger';
 import { BAILEYS_QUERY_BUDGET_MS, withQueryDeadline } from './baileys-query-deadline';
+import { parseWaId, userPart } from '../identity/wa-id';
 
 /**
  * Inbound event handling extracted from BaileysAdapter: the socket event handlers
@@ -101,8 +102,6 @@ export interface BaileysEventsHost {
   loadLib(): Promise<typeof BaileysLib>;
   /** Session proxy dispatcher for the media download; undefined = direct. */
   getFetchDispatcher(): Dispatcher | undefined;
-  /** Unix-seconds timestamp of the last 'open' connection.update — the live-vs-history discriminator. */
-  readonly connectedAt: number;
   /** The adapter's inbound media download gate (shared so the bound holds across all inbound paths). */
   readonly inboundLimiter: ConcurrencyLimiter;
   /** Learn any lid->pn pair a message key carries (also writes through to the persistent table). */
@@ -155,24 +154,19 @@ export class BaileysEvents {
       if (!msg.message || !msg.key?.remoteJid) {
         continue; // protocol/empty messages carry no neutral content
       }
-      if (event.type !== 'notify') {
-        // Baileys echoes back OUR OWN just-sent messages through this same 'append' path too, and
-        // sendContent() already emits onMessageCreate for those via emitOwnSendEcho() — always
-        // exclude fromMe here (unconditionally, regardless of timestamp) so that echo doesn't fire
-        // onMessageCreate a second time.
-        if (msg.key.fromMe === true) {
-          continue;
-        }
-        // For everyone else: gate on the message's own timestamp vs. this connection's open time,
-        // not the upsert batch's `type` tag. `type: 'append'` usually means real history-sync
-        // backfill, but Baileys can also tag a genuinely new CUSTOMER message 'append' when it
-        // arrives in the same window as a reconnect's state-sync handshake — a strict
-        // `type !== 'notify'` filter silently drops that message (observed as "the first message
-        // after a reconnect gets ignored"). A message sent AFTER this connection opened is live
-        // regardless of which tag the batch carries; true backfill always predates it.
-        if (toUnixSeconds(msg.messageTimestamp) < this.host.connectedAt) {
-          continue;
-        }
+      // Baileys echoes back OUR OWN just-sent messages through this same 'append' path, and
+      // sendContent() already emits onMessageCreate for those via emitOwnSendEcho() — exclude
+      // fromMe on a non-notify batch so that echo doesn't fire onMessageCreate a second time.
+      //
+      // Everything else on an 'append' batch is live traffic, whatever its timestamp says. The tag
+      // marks WhatsApp's offline queue (`node.attrs.offline ? 'append' : 'notify'` in Baileys'
+      // messages-recv), i.e. the messages that arrived while this session was down, which by
+      // definition predate the reconnect. Real history never reaches this handler: it arrives on
+      // messaging-history.set and is captured dispatch-free. Re-delivery is harmless because the
+      // insert oracle dedupes on the WhatsApp message id, so a message already stored is not
+      // dispatched twice.
+      if (event.type !== 'notify' && msg.key.fromMe === true) {
+        continue;
       }
       // Throttle through the limiter so a burst of media messages can't run unbounded parallel
       // downloads (each a full decrypted buffer in heap). Ordering stays correct — the message store
@@ -404,6 +398,50 @@ export class BaileysEvents {
       payload.actorId = this.host.toNeutralJid(actor);
     }
     this.host.getOnGroupEvent()?.(payload);
+  }
+
+  /**
+   * Baileys `groups.upsert`: this session was added to or joined a group. Baileys turns the w:gp2
+   * `create` notification into this event and a content-less GROUP_CREATE stub, never into
+   * `group-participants.update`. It drops the notification's type and reason, so a new group, an add
+   * to an existing group and an invite-link join all arrive alike. Each entry is reported as a join of
+   * this session's own id through the participants path, which owns the id guard, the authorPn
+   * preference and the receipt timestamp. The entry lists the whole group, so members added with the
+   * session are not reported.
+   */
+  handleGroupsUpsert(
+    groups: Array<{ id?: string; author?: string; authorPn?: string; owner?: string; ownerPn?: string }>,
+  ): void {
+    const selfJid = this.host.normalizedSelfJid();
+    if (!selfJid) {
+      return; // no own id to report as the joining participant
+    }
+    const phone = userPart(selfJid);
+    const lid = this.host.getSocketOrNull()?.user?.lid;
+    const lidUser = lid ? userPart(lid) : undefined;
+    const isSelf = (jid: string | undefined): boolean => {
+      if (!jid) return false;
+      const { kind, userPart: user } = parseWaId(jid);
+      return kind === 'user' ? user === phone : kind === 'lid' && user === lidUser;
+    };
+    for (const group of Array.isArray(groups) ? groups : []) {
+      // Live, whatsapp-web.js emits no group.join when the session created the group, so that entry is
+      // skipped. The acting participant alone does not identify it: an invite-link join may name the
+      // joining session there, so the session must also be the group's owner.
+      if (
+        !group ||
+        ((isSelf(group.authorPn) || isSelf(group.author)) && (isSelf(group.ownerPn) || isSelf(group.owner)))
+      ) {
+        continue;
+      }
+      this.handleGroupParticipantsUpdate({
+        id: group.id,
+        author: group.author,
+        authorPn: group.authorPn,
+        action: 'add',
+        participants: [selfJid],
+      });
+    }
   }
 
   /**

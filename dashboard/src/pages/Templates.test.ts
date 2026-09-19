@@ -8,6 +8,8 @@ import { createElement } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 let templatesStatus = 200;
+let templates: Array<{ id: string; name: string; body: string }> = [];
+const deleted: string[] = [];
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -36,7 +38,13 @@ function installFetchStub(): void {
       }
       if (templatesStatus !== 200)
         return Promise.resolve(jsonResponse({ message: 'database offline' }, templatesStatus));
-      return Promise.resolve(jsonResponse([]));
+      return Promise.resolve(jsonResponse(templates));
+    }
+    const rowMatch = /^\/api\/sessions\/sess-1\/templates\/(.+)$/.exec(path);
+    if (rowMatch) {
+      deleted.push(rowMatch[1]);
+      templates = templates.filter(t => t.id !== rowMatch[1]);
+      return Promise.resolve(jsonResponse({ success: true }));
     }
     return Promise.resolve(jsonResponse({ message: `unstubbed ${path}` }, 404));
   }) as typeof fetch;
@@ -77,6 +85,39 @@ function renderTemplates(): void {
     ),
   );
 }
+
+// The row button exists so a template can be deleted without opening it in the editor first, and it
+// is gated on the same write permission as the editor's own delete. Both halves are pinned here.
+test('a write key can delete a template from its row, and a read-only key cannot', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  templatesStatus = 200;
+  templates = [{ id: 'tpl-1', name: 'invoice-reminder', body: 'Hi {{name}}' }];
+  deleted.length = 0;
+
+  window.localStorage.setItem('openwa_user_role', 'operator');
+  renderTemplates();
+
+  const row = (await screen.findByText('invoice-reminder')).closest('.template-list-row') as HTMLElement;
+  fireEvent.click(within(row).getByRole('button', { name: 'Delete' }));
+
+  // The confirm names the template, so a mis-click on a crowded list is recoverable.
+  const dialog = await screen.findByRole('dialog');
+  assert.ok(within(dialog).getByText(/invoice-reminder/), 'the confirm did not name the template');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => assert.deepEqual(deleted, ['tpl-1'], 'the delete never reached the API'));
+
+  rtl.cleanup();
+  window.localStorage.setItem('openwa_user_role', 'viewer');
+  templates = [{ id: 'tpl-1', name: 'invoice-reminder', body: 'Hi {{name}}' }];
+  renderTemplates();
+
+  const readOnlyRow = (await screen.findByText('invoice-reminder')).closest('.template-list-row') as HTMLElement;
+  assert.equal(
+    within(readOnlyRow).queryByRole('button', { name: 'Delete' }),
+    null,
+    'a read-only key was offered the row delete',
+  );
+});
 
 test('a 403 on the template list shows a permission state, not an empty library', async () => {
   templatesStatus = 403;

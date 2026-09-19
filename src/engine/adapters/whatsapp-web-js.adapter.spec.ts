@@ -30,7 +30,6 @@ import { ChannelMediaNotSupportedError } from '../../common/errors/channel-media
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
 import { EditedMessage, EngineStatus, GroupEvent, IncomingCallEvent } from '../interfaces/whatsapp-engine.interface';
-import { CallNotFoundError } from '../../common/errors/call-not-found.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { InvalidInviteCodeError } from '../../common/errors/invalid-invite-code.error';
@@ -2352,6 +2351,62 @@ describe('WhatsAppWebJsAdapter ready reconciliation (#251/#273)', () => {
     rmSpy.mockRestore();
   });
 
+  // #1655: a session can be perfectly healthy for messages and unable to see a single incoming call,
+  // because whatsapp-web.js installs the call hook last in the same page evaluate as the message
+  // listeners. The page read that settles it is one line, so ready says it instead of staying quiet.
+  it('warns at ready when the page carries no call hook', async () => {
+    const adapter = newAdapter();
+    const logger = (adapter as unknown as { logger: { warn: jest.Mock } }).logger;
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    // The probe stringifies the collection's Map.set; an untouched one reports native code.
+    const lifecycle = (
+      adapter as unknown as {
+        lifecycle: { client: unknown; status: EngineStatus; markReadyFromClientInfo: () => void };
+      }
+    ).lifecycle;
+    // The promotion early-returns from a terminal status, and a fresh adapter starts DISCONNECTED.
+    lifecycle.status = EngineStatus.AUTHENTICATING;
+    lifecycle.client = {
+      info: { wid: { user: '628123' }, pushname: 'Tester' },
+      pupPage: { evaluate: jest.fn().mockResolvedValue(false) },
+    };
+
+    lifecycle.markReadyFromClientInfo();
+    await new Promise(resolve => setImmediate(resolve));
+
+    const missing = warnSpy.mock.calls.find(
+      ([, meta]) => (meta as { action?: string })?.action === 'call_hook_missing',
+    );
+    expect(missing).toBeDefined();
+    expect(missing?.[1]).toMatchObject({ sessionId: 'sess-1' });
+    warnSpy.mockRestore();
+  });
+
+  it('stays quiet at ready when the call hook is installed', async () => {
+    const adapter = newAdapter();
+    const logger = (adapter as unknown as { logger: { warn: jest.Mock } }).logger;
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const lifecycle = (
+      adapter as unknown as {
+        lifecycle: { client: unknown; status: EngineStatus; markReadyFromClientInfo: () => void };
+      }
+    ).lifecycle;
+    // The promotion early-returns from a terminal status, and a fresh adapter starts DISCONNECTED.
+    lifecycle.status = EngineStatus.AUTHENTICATING;
+    lifecycle.client = {
+      info: { wid: { user: '628123' }, pushname: 'Tester' },
+      pupPage: { evaluate: jest.fn().mockResolvedValue(true) },
+    };
+
+    lifecycle.markReadyFromClientInfo();
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(
+      warnSpy.mock.calls.find(([, meta]) => (meta as { action?: string })?.action === 'call_hook_missing'),
+    ).toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
   // #981: clearing the auth dir destroys the ONLY copy of the session's WhatsApp credentials, and the
   // loss is permanent — every later start finds an empty profile and can only show a QR. Until now the
   // adapter logged only the FAILURE to delete, so a successful wipe left no trace at all and triage
@@ -3723,45 +3778,35 @@ describe('WhatsAppWebJsAdapter call event + rejectCall', () => {
     expect(onCall).toHaveBeenCalledTimes(2);
   });
 
-  it('a deduplicated repeat does not evict the live call', async () => {
-    const { adapter, client } = wireCallHandler();
-    const call = liveCall();
-
-    client.emit('call', call);
-    client.emit('call', call);
-
-    await expect(adapter.rejectCall('CALL1')).resolves.toBeUndefined();
-    expect(call.reject).toHaveBeenCalledTimes(1);
-  });
-
   // Discriminating on the REFRESH specifically: the second signal lands 90s in, so the entry is
   // only expired at 150s if its expiry was never extended. LIVE_CALL_TTL_MS is 120s.
-  it('a repeat extends the rejectable window from the latest signal, not the first', async () => {
+  it('a repeat keeps the call cached from the latest signal, so it is not announced again', () => {
     jest.useFakeTimers();
     try {
-      const { adapter, client } = wireCallHandler();
-      const call = liveCall();
+      const { onCall, client } = wireCallHandler();
 
-      client.emit('call', call);
+      client.emit('call', liveCall());
       jest.advanceTimersByTime(90_000);
-      client.emit('call', call);
+      client.emit('call', liveCall());
       jest.advanceTimersByTime(60_000); // 150s after the first signal, 60s after the second
+      client.emit('call', liveCall());
 
-      await expect(adapter.rejectCall('CALL1')).resolves.toBeUndefined();
+      expect(onCall).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('a call still expires when no repeat arrives', async () => {
+  it('announces the same call id again once its entry expired with no repeat', () => {
     jest.useFakeTimers();
     try {
-      const { adapter, client } = wireCallHandler();
+      const { onCall, client } = wireCallHandler();
 
       client.emit('call', liveCall());
       jest.advanceTimersByTime(150_000);
+      client.emit('call', liveCall());
 
-      await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
+      expect(onCall).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }
@@ -3769,13 +3814,15 @@ describe('WhatsAppWebJsAdapter call event + rejectCall', () => {
 
   it.each([{ id: '' }, { id: undefined }, { from: '' }, { from: undefined }, null])(
     'drops a malformed call (%o) — nothing emitted, nothing cached',
-    async malformed => {
-      const { adapter, onCall, client } = wireCallHandler();
+    malformed => {
+      const { onCall, client } = wireCallHandler();
 
       client.emit('call', malformed === null ? null : liveCall(malformed as Record<string, unknown>));
-
       expect(onCall).not.toHaveBeenCalled();
-      await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
+
+      // Nothing cached: a well-formed call with the same id is still announced.
+      client.emit('call', liveCall());
+      expect(onCall).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -3788,44 +3835,29 @@ describe('WhatsAppWebJsAdapter call event + rejectCall', () => {
     expect(onCall).not.toHaveBeenCalled();
   });
 
-  it('rejectCall rejects the cached live call and evicts it (second reject -> not found)', async () => {
+  // A whatsapp-web.js rejection resolved while the caller's phone kept ringing, so the adapter refuses,
+  // even for a ringing call, instead of reporting a rejection that did not stop the call.
+  it('rejectCall answers EngineNotSupportedError and never calls Call.reject()', async () => {
     const { adapter, client } = wireCallHandler();
     const call = liveCall();
     client.emit('call', call);
 
-    await adapter.rejectCall('CALL1');
+    const err: unknown = await adapter.rejectCall('CALL1').catch((e: unknown) => e);
 
-    expect(call.reject).toHaveBeenCalledTimes(1);
-    await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
-  });
-
-  it('rejectCall on an unknown id throws CallNotFoundError (HTTP 404)', async () => {
-    const { adapter } = wireCallHandler();
-
-    await expect(adapter.rejectCall('NOPE')).rejects.toBeInstanceOf(CallNotFoundError);
-  });
-
-  it('rejectCall on an expired entry throws CallNotFoundError without touching the call', async () => {
-    const { adapter, client } = wireCallHandler();
-    const call = liveCall();
-    client.emit('call', call);
-    // Age the cached entry past the TTL (calls ring ~a minute; the handle dies with the call).
-    const cache = (adapter as unknown as { liveCalls: Map<string, { expiresAt: number }> }).liveCalls;
-    cache.get('CALL1')!.expiresAt = Date.now() - 1;
-
-    await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
+    expect(err).toBeInstanceOf(EngineNotSupportedError);
+    expect((err as EngineNotSupportedError).getStatus()).toBe(501);
     expect(call.reject).not.toHaveBeenCalled();
   });
 
-  it('teardown clears the live-call cache (reject after disconnect -> not found)', async () => {
+  it('teardown clears the ringing call cache', async () => {
     const { adapter, client } = wireCallHandler();
-    const call = liveCall();
-    client.emit('call', call);
+    client.emit('call', liveCall());
+    const cache = (adapter as unknown as { liveCalls: Map<string, number> }).liveCalls;
+    expect(cache.has('CALL1')).toBe(true);
 
     await adapter.disconnect();
 
-    await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
-    expect(call.reject).not.toHaveBeenCalled();
+    expect(cache.size).toBe(0);
   });
 
   it('logs and drops a malformed call instead of throwing into the client emitter', () => {

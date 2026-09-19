@@ -19,7 +19,7 @@ class FakeSock extends EventEmitter {
     },
   };
   public emitter = new EventEmitter();
-  public user: { id: string; name?: string } | undefined;
+  public user: { id: string; lid?: string; name?: string } | undefined;
   // Baileys' WebSocketClient; the lifecycle reads isOpen after an await to detect a drop in between,
   // and listens on it for an upgrade response that never became a WebSocket.
   public ws = Object.assign(new EventEmitter(), { isOpen: true, isConnecting: false });
@@ -2254,21 +2254,51 @@ describe('BaileysAdapter inbound fan-out', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it('ignores an append upsert with no/old timestamp (real history backfill)', async () => {
+  // WhatsApp replays what it queued while the session was down, and Baileys tags that batch
+  // 'append' (messages-recv.js: `node.attrs.offline ? 'append' : 'notify'`). Those messages
+  // necessarily predate the reconnect, so a timestamp gate drops exactly the traffic an operator
+  // most needs. Real history arrives on messaging-history.set instead, which never dispatches.
+  it('processes an append upsert that predates the reconnect (WhatsApp offline queue)', async () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
-    fakeSock.fire('connection.update', { connection: 'open' }); // sets connectedAt
+    fakeSock.fire('connection.update', { connection: 'open' });
     fakeSock.fire('messages.upsert', {
       type: 'append',
       messages: [
         {
-          key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'OLD' },
-          message: { conversation: 'old' },
-          messageTimestamp: Math.floor(Date.now() / 1000) - 3600, // an hour before connectedAt
+          key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'QUEUED_WHILE_DOWN' },
+          message: { conversation: 'sent while the gateway was down' },
+          messageTimestamp: Math.floor(Date.now() / 1000) - 3600, // an hour before the reconnect
         },
       ],
     });
+    await new Promise(r => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // The invariant the offline-queue case above rests on: real history is bulk, arrives on its own
+  // event, and is handed over dispatch-free. Nothing here reaches the message webhook.
+  it('never dispatches bulk history as an inbound message', async () => {
+    const onMessage = jest.fn();
+    const onHistoryMessages = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage, onHistoryMessages });
+    fakeSock.fire('connection.update', { connection: 'open' });
+    fakeSock.fire('messaging-history.set', {
+      contacts: [],
+      chats: [],
+      messages: [
+        {
+          key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'HIST' },
+          message: { conversation: 'from the history sync' },
+          messageTimestamp: 1700000000,
+        },
+      ],
+    });
+    await new Promise(r => setImmediate(r));
+    await new Promise(r => setImmediate(r));
+    expect(onHistoryMessages).toHaveBeenCalledTimes(1);
     expect(onMessage).not.toHaveBeenCalled();
   });
 
@@ -4269,7 +4299,7 @@ describe('BaileysAdapter group management', () => {
   });
 });
 
-describe('BaileysAdapter group events (group-participants.update / groups.update)', () => {
+describe('BaileysAdapter group events (group-participants.update / groups.update / groups.upsert)', () => {
   beforeEach(() => {
     fakeSock.user = { id: '628999:1@s.whatsapp.net', name: 'Me' };
     fakeSock.resetEmitter();
@@ -4521,6 +4551,101 @@ describe('BaileysAdapter group events (group-participants.update / groups.update
 
     expect(onGroupEvent).toHaveBeenCalledTimes(1);
     expect(firstEvent(onGroupEvent).changes).toEqual({ subject: 'Renamed' });
+  });
+
+  // The groups.upsert entry Baileys builds from a w:gp2 `create` notification: the full group metadata
+  // plus the acting account as author/authorPn (Socket/messages-recv.js).
+  const createdGroup = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: '123-456@g.us',
+    subject: 'New group',
+    owner: '555@lid',
+    participants: [{ id: '555@lid' }, { id: '777@lid' }, { id: '999000@lid' }],
+    author: '555@lid',
+    authorPn: '628444@s.whatsapp.net',
+    ...over,
+  });
+
+  it("maps groups.upsert to a join of the session's own id, actor from authorPn, stamped at receipt", async () => {
+    const { onGroupEvent } = await readyWithGroupEvents();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1782000000123);
+
+    try {
+      fakeSock.fire('groups.upsert', [createdGroup()]);
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(onGroupEvent).toHaveBeenCalledTimes(1);
+    expect(firstEvent(onGroupEvent)).toEqual({
+      kind: 'join',
+      groupId: '123-456@g.us',
+      actorId: '628444@c.us',
+      // Only the session itself: the entry lists the whole group, so co-added members are not reported.
+      participantIds: ['628999@c.us'],
+      timestamp: 1782000000,
+    });
+  });
+
+  it('emits nothing for groups.upsert when the socket has no own id', async () => {
+    const { onGroupEvent } = await readyWithGroupEvents();
+    fakeSock.user = undefined;
+
+    fakeSock.fire('groups.upsert', [createdGroup()]);
+
+    expect(onGroupEvent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'authorPn and ownerPn are the session phone number',
+      { author: '555@lid', authorPn: '628999@s.whatsapp.net', ownerPn: '628999@s.whatsapp.net' },
+    ],
+    ['a lid author and owner are the session lid', { author: '999000@lid', authorPn: undefined, owner: '999000@lid' }],
+  ])('skips a groups.upsert entry for a group this session created (%s)', async (_label, author) => {
+    fakeSock.user = { id: '628999:1@s.whatsapp.net', lid: '999000:1@lid', name: 'Me' };
+    const { onGroupEvent } = await readyWithGroupEvents();
+
+    fakeSock.fire('groups.upsert', [createdGroup({ ...author }), createdGroup({ id: '789-000@g.us' })]);
+
+    expect(onGroupEvent).toHaveBeenCalledTimes(1);
+    expect(firstEvent(onGroupEvent).groupId).toBe('789-000@g.us');
+  });
+
+  it('reports a groups.upsert entry the session authored for a group another account owns', async () => {
+    fakeSock.user = { id: '628999:1@s.whatsapp.net', lid: '999000:1@lid', name: 'Me' };
+    const { onGroupEvent } = await readyWithGroupEvents();
+
+    // An invite-link join can name the joining session as the acting participant.
+    fakeSock.fire('groups.upsert', [createdGroup({ author: '999000@lid', authorPn: '628999@s.whatsapp.net' })]);
+
+    expect(onGroupEvent).toHaveBeenCalledTimes(1);
+    expect(firstEvent(onGroupEvent)).toMatchObject({ kind: 'join', participantIds: ['628999@c.us'] });
+  });
+
+  it('emits one join per groups.upsert after an internal reconnect', async () => {
+    const { onGroupEvent } = await readyWithGroupEvents();
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    const makeWASocket = (jest.requireMock('@whiskeysockets/baileys') as { default: jest.Mock }).default;
+    makeWASocket.mockClear();
+    // The mock factory normally wipes every listener; this reconnect keeps them, so only the
+    // lifecycle's own teardown stops the first socket's listener from firing a second time.
+    makeWASocket.mockImplementationOnce(() => fakeSock);
+
+    jest.useFakeTimers();
+    try {
+      fakeSock.fire('connection.update', {
+        connection: 'close',
+        lastDisconnect: { error: { output: { statusCode: 515 } } },
+      });
+      await jest.runAllTimersAsync();
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(makeWASocket).toHaveBeenCalledTimes(1);
+
+    fakeSock.fire('groups.upsert', [createdGroup()]);
+
+    expect(onGroupEvent).toHaveBeenCalledTimes(1);
   });
 });
 

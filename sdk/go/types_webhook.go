@@ -59,8 +59,8 @@ type GroupEventPayload struct {
 }
 
 // CallReceivedPayload is the payload of the call.received event. CallID is the
-// handle Calls.RejectCall accepts while the call is still ringing. Timestamp
-// is unix seconds.
+// handle Calls.RejectCall accepts while the call is still ringing (Baileys
+// only; whatsapp-web.js answers 501). Timestamp is unix seconds.
 type CallReceivedPayload struct {
 	CallID    string `json:"callId"`
 	From      string `json:"from"`

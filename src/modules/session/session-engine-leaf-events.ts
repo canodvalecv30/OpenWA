@@ -202,6 +202,7 @@ export class SessionEngineLeafEvents {
         sessionId: id,
         callId,
         error: err instanceof Error ? err.message : String(err),
+        action: 'call_auto_reject_failed',
       });
     }
   }
