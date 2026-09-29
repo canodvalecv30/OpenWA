@@ -5,9 +5,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { createLogger } from '../../common/services/logger.service';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { chatKind } from '../../engine/identity/wa-id';
 import { evaluateFilters } from '../webhook/filters/filter-evaluator';
 import { PLUGIN_MESSAGE_PORT, type PluginMessagePort } from '../../core/plugins/plugin-host-ports';
 import { AutomationRule } from './entities/automation-rule.entity';
+import { Session } from '../session/entities/session.entity';
 import { CreateAutomationRuleDto, UpdateAutomationRuleDto } from './dto/automation-rule.dto';
 
 /** Entries above this size trigger a sweep of expired cooldowns before inserting the next one. */
@@ -20,6 +22,13 @@ const COOLDOWN_SWEEP_THRESHOLD = 10_000;
  * queued message only after its own cooldown has long expired.
  */
 const MAX_MESSAGE_AGE_SECONDS = 300;
+
+/**
+ * Chat kinds a rule answers only when it names them. A reply into a channel is published to every
+ * follower when the account is an admin there, and is refused everywhere else (a failed send that can
+ * also count toward the send-pacing breaker); a status or broadcast list has no conversation to answer.
+ */
+const OPT_IN_CHAT_KINDS: ReadonlySet<string> = new Set(['channel', 'broadcast', 'status']);
 
 /**
  * Single-message autoreply rules: evaluated on every inbound message, first matching rule replies
@@ -44,6 +53,8 @@ export class AutomationRulesService {
   constructor(
     @InjectRepository(AutomationRule, 'data')
     private readonly ruleRepository: Repository<AutomationRule>,
+    @InjectRepository(Session, 'data')
+    private readonly sessionRepository: Repository<Session>,
     @Optional()
     private readonly moduleRef?: ModuleRef,
     @Optional()
@@ -53,6 +64,11 @@ export class AutomationRulesService {
   ) {}
 
   async create(sessionId: string, dto: CreateAutomationRuleDto): Promise<AutomationRule> {
+    // The automation_rules.sessionId FK turns a missing session into a driver error (500) at save
+    // time; check first so the caller gets a truthful 404, as the webhook create route does.
+    if (!(await this.sessionRepository.exists({ where: { id: sessionId } }))) {
+      throw new NotFoundException(`Session with id '${sessionId}' not found`);
+    }
     // Per-session cap, the same shape (and softness) the webhook fan-out cap has: every inbound
     // message is evaluated against every rule of its session, so an unbounded count turns each
     // message into unbounded work. A concurrent create can race the count — the cap bounds
@@ -145,10 +161,17 @@ export class AutomationRulesService {
     // matches a lid-addressed sender identically in both places.
     const resolveLid = (jid: string): string | null => this.lidMappingStore?.resolveLid(jid) ?? null;
 
+    // Resolved the way the `kind` filter field resolves it, so the guard and a kind condition agree.
+    const kind = typeof message.kind === 'string' && message.kind ? message.kind : chatKind(chatId);
+    const optInOnly = OPT_IN_CHAT_KINDS.has(kind);
+
     // First match wins: one inbound message never produces more than one automated reply, and rule
-    // order (creation order) is the tiebreak the operator can reason about.
-    const rule = rules.find(candidate =>
-      evaluateFilters(candidate.conditions, 'message.received', message, resolveLid),
+    // order (creation order) is the tiebreak the operator can reason about. A rule without a `kind`
+    // condition skips the opt-in chat kinds; naming the kind is how a rule reaches them.
+    const rule = rules.find(
+      candidate =>
+        (!optInOnly || candidate.conditions?.conditions?.some(c => c.field === 'kind')) &&
+        evaluateFilters(candidate.conditions, 'message.received', message, resolveLid),
     );
     if (!rule) return;
     if (this.inCooldown(rule, chatId)) return;

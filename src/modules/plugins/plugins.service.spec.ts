@@ -122,6 +122,21 @@ describe('PluginsService — install / uninstall (real loader + disk)', () => {
     }
   });
 
+  it('preserves a legacy (pre-encoding) ctx.storage file across an in-place package update', async () => {
+    service.install({ buffer: pkg({ version: '1.0.0' }) });
+    const storage = pluginStorage.createPluginStorage('svc-plg');
+    fs.writeFileSync(path.join(pluginsDir, 'svc-plg', 'cursor.json'), JSON.stringify({ lastId: 'msg-7' }));
+
+    await service.updatePackage('svc-plg', pkg({ version: '2.0.0' }));
+
+    expect(await storage.get('cursor')).toEqual({ lastId: 'msg-7' });
+    // The new package's own manifest is never overwritten by the backed-up one.
+    const shipped = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'svc-plg', 'manifest.json'), 'utf8')) as {
+      version: string;
+    };
+    expect(shipped.version).toBe('2.0.0');
+  });
+
   it('updatePackage rejects a package whose id does not match', async () => {
     service.install({ buffer: pkg() });
     await expect(service.updatePackage('svc-plg', pkg({ id: 'other-plg' }))).rejects.toThrow(/does not match/i);
@@ -688,6 +703,63 @@ describe('PluginsService — disable when the plugin is not loaded', () => {
   });
 });
 
+describe('PluginsService: disable an engine plugin', () => {
+  let tmpDir: string;
+
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const build = (status: PluginStatus, engineType: string) => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-engine-'));
+    const settings: Record<string, string> = {
+      'plugins.dir': path.join(tmpDir, 'plugins'),
+      dataDir: tmpDir,
+      'engine.type': engineType,
+    };
+    const config = { get: (k: string) => settings[k] } as unknown as ConfigService;
+    const loader = new PluginLoaderService(
+      config,
+      new HookManager(),
+      new PluginStorageService(config),
+      {} as unknown as ModuleRef,
+    );
+    loader.registerBuiltInPlugin(
+      { id: 'baileys', name: 'Baileys', version: '1.0.0', type: PluginType.ENGINE, main: 'index.js' },
+      {},
+    );
+    loader.getPlugin('baileys')!.status = status;
+    return { loader, service: new PluginsService(loader, config) };
+  };
+
+  // The engine factory is pinned to engine.type and ignores plugin status, so a "disabled" engine kept
+  // serving and was re-enabled on the next boot while the API reported it disabled.
+  it.each([PluginStatus.ENABLED, PluginStatus.DISABLED])(
+    'refuses the active engine plugin in status %s and changes nothing',
+    async status => {
+      const { loader, service } = build(status, 'baileys');
+      const disablePlugin = jest.spyOn(loader, 'disablePlugin');
+      const setOperatorEnabled = jest.spyOn(loader, 'setOperatorEnabled');
+
+      const res = await service.disable('baileys');
+
+      expect(res.success).toBe(false);
+      expect(res.message).toMatch(/engine\.type/);
+      expect(disablePlugin).not.toHaveBeenCalled();
+      expect(setOperatorEnabled).not.toHaveBeenCalled();
+      expect(loader.getPlugin('baileys')!.status).toBe(status);
+    },
+  );
+
+  // An engine other than engine.type runs no sessions, so disabling it is an ordinary request.
+  it('answers a loaded engine that is not the active one the way it answers any idle plugin', async () => {
+    const { service } = build(PluginStatus.DISABLED, 'whatsapp-web.js');
+
+    await expect(service.disable('baileys')).resolves.toEqual({
+      success: true,
+      message: 'Plugin baileys is not enabled',
+    });
+  });
+});
+
 /**
  * Recovery for a plugin the gateway still has a registry entry for but whose code is gone — the
  * state the loader announces on every boot ("Reinstall it — its config and stored data are kept").
@@ -877,4 +949,36 @@ describe('PluginsService — recovering a plugin whose code went missing', () =>
 
     expect(fs.existsSync(path.join(pluginsDir, 'svc-plg', 'legacy.js'))).toBe(true);
   });
+});
+
+describe('PluginsService remote catalog', () => {
+  const fetchMock = fetchSafeBuffer as unknown as jest.Mock;
+  const service = (): PluginsService => {
+    const config = {
+      get: (k: string) => (k === 'plugins.catalogUrl' ? 'https://catalog.example/plugins.json' : undefined),
+    } as unknown as ConfigService;
+    return new PluginsService({ getAllPlugins: () => [] } as unknown as PluginLoaderService, config);
+  };
+  const serveOnce = (json: string): void => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve(Buffer.from(json)));
+  };
+
+  it('annotates a well-formed catalog', async () => {
+    serveOnce('[{"id":"a","name":"A","version":"1.0.0"}]');
+    await expect(service().getCatalog()).resolves.toEqual([
+      { id: 'a', name: 'A', version: '1.0.0', installed: false, installedVersion: null, updateAvailable: false },
+    ]);
+  });
+
+  it.each(['[null]', '[{"id":"a","name":"A","version":"1.0.0"},5]', '[[]]'])(
+    'answers 400, not 500, for a catalog with a non-object entry (%s)',
+    async json => {
+      serveOnce(json);
+      const err: unknown = await service()
+        .getCatalog()
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).message).toMatch(/Invalid plugin catalog JSON/);
+    },
+  );
 });

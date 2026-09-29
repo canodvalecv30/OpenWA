@@ -42,7 +42,12 @@ describe('AutomationRulesService', () => {
       sends.push({ sessionId, chatId: dto.chatId, text: dto.text });
       return Promise.resolve({});
     };
-    service = new AutomationRulesService(ds.getRepository(AutomationRule), moduleRefStub, undefined);
+    service = new AutomationRulesService(
+      ds.getRepository(AutomationRule),
+      ds.getRepository(Session),
+      moduleRefStub,
+      undefined,
+    );
   });
 
   afterEach(async () => {
@@ -65,9 +70,15 @@ describe('AutomationRulesService', () => {
     // Every inbound message is evaluated against every rule of its session, so an unbounded count
     // turns each message into unbounded work — the same reason the webhook fan-out is capped.
     const cappedService = (max: number): AutomationRulesService =>
-      new AutomationRulesService(ds.getRepository(AutomationRule), moduleRefStub, undefined, {
-        get: (_key: string, def?: number) => max ?? def,
-      } as unknown as ConfigService);
+      new AutomationRulesService(
+        ds.getRepository(AutomationRule),
+        ds.getRepository(Session),
+        moduleRefStub,
+        undefined,
+        {
+          get: (_key: string, def?: number) => max ?? def,
+        } as unknown as ConfigService,
+      );
 
     it('refuses a NEW rule at or over the cap; existing ones are grandfathered', async () => {
       const svc = cappedService(2);
@@ -139,6 +150,47 @@ describe('AutomationRulesService', () => {
       expect(sends).toHaveLength(1);
     });
 
+    it('a rule with no kind condition never answers a channel, broadcast list or status', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+      await service.create('sessA', {
+        name: 'hello',
+        replyText: 'hi',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'body', operator: 'contains', value: 'hello' }] },
+      });
+
+      for (const chatId of ['120363000000000001@newsletter', '1234@broadcast', 'status@broadcast']) {
+        await service.evaluateInbound('sessA', inbound({ chatId, from: chatId }));
+      }
+      expect(sends).toHaveLength(0);
+
+      // Direct and group chats are still answered.
+      await service.evaluateInbound('sessA', inbound());
+      await service.evaluateInbound('sessA', inbound({ chatId: '120363000000000002@g.us', isGroup: true }));
+      expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '120363000000000002@g.us']);
+    });
+
+    it('an explicit kind condition still reaches a channel or broadcast list', async () => {
+      // Ordered first, so it would win if the kind guard did not skip it for the channel.
+      const all = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 0 });
+      await service.create('sessA', {
+        name: 'channels',
+        replyText: 'channel-reply',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'kind', operator: 'is', value: ['channel', 'broadcast'] }] },
+      });
+      // createdAt has 1s precision on SQLite; pin it so the evaluation order is the one described.
+      await ds.getRepository(AutomationRule).update(all.id, { createdAt: new Date('2026-01-01T00:00:00Z') });
+
+      await service.evaluateInbound('sessA', inbound({ chatId: '120363000000000001@newsletter' }));
+      await service.evaluateInbound('sessA', inbound({ chatId: '1234@broadcast' }));
+
+      expect(sends.map(s => [s.chatId, s.text])).toEqual([
+        ['120363000000000001@newsletter', 'channel-reply'],
+        ['1234@broadcast', 'channel-reply'],
+      ]);
+    });
+
     it('never replies to the account’s own messages (fromMe)', async () => {
       await service.create('sessA', { name: 'all', replyText: 'ack' });
 
@@ -204,9 +256,18 @@ describe('AutomationRulesService', () => {
       expect(sends).toHaveLength(0);
     });
 
+    it('refuses a rule for a session that does not exist with 404, not a driver error', async () => {
+      // The sessionId FK would otherwise surface as a 500 from the save, with an unknown-exception
+      // stack in the logs, for what is simply a wrong id in the path.
+      await expect(service.create('no-such-session', { name: 'x', replyText: 'ack' })).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
     it('a failing rule lookup resolves without throwing (receive path stays safe)', async () => {
       const broken = new AutomationRulesService(
         { find: () => Promise.reject(new Error('db gone')) } as never,
+        ds.getRepository(Session),
         moduleRefStub,
         undefined,
       );
@@ -215,7 +276,12 @@ describe('AutomationRulesService', () => {
     });
 
     it('tolerates a missing ModuleRef (unit wiring) without throwing', async () => {
-      const bare = new AutomationRulesService(ds.getRepository(AutomationRule), undefined, undefined);
+      const bare = new AutomationRulesService(
+        ds.getRepository(AutomationRule),
+        ds.getRepository(Session),
+        undefined,
+        undefined,
+      );
       await service.create('sessA', { name: 'all', replyText: 'ack' });
 
       await expect(bare.evaluateInbound('sessA', inbound())).resolves.toBeUndefined();

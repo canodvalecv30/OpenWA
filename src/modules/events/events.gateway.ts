@@ -15,8 +15,9 @@ import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { resolveCorsPolicy } from '../../config/bootstrap-security';
-import { resolveClientIp as resolveRequestClientIp, type RequestLike } from '../../common/utils/ip';
+import { limiterKeyForIp, resolveClientIp as resolveRequestClientIp, type RequestLike } from '../../common/utils/ip';
 import { DEFAULT_WEBHOOK_MEDIA_INLINE_MAX_BYTES, shedInlineMedia } from '../../common/utils/inline-media';
+import { isSafeSessionName } from '../../common/utils/path-safety';
 import { ApiKeyRole, type ApiKey } from '../auth/entities/api-key.entity';
 import { apiKeyAuthorizationFingerprint, apiKeyExpiryTime } from '../auth/api-key-authorization';
 import {
@@ -87,6 +88,14 @@ export const QR_DENIED_ROOM = 'role:qr-denied';
 
 /** Roles allowed to receive `session.qr`. Anything else, including an unknown role, is denied. */
 const QR_ALLOWED_ROLES: ReadonlySet<string> = new Set([ApiKeyRole.OPERATOR, ApiKeyRole.ADMIN]);
+
+/**
+ * Subscription rooms live until the socket disconnects, so their names and count are bounded: a session
+ * id is a uuid (any id the engines accept is isSafeSessionName), and one socket holds at most this many
+ * subscription rooms, far above every event of every session a client would follow.
+ */
+const MAX_SUBSCRIBE_SESSION_ID_LENGTH = 128;
+const MAX_ROOMS_PER_SOCKET = 4096;
 
 /** Why an API key's live WebSocket sockets are being torn down — drives the client-facing message. */
 export type ApiKeyEvictionReason = 'revoked' | 'deleted' | 'authorization_changed' | 'expired';
@@ -286,7 +295,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
   /**
    * Tear down every active socket authenticated with `keyId`. Called by AuthService when a key is
-   * revoked, deleted, or has its authorization (role/allowedSessions/allowedIps/expiry) narrowed, and
+   * revoked, deleted, or has its authorization (role/allowedSessions/allowedChats/allowedIps/expiry) narrowed, and
    * by sweepApiKeyAuthorization for the same changes when they only reach this process through the
    * database, so the key's already-subscribed sockets stop receiving events immediately instead of
    * lingering until they disconnect on their own. Each socket gets a clean close (an `UNAUTHORIZED`
@@ -308,11 +317,14 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     // Resolve the client IP once here so the handshake throttle, the validation, and the
     // audit trail all use the same trusted-proxy-aware value (parity with the REST guard / MCP mount).
     const clientIp = this.resolveClientIp(client);
+    // The handshake bucket key: an IPv6 client is charged on its /64. The refund below must name the
+    // same bucket, or an authenticated IPv6 handshake is never given back.
+    const handshakeKey = limiterKeyForIp(clientIp);
 
     // Pre-auth, per-IP handshake throttle. This must run BEFORE any credential handling: an
     // unauthenticated handshake flood otherwise reaches the DB validateApiKey below on every
     // attempt (same gap the MCP pre-auth IP throttle covers for the /mcp mount).
-    if (!this.handshakeLimiter.allow(clientIp)) {
+    if (!this.handshakeLimiter.allow(handshakeKey)) {
       this.logger.warn(`Client ${client.id} rejected: handshake rate limit exceeded (ip: ${clientIp})`);
       this.noteRateLimitViolation('handshake', { ipAddress: clientIp });
       client.emit('message', this.createError('RATE_LIMITED', 'Too many connection attempts, retry later'));
@@ -344,6 +356,19 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       // for "Client IP could not be determined".
       const validKey = await this.authService.validateApiKey(apiKey, clientIp);
 
+      // A chat-restricted key cannot yet be filtered on a live event stream (chat scoping of the
+      // event surface is the follow-up slice), so refuse the handshake rather than stream every
+      // chat's events to it. Mirrors the REST guard's default-deny for unmarked routes.
+      if ((validKey.allowedChats?.length ?? 0) > 0) {
+        this.logger.warn(`Client ${client.id} rejected: chat-scoped key ${validKey.id} cannot subscribe to events`);
+        client.emit(
+          'message',
+          this.createError('UNAUTHORIZED', 'API keys restricted to selected chats cannot subscribe to events'),
+        );
+        client.disconnect();
+        return;
+      }
+
       // Cap simultaneous sockets per key: each socket holds rooms, engine fan-out, and memory,
       // so one key must not open connections without bound. Enough for multi-tab dashboards;
       // excess connections get a clear error, not a silent drop.
@@ -374,7 +399,18 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       // handshakes, and authenticated connections stay bounded by maxSocketsPerKey above. Without
       // this, every client behind one NAT/proxy IP shares a 10/min budget and normal dashboard
       // re-mounts lock each other out.
-      this.handshakeLimiter.refund(clientIp);
+      this.handshakeLimiter.refund(handshakeKey);
+      // The transport can close while validateApiKey is in flight, and Nest runs the disconnect
+      // handler before this one returns. That untrack found no key on client.data yet and did
+      // nothing, so the socket just tracked would stay in the per-key set for the life of the
+      // process, holding a slot of the cap above and keeping the Socket object reachable.
+      if (client.disconnected) {
+        this.untrackSocket(client);
+        // Logged rather than returned silently: the disconnect handler has already written a
+        // "Client disconnected" line for a client nothing ever announced as connected.
+        this.logger.log(`Client ${client.id} authenticated after it had already gone (key: ${validKey.name})`);
+        return;
+      }
       this.logger.log(`Client connected: ${client.id} (key: ${validKey.name})`);
     } catch (error) {
       this.logger.warn(`Client ${client.id} rejected: Auth error`, {
@@ -397,37 +433,61 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
+  /**
+   * Answer a client command on the documented `message` event, and hand the same frame back so a
+   * client that passed an ack callback still receives it.
+   *
+   * Returning alone is not enough. The Socket.IO adapter delivers a handler's return value through
+   * the ack callback and nothing else, so a client that emits without one, which the dashboard and
+   * the documented example client both do, never saw a subscribe confirmation, a pong, or any of the
+   * refusals (FORBIDDEN_SESSION, INVALID_SESSION, INVALID_EVENTS, INVALID_MESSAGE).
+   *
+   * A path that answered and then closed the socket keeps its own emit, and this skips it rather than
+   * emitting again: socket.io still accepts a write to a disconnected socket, so without the guard a
+   * client could be handed the same frame twice on its way out.
+   */
+  private reply<T>(client: Socket, frame: T): T {
+    if (!client.disconnected) {
+      client.emit('message', frame);
+    }
+    return frame;
+  }
+
   @SubscribeMessage('message')
-  handleMessage(@ConnectedSocket() client: Socket, @MessageBody() message: WSClientMessage) {
+  // A client may emit 'message' with no payload or with null, so the body is typed as possibly nil and
+  // every read is guarded: such a frame answers INVALID_MESSAGE instead of throwing in the handler.
+  async handleMessage(@ConnectedSocket() client: Socket, @MessageBody() message: WSClientMessage | null | undefined) {
     // Per-key token bucket on every inbound frame. Keyed by the validated key id; a socket
     // whose handshake validation is still in flight has no key yet and is metered by IP.
     // Over-budget frames get an error frame back and are NOT dispatched to a handler — in
     // particular they never reach the per-subscribe DB re-validation.
     const frameSubject =
-      (client.data as { apiKey?: Pick<ApiKey, 'id'> } | undefined)?.apiKey?.id ?? this.resolveClientIp(client);
+      (client.data as { apiKey?: Pick<ApiKey, 'id'> } | undefined)?.apiKey?.id ??
+      limiterKeyForIp(this.resolveClientIp(client));
     if (!this.frameLimiter.allow(frameSubject)) {
-      const requestId = (message as { requestId?: string } | undefined)?.requestId;
+      const requestId = (message as { requestId?: string } | null | undefined)?.requestId;
       this.noteRateLimitViolation('frame', {
         apiKeyId: (client.data as { apiKey?: Pick<ApiKey, 'id'> } | undefined)?.apiKey?.id,
         ipAddress: this.resolveClientIp(client),
       });
-      const error = this.createError('RATE_LIMITED', 'Frame rate limit exceeded, slow down', requestId);
-      client.emit('message', error);
-      return error;
+      return this.reply(client, this.createError('RATE_LIMITED', 'Frame rate limit exceeded, slow down', requestId));
     }
 
-    switch (message.type) {
+    switch (message?.type) {
       case 'subscribe':
-        return this.handleSubscribe(client, message);
+        return this.reply(client, await this.handleSubscribe(client, message));
       case 'unsubscribe':
-        return this.handleUnsubscribe(client, message);
+        return this.reply(client, this.handleUnsubscribe(client, message));
       case 'ping':
-        return this.handlePing(client, message.requestId);
+        return this.reply(client, this.handlePing(client, message.requestId));
       default:
-        return this.createError(
-          'INVALID_MESSAGE',
-          `Unknown message type`,
-          (message as { requestId?: string }).requestId,
+        return this.reply(
+          client,
+          this.createError(
+            'INVALID_MESSAGE',
+            `Unknown message type`,
+            (message as { requestId?: string } | null | undefined)?.requestId,
+          ),
         );
     }
   }
@@ -441,6 +501,9 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     // Validate sessionId
     if (!sessionId || typeof sessionId !== 'string') {
       return this.createError('INVALID_SESSION', 'sessionId is required', requestId);
+    }
+    if (sessionId !== '*' && !(sessionId.length <= MAX_SUBSCRIBE_SESSION_ID_LENGTH && isSafeSessionName(sessionId))) {
+      return this.createError('INVALID_SESSION', 'sessionId must be "*" or a session id', requestId);
     }
 
     // Re-validate the API key on every subscribe: a long-lived socket whose key was
@@ -466,6 +529,19 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     // adapter, where nothing prunes it again.
     if (client.disconnected) {
       return this.createError('UNAUTHORIZED', 'Connection is closed', requestId);
+    }
+
+    // The connect handshake refuses a chat-restricted key, but the key can gain allowedChats after
+    // connect (an update on another node), so the fresh key is held to the same rule here.
+    if ((subscriberKey.allowedChats?.length ?? 0) > 0) {
+      const refusal = this.createError(
+        'UNAUTHORIZED',
+        'API keys restricted to selected chats cannot subscribe to events',
+        requestId,
+      );
+      client.emit('message', refusal);
+      client.disconnect();
+      return refusal;
     }
 
     // The fresh key decides THIS subscribe, and is deliberately not written back over the connect-time
@@ -497,6 +573,17 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       return this.createError(
         'INVALID_EVENTS',
         `No valid events. Valid: ${SUBSCRIBABLE_EVENTS.join(', ')}, *`,
+        requestId,
+      );
+    }
+
+    // Only subscription rooms count: the socket also sits in its own id room and may hold a role room.
+    const held = [...client.rooms].filter(room => room.startsWith('session:')).length;
+    const newRooms = validEvents.filter(event => !client.rooms.has(buildRoomName(sessionId, event))).length;
+    if (held + newRooms > MAX_ROOMS_PER_SOCKET) {
+      return this.createError(
+        'TOO_MANY_SUBSCRIPTIONS',
+        `A connection may hold at most ${MAX_ROOMS_PER_SOCKET} subscriptions; unsubscribe first`,
         requestId,
       );
     }
@@ -580,7 +667,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     kind: 'handshake' | 'frame' | 'sockets',
     subject: { apiKeyId?: string; ipAddress?: string },
   ): void {
-    const mapKey = `${kind}:${subject.apiKeyId ?? subject.ipAddress ?? 'unknown'}`;
+    const mapKey = `${kind}:${subject.apiKeyId ?? (subject.ipAddress ? limiterKeyForIp(subject.ipAddress) : 'unknown')}`;
     const now = Date.now();
     const prior = this.violations.get(mapKey);
     if (prior && now - prior.since < EventsGateway.VIOLATION_AUDIT_WINDOW_MS) {

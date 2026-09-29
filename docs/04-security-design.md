@@ -66,13 +66,13 @@ Storage: SHA-256 hash only (never store plain key); `keyPrefix` keeps the first 
 ```
 
 Every key minted through the API-keys endpoints uses that format. The bootstrap seed key is the only
-exception: an explicit `API_MASTER_KEY` is taken verbatim, and `ALLOW_DEV_API_KEY=true` opts into the
+exception: an explicit `API_MASTER_KEY` is taken verbatim (surrounding whitespace is stripped), and `ALLOW_DEV_API_KEY=true` opts into the
 fixed `dev-admin-key`; with neither set, the seed key is generated in the format above.
 
 ### Permission Model
 
 API keys carry **no permission strings**. Authorization is a role hierarchy on the key itself, plus
-two scoping dimensions enforced by `ApiKeyGuard`.
+three scoping dimensions enforced by `ApiKeyGuard`.
 
 | Role       | Rank | Meaning                                                              |
 | ---------- | ---- | -------------------------------------------------------------------- |
@@ -83,10 +83,11 @@ two scoping dimensions enforced by `ApiKeyGuard`.
 A route declares its minimum level with `@RequireRole(...)`; a key passes when its role ranks at or
 above that level (`AuthService.hasPermission`). A key below it is rejected with `403 Forbidden`.
 
-| Scope     | Field             | Effect                                                                                                   |
-| --------- | ----------------- | -------------------------------------------------------------------------------------------------------- |
-| Source IP | `allowedIps`      | Empty/absent = unrestricted; non-empty = fail-closed IP whitelist (see §4.3)                             |
-| Sessions  | `allowedSessions` | Empty/absent = every session; non-empty = a request carrying any other session id is rejected with `401` |
+| Scope     | Field             | Effect                                                                                                                                                             |
+| --------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Source IP | `allowedIps`      | Empty/absent = unrestricted; non-empty = fail-closed IP whitelist (see §4.3)                                                                                       |
+| Sessions  | `allowedSessions` | Empty/absent = every session; non-empty = a request carrying any other session id is rejected with `401`                                                           |
+| Chats     | `allowedChats`    | Empty/absent = every chat; non-empty = default-deny: only chat-scoped routes, and only for a listed chat, else `403`; `/events`, MCP and Bull Board refuse the key |
 
 The key-lifecycle routes (`/api/auth/api-keys`) are additionally fenced with `@RequireUnscopedKey()`:
 a session-scoped key is refused there whatever its role, so it cannot mint or widen credentials
@@ -157,9 +158,12 @@ sub-resource, no per-entry `active` flag. Enforcement lives in two places:
 
 ### IPv6 Support
 
-CIDR matching is IPv4-only: an IPv6 range in `allowedIps` never matches. An exact IPv6 address still
-works, by literal comparison — IPv4-mapped forms (`::ffff:203.0.113.50`) are normalized to their bare
-IPv4 address first.
+`allowedIps` accepts IPv4 addresses and IPv4 CIDR ranges only; the API rejects an IPv6 entry. An
+IPv6 address or range already stored on a key created before v0.4.3, when the API started rejecting
+them, is matched as written. An IPv4-mapped client address (`::ffff:203.0.113.50`) is normalized to its bare IPv4 address before
+matching. `TRUSTED_PROXIES` accepts IPv4 and IPv6 addresses and CIDR ranges (for example `fd00::/8`);
+an entry that is neither is ignored, with a warning at boot. A trusted proxy that appends a port to
+an `X-Forwarded-For` hop (`203.0.113.7:51000`, `[2001:db8::1]:443`) resolves to the bare address.
 
 ## 4.4 Data Encryption
 
@@ -250,7 +254,7 @@ flowchart LR
     RL -->|Under Limit| APP[Application]
     RL -->|Over Limit| ERR[429 Too Many Requests]
 
-    subgraph Limits["Global windows (per client IP)"]
+    subgraph Limits["Windows (per route, per client IP)"]
         T1[short: 10 / 1s]
         T2[medium: 100 / 60s]
         T3[long: 1000 / 1h]
@@ -259,7 +263,7 @@ flowchart LR
 
 ### Windows
 
-All limits are **global and per client IP** (resolved through `TRUSTED_PROXIES`), applied by a global `ThrottlerGuard`. There is **no per-endpoint limit table** — these three windows apply to every non-exempt route, and exceeding any one returns `429 Too Many Requests`:
+Each window is counted **per route handler per client IP** (the IP resolved through `TRUSTED_PROXIES`) by a global `ThrottlerGuard`, so a client gets the full budget on every endpoint; for an aggregate per-client cap, add a limiter at your reverse proxy. There is **no per-endpoint limit table**: these three windows apply to every non-exempt route, and exceeding any one returns `429 Too Many Requests`:
 
 | Window   | Default limit | Window length | Env overrides                                       |
 | -------- | ------------- | ------------- | --------------------------------------------------- |
@@ -268,6 +272,8 @@ All limits are **global and per client IP** (resolved through `TRUSTED_PROXIES`)
 | `long`   | 1000 requests | 3600 s        | `RATE_LIMIT_LONG_TTL` / `RATE_LIMIT_LONG_LIMIT`     |
 
 TTL values are in milliseconds. The `/api/metrics` and `/api/health*` routes are exempt (`@SkipThrottle`). To enforce tighter per-route limits, lower the global windows or add a limiter at your reverse proxy.
+
+An IPv6 client is keyed on its /64, so rotating addresses inside one allocation does not mint fresh buckets. The same key is used by every other per-client limit: the MCP and Bull Board pre-auth throttles, the WebSocket limits below, the per-client share of the in-flight body budget, the health route's auth-failure audit bound, and the REST and queue-dashboard auth-failure audit bound. `allowedIps` matching and audit rows still see the full address.
 
 ### Response on limit
 
@@ -289,11 +295,11 @@ The API exposes the rate-limit headers via CORS (`exposedHeaders`) so browser cl
 
 Socket.IO frames never pass through the Nest enhancer pipeline, so the HTTP windows above do **not** apply to the WebSocket surface. `EventsGateway` enforces its own in-process limits instead (all keyed in-memory per process; any blank/non-positive/non-numeric env value falls back to the default):
 
-| Limit                                                               | Keyed on                                       | Default                                | Env overrides                                                       |
-| ------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------- |
-| Client frames (subscribe/unsubscribe/ping) — token bucket           | API key (IP before auth completes)             | 60 frames/s sustained, 120-frame burst | `WS_RATE_LIMIT_FRAME_PER_SECOND` / `WS_RATE_LIMIT_FRAME_BURST`      |
-| New handshakes — sliding window, enforced **before** key validation | client IP (resolved through `TRUSTED_PROXIES`) | 10 per 60 s                            | `WS_RATE_LIMIT_HANDSHAKE_MAX` / `WS_RATE_LIMIT_HANDSHAKE_WINDOW_MS` |
-| Simultaneous sockets                                                | API key                                        | 16                                     | `WS_MAX_SOCKETS_PER_KEY`                                            |
+| Limit                                                               | Keyed on                                                        | Default                                | Env overrides                                                       |
+| ------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------- |
+| Client frames (subscribe/unsubscribe/ping) — token bucket           | API key (IP, IPv6 on its /64, before auth completes)            | 60 frames/s sustained, 120-frame burst | `WS_RATE_LIMIT_FRAME_PER_SECOND` / `WS_RATE_LIMIT_FRAME_BURST`      |
+| New handshakes — sliding window, enforced **before** key validation | client IP (resolved through `TRUSTED_PROXIES`, IPv6 on its /64) | 10 per 60 s                            | `WS_RATE_LIMIT_HANDSHAKE_MAX` / `WS_RATE_LIMIT_HANDSHAKE_WINDOW_MS` |
+| Simultaneous sockets                                                | API key                                                         | 16                                     | `WS_MAX_SOCKETS_PER_KEY`                                            |
 
 The frame budget is sized ~6x above legitimate traffic: the dashboard emits ~8 subscribe frames at page mount and only occasional ping/unsubscribe frames afterwards (server→client event fan-out is not limited). The handshake window stops an unauthenticated connection flood from forcing a DB `validateApiKey` per attempt; Socket.IO's exponential-backoff reconnect (~6 attempts/min per tab) stays under it. The socket cap covers multi-tab dashboards and SDK clients sharing one key. A rejected handshake or excess socket is answered with a `RATE_LIMITED` error frame and a clean disconnect; an over-budget frame gets a `RATE_LIMITED` error frame and is not dispatched. Violations are audited as `rate_limit_exceeded`, sampled to at most one row per subject+kind per minute (suppressed occurrences are counted into the next row) so the audit trail itself cannot become the flood.
 
@@ -360,10 +366,14 @@ function signPayload(payload: object, secret: string): string {
 }
 
 // Client: Verify signature
-function verifySignature(payload: string, signature: string, secret: string): boolean {
+function verifySignature(payload: string, signature: string | undefined, secret: string): boolean {
+  if (typeof signature !== 'string') return false;
   const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
 
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  // timingSafeEqual throws on a length mismatch, so a short or forged header must return false first.
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 ```
 
@@ -485,7 +495,7 @@ flowchart TB
 
 ### Security Alerts
 
-> **Not implemented.** There is no alerting or automatic temp-block subsystem; the table below is a design target, not shipped behavior. The signals do get recorded — rejected authentication and WebSocket rate-limit violations write persisted audit rows (the latter sampled), and an IP-restricted key used from a disallowed IP also emits a `logger.warn` — but nothing acts on them. Forward the audit log / application log to your SIEM to build these alerts.
+> **Not implemented.** There is no alerting or automatic temp-block subsystem; the table below is a design target, not shipped behavior. The signals do get recorded: rejected authentication and WebSocket rate-limit violations write persisted audit rows, and an IP-restricted key used from a disallowed IP also emits a `logger.warn`; but nothing acts on them. A REST or queue-dashboard rejection that names no stored key (missing or unknown) is capped at 10 rows per client IP per minute; a rejection of a stored key (revoked, expired, IP or session refused, insufficient role) is recorded every time there. The public `/api/health` route bounds every auth-failure row it writes, stored key or not, at 10 per client IP per minute. Rate-limit violations are sampled. Forward the audit log / application log to your SIEM to build these alerts.
 
 | Event                | Severity | Intended action (roadmap) |
 | -------------------- | -------- | ------------------------- |
@@ -532,10 +542,12 @@ flowchart TB
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
 | Database credentials              | Environment variable                                                                                               | 90 days                                         |
 | Redis password                    | Environment variable                                                                                               | 90 days                                         |
-| API master key (`API_MASTER_KEY`) | Environment variable                                                                                               | 180 days                                        |
+| API master key (`API_MASTER_KEY`) | Environment variable (first-boot seed only)                                                                        | Not via the env var; see the note below         |
 | API key pepper (`API_KEY_PEPPER`) | Environment variable                                                                                               | Rotating it invalidates all existing key hashes |
 | Webhook secrets                   | Database — **plaintext**; not in the webhook read DTOs, and omitted from `GET /api/infra/export-data` webhook rows | Per webhook                                     |
 | Session auth state                | File system (data volume) — **not encrypted**                                                                      | Never (tied to the WA session)                  |
+
+> `API_MASTER_KEY` only seeds the first ADMIN key, and is read only while the key table is empty. Changing it later has no effect: the new value never authenticates and the seeded key stays valid. Rotate by minting a new ADMIN key with `POST /api/auth/api-keys` and revoking the seeded `Default Admin Key`.
 
 > There is no application `ENCRYPTION_KEY` — OpenWA does not encrypt data at rest (see §4.4). The rotation cadences above are operational recommendations, not enforced by the app.
 
@@ -605,7 +617,7 @@ const masterKey = getSecret('API_MASTER_KEY');
 
 ### Key Rotation Procedure
 
-> **Not applicable today.** OpenWA stores no encrypted-at-rest data (see §4.4), so there is no data-encryption key to rotate and no `rotateEncryptionKey()` in the codebase. The flow below is illustrative for if/when field-level encryption is added. To rotate the `API_MASTER_KEY` or `API_KEY_PEPPER`, use the API-key endpoints (§4.2) — rotating the pepper invalidates existing key hashes.
+> **Not applicable today.** OpenWA stores no encrypted-at-rest data (see §4.4), so there is no data-encryption key to rotate and no `rotateEncryptionKey()` in the codebase. The flow below is illustrative for if/when field-level encryption is added. To rotate the key seeded from `API_MASTER_KEY`, mint a new ADMIN key through the API-key endpoints (§4.2) and revoke the seeded one; editing the env var has no effect after first boot. Rotating `API_KEY_PEPPER` invalidates every existing key hash.
 
 ```mermaid
 flowchart TB

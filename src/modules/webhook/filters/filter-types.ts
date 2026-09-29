@@ -100,8 +100,12 @@ export const FILTER_FIELDS: Record<string, FieldDefinition[]> = {
       resolve: data => str(data.to),
     },
     {
-      // Conversation JID (DM or group). Every payload in this family carries it: `IncomingMessage`
+      // Conversation JID (DM or group). Carried by the message events proper: `IncomingMessage`
       // declares `chatId` required, and the edited, reaction and revoked events set it explicitly.
+      // NOT by `message.ack` and `message.failed`, whose payload is `{ id, messageId, status, ack }`,
+      // so a chatId condition never scopes those two: an `is` condition suppresses every one of them
+      // and an `isNot` condition lets every one through. Scope the subscription with `events[]`
+      // instead (docs/06 carries the same warning for `sender`).
       // Deliberately without a fall back to `from`, which is the sender on a DM and this session on
       // an outbound message, so it would silently scope the filter to the wrong conversation.
       field: 'chatId',

@@ -7,6 +7,7 @@
   },
   "common": {
     "appName": "OpenWA",
+    "updateAvailable": "v{{version}} available",
     "loading": "Loading...",
     "cancel": "Cancel",
     "delete": "Delete",
@@ -31,7 +32,9 @@
     "never": "Never",
     "justNow": "Just now",
     "minAgo": "{{count}} min ago",
-    "hoursAgo": "{{count}} hours ago",
+    "minAgo_other": "{{count}} min ago",
+    "hoursAgo": "{{count}} hour ago",
+    "hoursAgo_other": "{{count}} hours ago",
     "optional": "optional",
     "language": "Language",
     "back": "Back",
@@ -98,6 +101,25 @@
       "delete": "Delete message"
     },
     "replyingTo": "Replying to {{name}}",
+    "messageType": {
+      "text": "Text",
+      "image": "Image",
+      "video": "Video",
+      "audio": "Audio",
+      "voice": "Voice message",
+      "document": "Document",
+      "sticker": "Sticker",
+      "location": "Location",
+      "contact": "Contact",
+      "poll": "Poll",
+      "call": "Call",
+      "revoked": "Deleted message",
+      "order": "Order",
+      "product": "Product",
+      "masked": "Hidden message",
+      "unknown": "Message",
+      "unknownType": "Unknown type"
+    },
     "you": "You",
     "youPrefix": "You: ",
     "yesterday": "Yesterday",
@@ -113,13 +135,16 @@
     "groupSubtitle": "Group",
     "privateContactSubtitle": "Private contact",
     "deleteConfirm": "Delete this message for everyone?",
+    "promptButtons": "Message choices",
     "messageDeleted": "🚫 This message was deleted",
     "messageMasked": "🔒 Masked by WhatsApp for linked devices — check your primary phone",
     "kind": {
       "group": "Group",
       "channel": "Channel",
       "status": "Status",
-      "broadcast": "Broadcast"
+      "broadcast": "Broadcast",
+      "individual": "Individual",
+      "unknown": "Unknown"
     },
     "tab": {
       "chats": "Chats",
@@ -162,7 +187,9 @@
       "send": "Failed to send message",
       "react": "Failed to react to message",
       "delete": "Failed to delete message",
-      "fileTooLarge": "File is too large (max 18 MB)"
+      "clickButton": "Failed to click button",
+      "fileTooLarge": "File is too large (max 18 MB)",
+      "searchHitSessionNotReady": "The session of this message is not connected"
     },
     "loadMessagesError": "Couldn't load messages. Check the server logs.",
     "messageStatus": {
@@ -213,6 +240,7 @@
     "noSessions": "No sessions found. Create one to get started.",
     "view": "View",
     "disconnect": "Disconnect",
+    "disconnectFailed": "Could not disconnect the session",
     "errorPrefix": "Error: {{message}}",
     "loadError": "Failed to load data",
     "charts": {
@@ -223,6 +251,7 @@
         "30d": "30d"
       },
       "overTime": "Messages over time",
+      "overTimeUtcDays": "Messages over time (days in UTC)",
       "byType": "Messages by type",
       "topChats": "Top chats",
       "sent": "Sent",
@@ -271,7 +300,8 @@
       "successTitle": "Session Created",
       "successDesc": "Session \"{{name}}\" created successfully",
       "errorTitle": "Create Failed",
-      "errorDefault": "Failed to create session"
+      "errorDefault": "Failed to create session",
+      "tooShort": "Name must be at least 3 characters."
     },
     "delete": {
       "title": "Confirm Delete",
@@ -310,7 +340,7 @@
       "created": "Created",
       "lastActive": "Last Active",
       "autoRejectCalls": "Auto-reject calls",
-      "autoRejectCallsHint": "Incoming calls are declined as soon as they ring. The call.received webhook still fires first. Applies to the next call — no restart needed. Baileys engine only: whatsapp-web.js cannot reject calls."
+      "autoRejectCallsHint": "Incoming calls are declined as soon as they ring. The call.received webhook still fires first. Applies to the next call, no restart needed. Baileys engine only: whatsapp-web.js cannot reject calls."
     },
     "proxy": {
       "title": "Proxy Configuration",
@@ -347,7 +377,8 @@
       "actionRequiredTitle": "Action required",
       "actionRequiredDesc": "This session needs your attention. Open the session to see what to do.",
       "failedTitle": "Session Failed",
-      "failedDesc": "The WhatsApp session failed to start. Open the session to see the reason."
+      "failedDesc": "The WhatsApp session failed to start. Open the session to see the reason.",
+      "stopFailedTitle": "Stop Failed"
     },
     "card": {
       "phone": "Phone",
@@ -461,7 +492,10 @@
     },
     "empty": {
       "title": "No webhooks configured",
-      "description": "Add a webhook to receive real-time event notifications"
+      "description": "Add a webhook to receive real-time event notifications",
+      "loadErrorTitle": "Could not load webhooks",
+      "forbiddenTitle": "No access to webhooks",
+      "forbiddenDesc": "Webhooks require an API key with the operator or admin role."
     },
     "toasts": {
       "created": "Webhook created successfully",
@@ -482,9 +516,27 @@
     "eventDescriptions": {
       "message.received": "When a message is received",
       "message.sent": "When a message is sent",
-      "session.connected": "When a session connects",
-      "session.disconnected": "When a session disconnects",
+      "message.ack": "When a message's delivery or read status changes",
+      "message.failed": "When an outgoing message fails to deliver",
+      "message.revoked": "When a message is deleted for everyone",
+      "message.reaction": "When a reaction is added, changed or removed",
+      "message.edited": "When a message is edited",
+      "session.status": "When a session's status changes",
       "session.qr": "When QR code is generated",
+      "session.authenticated": "When a session is paired and ready",
+      "session.disconnected": "When a session disconnects",
+      "session.reconnect_loop": "When a session keeps failing to reconnect",
+      "session.restriction": "When WhatsApp restricts the account or lifts a restriction",
+      "presence.update": "When a subscribed chat comes online, types or goes offline",
+      "group.join": "When participants join or are added to a group",
+      "group.leave": "When participants leave or are removed from a group",
+      "group.update": "When a group's name, description or settings change",
+      "group.join_request": "When someone asks to join a group this session administers",
+      "call.received": "When an incoming call starts ringing",
+      "call.accepted": "When a call is answered",
+      "call.rejected": "When a call is declined",
+      "call.missed": "When a call goes unanswered",
+      "status.received": "When a contact posts a status",
       "all": "All events"
     }
   },
@@ -571,7 +623,10 @@
     },
     "empty": {
       "title": "No API keys created",
-      "description": "Create an API key to authenticate your requests"
+      "description": "Create an API key to authenticate your requests",
+      "loadErrorTitle": "Could not load API keys",
+      "forbiddenTitle": "No access to API keys",
+      "forbiddenDesc": "Managing API keys requires an admin key that is not restricted to specific sessions."
     },
     "confirm": {
       "deleteTitle": "Delete API Key",
@@ -624,7 +679,12 @@
       "filteredTitle": "No matches on this page",
       "filteredDescription": "The search filters the current page only. Clear it, page through, or use the severity filter to narrow server-side.",
       "filteredServerDescription": "No logs match these filters. Adjust the severity filter to widen the search."
-    }
+    },
+    "exportFailed": "Couldn't export the audit log",
+    "exportTruncated": "The export covers only the newest {{rows}} entries. Narrow the severity filter to export older ones.",
+    "exportThrottled": "The export covers only the newest {{rows}} entries because the gateway is rate-limiting audit log reads. Wait a minute and export again.",
+    "exportNoMatches": "No audit log entries match the search, so nothing was exported.",
+    "exportNoMatchesTruncated": "None of the newest {{rows}} entries scanned match the search, so nothing was exported. Older entries were not searched."
   },
   "messageTester": {
     "title": "Message Tester",
@@ -642,6 +702,12 @@
     "loadingGroups": "Loading groups...",
     "noGroupsFound": "No groups found",
     "selectGroupHint": "Select a group from your WhatsApp",
+    "selectAllGroups": "Select all",
+    "selectMatchingGroups": "Select matches",
+    "clearGroupSelection": "Clear",
+    "groupsSelectedCount": "Selected: {{count}}/{{max}}",
+    "noGroupsMatch": "No groups match your search",
+    "forwardUsesFirstGroup": "Forward uses only the first selected group, as the chat to forward from.",
     "phoneHint": "Use international format without spaces",
     "messageType": "Message Type",
     "types": {
@@ -699,17 +765,29 @@
     "bulkRecipientsCount": "Recipients: {{count}}",
     "bulkDelay": "Delay Between Messages (ms)",
     "bulkDelayHint": "1000–60000 ms (default 3000)",
+    "bulkMediaKind": "Send as",
+    "bulkMediaHint": "With an attachment, the message becomes its caption. A picked file travels inside the request, so large files for many recipients need a public media URL instead.",
+    "bulkMediaTooLarge": "This file is too large to send inline to {{count}} recipients: at that count each file can be at most {{size}}. Use a public media URL instead, or send to fewer recipients.",
+    "bulkMediaUrlInvalid": "Use a full http:// or https:// address, like https://example.com/file.pdf.",
+    "bulkCaptionTooLong": "With an attachment the message goes out as its caption, which is limited to {{max}} characters ({{count}} now).",
+    "bulkAudioNoCaption": "Audio goes out without a caption, so this text would not be sent. Clear the message or pick another kind.",
     "send": "Send Message",
     "sending": "Sending...",
+    "sendingProgress": "Sending {{current}}/{{total}}...",
     "viewOnly": "View Only",
     "responseEmpty": "Send a message to see the API response",
     "successLabel": "Success",
     "failedLabel": "Failed",
+    "groupsSentSummary": "{{sent}}/{{total}} sent",
+    "groupSendCancelled": "{{count}}, cancelled",
+    "groupSendStopped": "{{count}}, stopped after HTTP {{status}}",
     "response": {
       "timestamp": "Timestamp",
       "messageId": "Message ID",
       "batchId": "Batch ID",
-      "error": "Error"
+      "error": "Error",
+      "groups": "Groups",
+      "notSent": "Not sent"
     },
     "sendFailed": "Failed to send message",
     "notOnWhatsApp": "This number is not registered on WhatsApp",
@@ -844,12 +922,14 @@
       "dontClose": "Please do not close this window",
       "successMsg": "Server is back online! The page will reload automatically.",
       "errorMsg": "Server did not respond after 30 seconds. Please check the Docker logs and restart manually.",
+      "outcomeUnknown": "The proxy timed out before the server answered. The restart may still be in progress; reload in a minute to check.",
       "reload": "Reload Page"
     },
     "toasts": {
       "saveFailed": "Save Failed"
     },
-    "statusLoadError": "Couldn't load the current infrastructure status. Refresh to try again."
+    "statusLoadError": "Couldn't load the current infrastructure status. Refresh to try again.",
+    "configLoadError": "Couldn't load the saved configuration, so it can't be edited here. Refresh to try again."
   },
   "plugins": {
     "title": "Plugins",
@@ -857,6 +937,19 @@
     "refresh": "Refresh",
     "builtIn": "Built-in",
     "noDescription": "No description available",
+    "statuses": {
+      "installed": "Installed",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "error": "Error"
+    },
+    "types": {
+      "engine": "Engine",
+      "storage": "Storage",
+      "queue": "Queue",
+      "auth": "Auth",
+      "extension": "Extension"
+    },
     "enable": "Enable",
     "disable": "Disable",
     "healthCheck": "Health Check",
@@ -954,7 +1047,8 @@
         "title": "Instance created",
         "hint": "Copy the secret now — it is shown only once.",
         "secret": "Signing secret",
-        "ingressUrls": "Ingress URL(s)"
+        "ingressUrls": "Ingress URL(s)",
+        "verifyToken": "Verify token"
       },
       "regenerate": {
         "title": "Regenerate secret",

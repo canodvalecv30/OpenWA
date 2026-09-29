@@ -7,7 +7,12 @@ import { SendTextStatusDto } from './dto/send-text-status.dto';
 import { SendImageStatusDto, SendVideoStatusDto, SendVoiceStatusDto } from './dto/send-media-status.dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
-import { ENGINE_NOT_READY_409, SESSION_NOT_STARTED_404 } from '../../common/openapi/engine-status-responses';
+import {
+  ENGINE_NOT_READY_409,
+  MEDIA_TOO_LARGE_413,
+  MEDIA_URL_PROXY_503,
+  SESSION_NOT_STARTED_404,
+} from '../../common/openapi/engine-status-responses';
 
 @ApiTags('status')
 @Controller('sessions/:sessionId/status')
@@ -97,9 +102,12 @@ export class StatusController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
+    description:
+      'Neither url nor base64 provided, the url answers non-2xx, times out or cannot be reached, or the ' +
+      'post was blocked by a plugin.',
   })
-  @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 413, description: MEDIA_TOO_LARGE_413 })
+  @ApiResponse({ status: 503, description: MEDIA_URL_PROXY_503 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendImageStatus(@Param('sessionId') sessionId: string, @Body() dto: SendImageStatusDto) {
@@ -121,9 +129,12 @@ export class StatusController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
+    description:
+      'Neither url nor base64 provided, the url answers non-2xx, times out or cannot be reached, or the ' +
+      'post was blocked by a plugin.',
   })
-  @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 413, description: MEDIA_TOO_LARGE_413 })
+  @ApiResponse({ status: 503, description: MEDIA_URL_PROXY_503 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendVideoStatus(@Param('sessionId') sessionId: string, @Body() dto: SendVideoStatusDto) {
@@ -146,9 +157,12 @@ export class StatusController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
+    description:
+      'Neither url nor base64 provided, the url answers non-2xx, times out or cannot be reached, or the ' +
+      'post was blocked by a plugin.',
   })
-  @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 413, description: MEDIA_TOO_LARGE_413 })
+  @ApiResponse({ status: 503, description: MEDIA_URL_PROXY_503 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendVoiceStatus(@Param('sessionId') sessionId: string, @Body() dto: SendVoiceStatusDto) {
@@ -163,6 +177,15 @@ export class StatusController {
   @ApiOperation({ summary: 'Delete own status' })
   @ApiParam({ name: 'id', description: 'Status ID' })
   @ApiResponse({ status: 200, description: 'Status deleted.', type: StatusDeletedResponseDto })
+  @ApiResponse({
+    status: 403,
+    description:
+      "Key lacks OPERATOR role; on whatsapp-web.js, the id is not one of the account's own statuses; on " +
+      'Baileys, the status was not posted by this session in the last 24 hours (it was posted from the phone ' +
+      "or from another node, or before the session's engine was last created by a restart, a stop and start, " +
+      'or a reconnect the gateway runs itself), so its recipients are unknown and the revoke cannot be ' +
+      'addressed to them.',
+  })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   @ApiResponse({

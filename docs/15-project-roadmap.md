@@ -729,8 +729,8 @@ never points at an image that was not tested. `verify-published` then re-resolve
 with no registry login, asserting public pullability and digest identity on both platforms. The
 GitHub Release is gated on all of it.
 
-Prereleases (`-rc`, `-beta`, `-alpha` in the tag) skip the mutable `X.Y` and `latest` channels and
-are flagged prerelease on GitHub.
+A tag with any `-` suffix (for example `-rc.1`, `-beta.1`, `-alpha.1`) is a prerelease: it skips the
+mutable `X.Y` and `latest` channels and is flagged prerelease on GitHub.
 
 ### When a gate fails
 

@@ -9,7 +9,7 @@ import { CreateWebhookDto, UpdateWebhookDto } from './dto';
 import { createLogger } from '../../common/services/logger.service';
 import { resolveSessionScope } from '../../common/security/session-scope';
 import { ListOptions, resolveListWindow } from '../../common/utils/paginate';
-import { generateIdempotencyKey, generateDeliveryId } from './utils/idempotency.util';
+import { generateDeliveryId } from './utils/idempotency.util';
 import {
   assertSafeFetchUrl,
   withSafeFetch,
@@ -244,12 +244,15 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
   async test(sessionId: string, webhookId: string): Promise<{ success: boolean; statusCode?: number; error?: string }> {
     const webhook = await this.findOne(sessionId, webhookId);
 
+    // Every test is a new event: a key derived from the webhook alone repeats on every call, so a
+    // receiver that dedups on it acknowledges the second test without running its handler.
+    const deliveryId = generateDeliveryId();
     const testPayload: WebhookPayload = {
       event: 'test',
       timestamp: new Date().toISOString(),
       sessionId,
-      idempotencyKey: generateIdempotencyKey('test', { webhookId: webhook.id }),
-      deliveryId: generateDeliveryId(),
+      idempotencyKey: `test_${deliveryId}_${webhook.id}`,
+      deliveryId,
       data: {
         message: 'This is a test webhook from OpenWA',
         webhookId: webhook.id,

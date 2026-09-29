@@ -62,11 +62,12 @@ export function resolveNonNegativeIntEnv(raw: string | undefined, fallback: numb
 export const MAX_TIMER_MS = 2147483647;
 
 /**
- * The UI locale Chromium is pinned to. WhatsApp Web renders its chrome — including the new-account
- * onboarding modal the whatsapp-web.js adapter dismisses (#982) — in the browser's language, and that
- * detector matches visible English text. Without a pin the language is whatever the launched binary
- * defaults to, which differs between the amd64 (Chrome for Testing) and arm64 (Debian chromium) images
- * and between host installs.
+ * The UI locale Chromium is pinned to. Without a pin the browser's language is whatever the launched
+ * binary defaults to, which differs between the amd64 (Chrome for Testing) and arm64 (Debian chromium)
+ * images and between host installs. The pin settles the browser's locale only: WhatsApp Web can still
+ * render its chrome, including the new-account onboarding modal the whatsapp-web.js adapter dismisses
+ * (#982), in the account's own language (#1679), so a non-English modal needs
+ * WWEBJS_ONBOARDING_CONTINUE_LABELS.
  */
 export const PINNED_BROWSER_LOCALE = 'en-US';
 
@@ -74,7 +75,8 @@ export const PINNED_BROWSER_LOCALE = 'en-US';
  * Append the locale pin unless the operator already set one. Deliberately applied AFTER the
  * PUPPETEER_ARGS override rather than baked into the default string: that variable REPLACES the
  * defaults, so a deployment that customises args for an unrelated reason would otherwise silently
- * lose the pin and the onboarding detector with it. An explicit `--lang` always wins.
+ * lose the pin and fall back to the binary's default browser language. An explicit `--lang` always
+ * wins.
  *
  * Returns a NEW array — never mutates the input — because the resolved args object is shared by every
  * session, and pushing per-session flags onto a shared array leaked proxy settings across sessions
@@ -211,9 +213,12 @@ export default () => ({
       // Accept either delimiter: .env/compose use commas, the dashboard Infrastructure form
       // persists space-separated. Splitting on both keeps each flag a discrete argv token —
       // a single glued token like "--no-sandbox --disable-gpu" silently neuters --no-sandbox.
+      // A comma only splits before the next flag, since flag values carry commas of their own
+      // (--disable-features=A,B, --window-size=1280,720).
       args: withPinnedBrowserLocale(
         (process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu')
-          .split(/[\s,]+/)
+          .split(/\s+|,+(?=-)/)
+          .map(arg => arg.replace(/^,+|,+$/g, ''))
           .filter(Boolean),
       ),
       // Optional path to a system Chromium/Chrome binary. When unset, whatsapp-web.js

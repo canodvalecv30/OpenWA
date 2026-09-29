@@ -159,14 +159,20 @@ Four tables live on the data connection, each created by a hand-authored dual-di
 - **Authentication inversion.** A provider webhook cannot carry an OpenWA API key, so ingress is public to
   the API-key guard but validates a **per-instance HMAC (or shared secret)** over the **raw** request
   bytes with a constant-time comparison. The raw body is preserved by a verify callback on the body parser
-  because a re-serialized payload is not byte-identical to what the provider signed. The global rate-limit
-  guard still applies, and the payload is intentionally not bound to a DTO so strict validation cannot
-  reject unknown provider fields.
+  because a re-serialized payload is not byte-identical to what the provider signed. The route is exempt from
+  the global per-IP throttle and bounded by its own guard instead, on two keys, `(pluginId, instanceId)` and
+  the client IP: a provider delivering every tenant's webhooks from one egress address would otherwise be
+  shed at the global tier before the per-instance bound ever fired. The payload is intentionally not bound
+  to a DTO so strict validation cannot reject unknown provider fields.
 - **Replay and duplication.** A signed-timestamp tolerance rejects stale deliveries, and
   `(pluginId, instanceId, providerDeliveryId)` deduplication plus a queue job id keyed on the delivery id
   provides best-effort de-duplication when the provider supplies a stable delivery id. Standard Webhooks defaults
   to its signed `webhook-id`; other handlers must remain idempotent because arbitrary provider headers
-  are not authenticated by every scheme. Freshness is enforced whenever a route declares
+  are not authenticated by every scheme. A route whose provider mints a fresh delivery id on every retry
+  attempt can declare `dedupOn: "body"` to key retries on the raw body instead: byte-identical bodies
+  then collapse within `INGRESS_DEDUP_RETENTION_DAYS`, the persisted delivery id and the `{id}` ack
+  token become that content hash, and a provider whose retries legitimately differ in the signed body
+  should keep the default, since `body` would dedup nothing for it. Freshness is enforced whenever a route declares
   `signature.timestampHeader`: the declared `toleranceSec` wins, and otherwise the host default
   (`INGRESS_TIMESTAMP_TOLERANCE_SEC`, default 300) applies — a declared timestamp is never accepted
   without a freshness check. Freshness alone is not replay protection, though: an **unsigned**
@@ -205,6 +211,12 @@ PostgreSQL state. When the queue is disabled, ingress dispatches inline after pe
 serialize concurrent same-conversation deliveries. Providers already deliver over unordered,
 at-least-once HTTP, so plugin handlers must be idempotent and treat ingress as a reconciliation trigger.
 
+A job waiting on that lock still holds one of the `INGRESS_WORKER_CONCURRENCY` worker slots (default
+10). A burst on one lane larger than that fills every slot with same-lane waiters, and events for other
+conversations and instances queue behind the burst until it drains. Size `INGRESS_WORKER_CONCURRENCY`
+above the largest burst you expect on a single lane, and declare a `conversationId` pointer on the
+route so the lane is one conversation; without it the lane is the whole instance.
+
 Persist-before-acknowledge alone is not delivery: a crash between the persist and the enqueue, or a
 fire-and-forget enqueue on a `response` route whose outcome is never recorded, would strand the row
 with the provider already acknowledged. The **ingress reconciler** closes that window: every
@@ -234,12 +246,13 @@ dedup rows and re-admit their replays, which is worse than the bounded growth it
 ## 25.8 The Integration SDK (v1)
 
 The stable surface untrusted adapters consume. A plugin declares `sdkVersion: "1"` and an `ingress`
-descriptor (the route, its signature scheme, replay tolerance, dedup header, and an optional verification
-handshake) in its manifest, and requests the `webhook:ingress` and `conversation:send` permissions. The
-host refuses to load an ingress-declaring plugin whose declared **major** differs from the host's
-supported major, and the surface is **additive-only** within a major. The worker-facing API centres on
-`ctx.registerWebhook(...)` (claim an inbound route), `ctx.conversations.send(...)` (normalized reply), and
-per-instance mapping and handover helpers.
+descriptor (the route, which is a single URL path segment such as `chatwoot` and never contains a `/`, its
+signature scheme, replay tolerance, dedup header, and an optional verification handshake) in its manifest,
+and requests the `webhook:ingress` and `conversation:send` permissions. The host refuses to load an
+ingress-declaring plugin whose declared **major** differs from the host's supported major, and the surface
+is **additive-only** within a major. The worker-facing API centres on `ctx.registerWebhook(...)` (claim an
+inbound route), `ctx.conversations.send(...)` (normalized reply), and per-instance mapping and handover
+helpers.
 
 The `signature.scheme` field enumerates `hmac-sha256` (HMAC over a `contentTemplate`), `shared-secret`
 (constant-time header compare), `standard-webhooks`, and `none` (unauthenticated — a route declaring it
@@ -263,7 +276,20 @@ Within major 1 the surface grows additively. A route's optional `response` contr
 `headers`, rendered host-side with `{rawBody}`/`{timestamp}`/`{id}` templates from the verified request),
 and an advisory `deadlineMs` — lets an adapter shape the synchronous HTTP response the provider sees; the
 plugin still always runs async, and a route with no `response` is byte-identical to today's default
-fast-ack. The `mode: 'sync-reply'` value is **deprecated** in favor of `response`: it was inert dead code
+fast-ack. `ack.body` and every `ack.headers` value must be strings, `ack.status` must be a final status
+(200-599), and a header value may hold no control character (other than HTAB) and nothing above U+00FF,
+since Node cannot write one; a manifest that declares otherwise is refused at install and at boot, which
+leaves that plugin in error until the manifest is fixed. A declared header is dropped rather than written
+when it is one of these thirteen names: `content-type`, which the host sets itself (a declared
+`application/json` or `text/plain` is honored as the bare media type with `charset=utf-8`, and any other
+declared type, or none, is sent as `text/plain`, so a reflected ack is never served as executable
+content); `content-length`, `transfer-encoding`, `content-encoding` and `trailer`, since the host frames
+the response itself and never compresses it; `set-cookie`, `access-control-allow-origin` and
+`access-control-allow-credentials`; and `content-security-policy`, `x-content-type-options`,
+`x-frame-options`, `strict-transport-security` and `referrer-policy`, the response protections the host
+sets for every request. Every other declared header goes out verbatim.
+
+The `mode: 'sync-reply'` value is **deprecated** in favor of `response`: it was inert dead code
 that was never wired to the HTTP response (the pipeline is always async + fast-ack), and it is kept in the
 `mode` union only to preserve SDK v1 additive-only compatibility — do not remove it within major 1, and do
 not rely on it at runtime.

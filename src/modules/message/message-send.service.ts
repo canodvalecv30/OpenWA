@@ -1,8 +1,9 @@
 import { Injectable, BadRequestException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, QueryDeepPartialEntity } from 'typeorm';
+import { In, Repository, QueryDeepPartialEntity } from 'typeorm';
 import { SessionService } from '../session/session.service';
+import { MessageProjector } from '../session/message-projector.service';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
@@ -18,6 +19,9 @@ import { SsrfBlockedError, SSRF_BLOCKED_CLIENT_MESSAGE } from '../../common/secu
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { isUniqueViolation } from '../../common/utils/db-errors';
 import { ChatMediaArchiveService } from '../chat-media/chat-media-archive.service';
+import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { resolveJidCandidates } from '../../engine/identity/jid-candidates';
+import { isMediaUrl, MEDIA_URL_MESSAGE } from '../../common/media/media-url';
 
 /** Default cap on a rendered template's final text; overridable via TEMPLATE_RENDER_MAX_CHARS. */
 export const DEFAULT_TEMPLATE_RENDER_MAX_CHARS = 64 * 1024;
@@ -43,11 +47,12 @@ export interface SaveOutgoingMessageData {
   status?: MessageStatus;
   metadata?: Record<string, unknown>;
   /**
-   * Quoted id for a send that is a reply. Folded into `metadata.quotedMessage` here rather than
-   * by each sender so the nine send paths and `reply()` persist one shape — a row that quoted a
-   * message but records nothing is simply wrong history, and the dashboard reads this key to
-   * render the reply preview. The body is left empty: unlike `reply()`, the send paths do not
-   * look the quoted message up, and '' is already reply()'s own value when that lookup fails.
+   * Quoted id for a send that quotes something. Folded into `metadata.quotedMessage` at the shared
+   * persist rather than by each sender, so the nine send paths and `reply()` record one shape: a row
+   * that quoted a message but records nothing is simply wrong history, and the dashboard reads this
+   * key to render the quote preview. The quoted body is looked up there too, so a sender does not
+   * have to remember; a quoted row with no text of its own (a caption-less image, say) still yields
+   * '', which the preview renders as an empty box.
    */
   quotedMessageId?: string;
 }
@@ -87,6 +92,14 @@ export class MessageSendService {
     // archived — the inline row copy and the read endpoint are unaffected either way.
     @Optional()
     private readonly chatMediaArchive?: ChatMediaArchiveService,
+    // Optional for the same reason; absent means a quote is matched on the chat's phone and
+    // literal forms only, never on its lid.
+    @Optional()
+    private readonly lidMappingStore?: LidMappingStoreService,
+    // Optional for the same reason; absent means a quote is read from stored rows only, so a reply
+    // sent while the quoted message's `message:received` hooks still run stores an empty quote.
+    @Optional()
+    private readonly messageProjector?: MessageProjector,
   ) {}
 
   async sendText(sessionId: string, dto: SendTextMessageDto): Promise<MessageResponseDto> {
@@ -185,6 +198,15 @@ export class MessageSendService {
     // requests trip the breaker on a healthy session.
     if (countsTowardSendBreaker(error)) {
       this.pacing.recordSendFailure(sessionId);
+      // The same classification picks the failures worth a log line. Otherwise an engine-side failure
+      // leaves only Nest's generic `[ExceptionsHandler]` line, with no session, chat or message type to
+      // correlate it with.
+      this.logger.warn(`Send failed in the engine (${type})`, {
+        sessionId,
+        chatId: message.chatId,
+        messageId: message.id,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
     }
     await this.saveFailedMessage(message);
     // Sanitize the hook payload: an SSRF block's raw .message names the resolved internal address
@@ -483,15 +505,7 @@ export class MessageSendService {
     const engine = this.getEngine(sessionId);
 
     // Resolve the quoted message body (best-effort) so the dashboard can render the reply preview.
-    let quotedBody = '';
-    try {
-      const quoted = await this.messageRepository.findOne({
-        where: { sessionId, waMessageId: finalDto.quotedMessageId },
-      });
-      quotedBody = quoted?.body || '';
-    } catch (err) {
-      this.logger.warn(`Failed to resolve quoted message ${finalDto.quotedMessageId}`, { error: String(err) });
-    }
+    const quotedBody = await this.resolveQuotedBody(sessionId, finalDto.quotedMessageId, finalDto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -512,6 +526,46 @@ export class MessageSendService {
         : await engine.replyToMessage(finalDto.chatId, finalDto.quotedMessageId, finalDto.text);
     } catch (error) {
       return this.failSend(sessionId, 'reply', message, finalDto, error);
+    }
+    return this.persistSentState(message, result);
+  }
+
+  async clickButton(
+    sessionId: string,
+    dto: { chatId: string; messageId: string; buttonId: string; text?: string },
+  ): Promise<MessageResponseDto> {
+    const finalDto = await this.applySendingGate(sessionId, 'click-button', dto);
+    const engine = this.getEngine(sessionId);
+
+    // A click IS a reply to the prompt, so resolve the prompt's body the way reply() does: the
+    // dashboard renders the quote box from this field, and a hardcoded empty string left every
+    // answered prompt showing an empty quote above the choice the user tapped.
+    const promptBody = await this.resolveQuotedBody(sessionId, finalDto.messageId, finalDto.chatId);
+
+    const message = await this.saveOutgoingMessage(sessionId, {
+      chatId: finalDto.chatId,
+      body: finalDto.text || finalDto.buttonId,
+      type: 'text',
+      metadata: {
+        quotedMessage: { id: finalDto.messageId, body: promptBody },
+        button: { id: finalDto.buttonId, text: finalDto.text },
+      },
+    });
+
+    let result: MessageResult;
+    try {
+      result = await engine.clickButton(finalDto.chatId, finalDto.messageId, finalDto.buttonId, finalDto.text);
+    } catch (error) {
+      return this.failSend(sessionId, 'click-button', message, finalDto, error);
+    }
+    // The engine resolves the visible label from the stored prompt when the caller omitted `text`.
+    // Persist that label (not the raw buttonId) so the row agrees with what went on the wire.
+    if (result.body) {
+      message.body = result.body;
+      message.metadata = {
+        ...(message.metadata ?? {}),
+        button: { id: finalDto.buttonId, text: result.body },
+      };
     }
     return this.persistSentState(message, result);
   }
@@ -542,6 +596,49 @@ export class MessageSendService {
   }
 
   /**
+   * The body of the message a send is quoting, for the dashboard's quote preview. Best-effort in
+   * every direction: an id that names nothing stored (evicted, or sent from the phone before this
+   * gateway saw the chat) and a read that fails both answer '', because a preview is never worth
+   * failing a send over. The row is looked up by engine id within the session. A reply and a button
+   * click answer a message in the chat they send into, so for them `chatId` also restricts the lookup
+   * to that chat (any of its phone, lid or group forms): the pending row is saved before the engine
+   * refuses a cross-chat quote, and copying a foreign body would store it under a chat a
+   * chat-restricted key may use. The send routes may quote across chats, and the guard refuses a
+   * chat-restricted key any quotedMessageId there, so they pass no chat. While the quoted message's
+   * `message:received` hooks are still running it has no row yet, so the copy that hook chain
+   * carries answers instead, under the same chat restriction.
+   */
+  private async resolveQuotedBody(sessionId: string, quotedMessageId: string, chatId?: string): Promise<string> {
+    try {
+      const store = this.lidMappingStore;
+      const expanded = chatId
+        ? await resolveJidCandidates(
+            chatId,
+            store && {
+              resolveLid: lid => store.findPhoneForLid(lid),
+              lidsForPhone: phone => store.findLidsForPhone(phone),
+            },
+          )
+        : [];
+      // A `message:received` hook that answers the message runs before its row is written. A hook
+      // rewrite is checked for its id and chatId only, so a body that is not text quotes as ''.
+      const inFlight = this.messageProjector?.inFlightInbound(sessionId, quotedMessageId);
+      if (inFlight && (!chatId || inFlight.chatId === chatId || expanded.includes(inFlight.chatId))) {
+        return typeof inFlight.body === 'string' ? inFlight.body : '';
+      }
+      const quoted = await this.messageRepository.findOne({
+        where: chatId
+          ? { sessionId, chatId: In([...new Set([chatId, ...expanded])]), waMessageId: quotedMessageId }
+          : { sessionId, waMessageId: quotedMessageId },
+      });
+      return quoted?.body || '';
+    } catch (err) {
+      this.logger.warn(`Failed to resolve quoted message ${quotedMessageId}`, { error: String(err) });
+      return '';
+    }
+  }
+
+  /**
    * Save outgoing message to database.
    * When called before sending, creates a record with PENDING status; bulk send reuses this after a
    * successful send (status SENT) so batch messages are persisted like single sends.
@@ -554,6 +651,13 @@ export class MessageSendService {
    */
   async saveOutgoingMessage(sessionId: string, data: SaveOutgoingMessageData): Promise<Message> {
     const session = await this.sessionService.findOne(sessionId);
+    // Resolved here rather than in each sender: reply and click-button build their own
+    // `metadata.quotedMessage` and never reach this branch, so every OTHER quoting sender (media,
+    // location, contact, poll, quoted text) used to persist an id with an empty body and the
+    // dashboard drew a blank quote box above the message.
+    const quotedMessage = data.quotedMessageId
+      ? { id: data.quotedMessageId, body: await this.resolveQuotedBody(sessionId, data.quotedMessageId) }
+      : undefined;
     const message = this.messageRepository.create({
       sessionId,
       // An engine that sent a message but could not read its id back reports an empty id (see the
@@ -571,9 +675,7 @@ export class MessageSendService {
       direction: MessageDirection.OUTGOING,
       timestamp: data.timestamp,
       status: data.status ?? MessageStatus.PENDING,
-      metadata: data.quotedMessageId
-        ? { ...data.metadata, quotedMessage: { id: data.quotedMessageId, body: '' } }
-        : data.metadata,
+      metadata: quotedMessage ? { ...data.metadata, quotedMessage } : data.metadata,
     });
     const saved = await this.messageRepository.save(message).catch(async (err: unknown) => {
       const waMessageId = message.waMessageId;
@@ -763,6 +865,11 @@ export class MessageSendService {
     if (!dto.url && !base64) {
       throw new BadRequestException('Either url or base64 must be provided');
     }
+    // The DTO checks this too, but a plugin send and a message:sending rewrite reach here without it,
+    // and both engines decode anything that is not an http(s) URL as base64.
+    if (!base64 && !isMediaUrl(dto.url)) {
+      throw new BadRequestException(MEDIA_URL_MESSAGE);
+    }
 
     if (base64 && !dto.mimetype) {
       throw new BadRequestException('mimetype is required when using base64 data');
@@ -776,8 +883,8 @@ export class MessageSendService {
       mimetype: dto.mimetype || 'application/octet-stream',
       // base64 wins over url when both are present: it is the explicit local payload, and a stale
       // `url` (e.g. a Swagger/example default left in the body) must not be fetched in its place.
-      // Aligns the send selection with the base64-first persisted metadata and the url field's
-      // `@ValidateIf((o) => !o.base64)` (which skips @IsUrl when base64 is present) — #670.
+      // Aligns the send selection with the base64-first persisted metadata and the url field's check,
+      // which is skipped only when base64 holds data after its data-URI prefix is stripped (#670).
       data: base64 || dto.url!,
       filename: dto.filename,
       caption: dto.caption,

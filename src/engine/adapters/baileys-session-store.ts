@@ -20,14 +20,49 @@ export const SESSION_STORE_MAP_CAP_DEFAULT = 5000;
  * Insertion-ordered Map with an LRU cap, the same discipline as LidMappingStoreService: a read or
  * write re-inserts the key at the most-recent end, and a set evicts the least-recently-used entry
  * while over `max`. `max = 0` means unbounded.
+ *
+ * `pinned` marks entries eviction may never take. It exists for the contacts map, where two
+ * populations share one structure: the account's own address book, which the operator curated and
+ * which the API reports, and a much larger stream of peers seen once in a group or a broadcast.
+ * Without it the second evicts the first.
+ *
+ * The cap then governs the UNPINNED population alone, which is the one that grows from peer traffic.
+ * Counting the whole map instead would make a full address book evict each new peer in the same call
+ * that inserted it, so peers would stop being cached at all once the saved set reached the cap. The
+ * pinned side is bounded by the account's own contact list rather than by this number.
  */
 class LruMap<K, V> {
   private readonly map = new Map<K, V>();
 
-  constructor(private readonly max: number) {}
+  /** Entries the predicate does not protect. The cap is measured against exactly these. */
+  private unpinned = 0;
+
+  constructor(
+    private readonly max: number,
+    private readonly pinned?: (value: V) => boolean,
+  ) {}
+
+  private isPinned(value: V): boolean {
+    return this.pinned ? this.pinned(value) : false;
+  }
+
+  /** Remove a key while keeping {@link unpinned} honest. No-op for a key that is not held. */
+  private drop(key: K): void {
+    if (!this.map.has(key)) {
+      return;
+    }
+    if (!this.isPinned(this.map.get(key) as V)) {
+      this.unpinned--;
+    }
+    this.map.delete(key);
+  }
 
   has(key: K): boolean {
     return this.map.has(key);
+  }
+
+  delete(key: K): void {
+    this.drop(key);
   }
 
   get(key: K): V | undefined {
@@ -41,23 +76,91 @@ class LruMap<K, V> {
   }
 
   set(key: K, value: V): void {
-    this.map.delete(key);
+    this.drop(key);
     this.map.set(key, value);
+    if (!this.isPinned(value)) {
+      this.unpinned++;
+    }
     if (!this.max) {
       return;
     }
-    while (this.map.size > this.max) {
-      const oldest = this.map.keys().next().value;
-      if (oldest === undefined) {
-        break;
+    while (this.unpinned > this.max) {
+      const victim = this.oldestEvictable();
+      if (victim === undefined) {
+        break; // unreachable while unpinned > 0, and a safe stop if it ever is not
       }
-      this.map.delete(oldest);
+      this.drop(victim);
     }
   }
 
+  /**
+   * The least-recently-used entry an eviction may take, or undefined when every entry is pinned.
+   * Without a `pinned` predicate this is the map head, as before.
+   */
+  private oldestEvictable(): K | undefined {
+    if (!this.pinned) {
+      const oldest = this.map.keys().next().value;
+      return oldest;
+    }
+    for (const [key, value] of this.map) {
+      if (!this.pinned(value)) {
+        return key;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * LIVE iterator, not a snapshot. {@link get} re-inserts a hit to keep recency order, so a loop
+   * whose body reads this map through any path is handed the same entry forever. Copy first
+   * (`[...map.values()]`) whenever the body can reach back into the map.
+   */
   values(): IterableIterator<V> {
     return this.map.values();
   }
+
+  /** LIVE iterator with the same caveat as {@link values}. */
+  entries(): IterableIterator<[K, V]> {
+    return this.map.entries();
+  }
+}
+
+/** A projected contact with the raw store key it came from, so twins can be folded deterministically. */
+interface ContactTwin {
+  contact: Contact;
+  rawId: string;
+}
+
+/** True for a store key in the phone dialect, i.e. the twin that carries a phone number of its own. */
+function isPhoneKeyed(rawId: string): boolean {
+  return rawId.endsWith('@s.whatsapp.net') || rawId.endsWith('@c.us');
+}
+
+/**
+ * Fold two store entries that project to the same person into one row.
+ *
+ * Neither side is more correct by position: the store is LRU-ordered, so iteration order tracks
+ * traffic, and letting it decide meant `GET /contacts` answered with whichever twin had been quiet
+ * and dropped a pushname the other had just learned, flipping back later. So a field absent on one
+ * side is filled from the other, and for a field both carry the phone-dialect twin wins, which is
+ * the entry {@link BaileysSessionStore.findContact} already answers with for the same id. When
+ * neither or both are phone-keyed, the lower raw key wins: arbitrary, but stable across calls.
+ */
+function mergeContactTwins(a: ContactTwin, b: ContactTwin): ContactTwin {
+  const aWins = isPhoneKeyed(a.rawId) !== isPhoneKeyed(b.rawId) ? isPhoneKeyed(a.rawId) : a.rawId <= b.rawId;
+  const [primary, secondary] = aWins ? [a, b] : [b, a];
+  return {
+    rawId: primary.rawId,
+    contact: {
+      id: primary.contact.id,
+      name: primary.contact.name ?? secondary.contact.name,
+      pushName: primary.contact.pushName ?? secondary.contact.pushName,
+      number: primary.contact.number || secondary.contact.number,
+      isMyContact: primary.contact.isMyContact || secondary.contact.isMyContact,
+      isBlocked: primary.contact.isBlocked || secondary.contact.isBlocked,
+      profilePicUrl: primary.contact.profilePicUrl ?? secondary.contact.profilePicUrl,
+    },
+  };
 }
 
 /**
@@ -67,7 +170,10 @@ class LruMap<K, V> {
  *
  * Every map is LRU-bounded (`BAILEYS_SESSION_STORE_MAX_ENTRIES`, default 5000 per map, 0 = unbounded)
  * because contacts/chats/lastMessages/lidToPn all grow from peer-controlled traffic — without a cap a
- * chatty account leaks one entry per distinct peer ever seen. Miss paths after an eviction:
+ * chatty account leaks one entry per distinct peer ever seen. On the contacts map that cap governs the
+ * peers ALONE: a contact carrying a saved name is pinned and never evicted, because it comes from the
+ * account's own address book rather than from traffic, and that side is bounded by the address book
+ * instead (see LruMap's `pinned`). Miss paths after an eviction:
  * `lidToPn` falls back to the contacts map and then the persisted cross-session lid->phone table (all
  * writes are written through), `lastMessage` reads null (callers treat it as "nothing known"),
  * `getEphemeralExpiration` falls back to `Chat.ephemeralExpiration` then undefined (never forces a
@@ -79,6 +185,13 @@ export class BaileysSessionStore {
   private readonly contacts: LruMap<string, BaileysContact>;
   private readonly chats: LruMap<string, Chat>;
   private readonly lastMessages: LruMap<string, LastMessage>;
+  /**
+   * The newest message each chat RECEIVED, kept apart from the preview because a read receipt can
+   * only acknowledge a message the other side sent: Baileys drops an own key from the receipt, so
+   * answering with the preview after an API reply sent nothing while the route reported success.
+   * An evicted entry reads null, which the receipt path answers as "nothing known".
+   */
+  private readonly lastInbound: LruMap<string, { key: WAMessageKey; timestamp: number }>;
   private readonly lidToPn: LruMap<string, string>;
   /**
    * Per-chat disappearing-messages timer (seconds) learned from inbound messages (#473), the reliable
@@ -108,9 +221,13 @@ export class BaileysSessionStore {
       process.env.BAILEYS_SESSION_STORE_MAX_ENTRIES,
       SESSION_STORE_MAP_CAP_DEFAULT,
     );
-    this.contacts = new LruMap(maxEntries);
+    // A saved name only ever arrives from the account's own app-state address book, never from peer
+    // traffic, so pinning on it keeps the curated set out of reach of the peers this session happens
+    // to observe. The pinned population is bounded by the account's own contact list.
+    this.contacts = new LruMap(maxEntries, contact => Boolean(contact.name));
     this.chats = new LruMap(maxEntries);
     this.lastMessages = new LruMap(maxEntries);
+    this.lastInbound = new LruMap(maxEntries);
     this.lidToPn = new LruMap(maxEntries);
     // Double-keyed (raw + neutral JID per chat), so it needs two slots per chat to cover the same span.
     this.ephemeralByChat = new LruMap(maxEntries * 2);
@@ -118,12 +235,22 @@ export class BaileysSessionStore {
 
   upsertContacts(records: Partial<BaileysContact>[] = []): void {
     for (const r of records) {
-      if (!r.id) {
+      // History-sync / app-state rows sometimes key the person as `lid` and leave `id` empty.
+      const id = r.id ?? r.lid;
+      if (!id) {
         continue;
       }
-      const existing = this.contacts.get(r.id) ?? { id: r.id };
-      const merged: BaileysContact = { ...existing, ...r };
-      this.contacts.set(r.id, merged);
+      // Groups/newsletters/status arrive in the same history-sync contact array as people; they
+      // are not address-book entries and must not occupy the contact cap or GET /contacts.
+      const kind = parseWaId(id).kind;
+      if (kind === 'group' || kind === 'newsletter' || kind === 'broadcast' || kind === 'status') {
+        continue;
+      }
+      const existing = this.contacts.get(id) ?? { id };
+      const merged: BaileysContact = { id: existing.id };
+      this.assignDefined(merged, existing);
+      this.assignDefined(merged, { ...r, id });
+      this.contacts.set(id, merged);
       // Capture a lid->phone pair from the merged record (lid + phone can arrive in separate updates).
       // `phoneNumber` is the authoritative PN field; fall back to `id` itself only when it's already
       // in the phone dialect (a lid-only contact's `id` is `<lid>@lid`, which is not a usable phone).
@@ -131,6 +258,29 @@ export class BaileysSessionStore {
       if (merged.lid && phone) {
         this.lidToPn.set(merged.lid, phone);
         this.persistLidMapping(merged.lid, phone);
+      }
+    }
+  }
+
+  /**
+   * Copy own enumerable fields whose value is not `undefined`. History-sync contacts always include
+   * `name: displayName || name || username || undefined`, and a later `{ ...existing, ...partial }`
+   * spread would wipe a saved address-book name that arrived first via `contacts.upsert`.
+   *
+   * KNOWN LIMIT: a saved name therefore cannot be cleared, so a contact deleted or renamed blank on
+   * the phone keeps its old name here, stays in `GET /contacts`, and (being named) is pinned against
+   * eviction. Making an absent name authoritative is NOT a safe fix on its own: the same method
+   * serves `contacts.update`, which Baileys emits as `{ id, notify }` for the pushname on every
+   * inbound message, so absent-means-clear there would wipe the address book message by message.
+   * Only an app-state `contactAction` could carry that meaning, and whether WhatsApp expresses a
+   * deletion as a contactAction with empty fields is unverified here; settling it needs a live
+   * account, not a guess on this path.
+   */
+  private assignDefined(target: BaileysContact, source: Partial<BaileysContact>): void {
+    for (const key of Object.keys(source) as (keyof BaileysContact)[]) {
+      const value = source[key];
+      if (value !== undefined) {
+        (target as unknown as Record<string, unknown>)[key] = value;
       }
     }
   }
@@ -143,6 +293,25 @@ export class BaileysSessionStore {
       const existing = this.chats.get(r.id) ?? { id: r.id };
       this.chats.set(r.id, { ...existing, ...r });
       this.persistChatState(r.id, r);
+    }
+  }
+
+  /**
+   * Drop chats Baileys reports deleted (`chats.delete`: an API delete replayed locally, or one made on
+   * the phone), with their preview and last inbound message, under every spelling: the id comes from
+   * the app-state index, which need not be the twin the chat or its messages are keyed under. The
+   * persisted mute/archive/pin goes too: a chat a later message re-creates is a new chat on WhatsApp,
+   * and the row would otherwise lay the deleted chat's state over it.
+   */
+  removeChats(ids: string[] = []): void {
+    const keys = new Set(ids.flatMap(id => this.chatTwins(id)));
+    for (const key of keys) {
+      this.chats.delete(key);
+      this.lastMessages.delete(key);
+      this.lastInbound.delete(key);
+    }
+    if (keys.size && this.chatStateStore && this.sessionId) {
+      void this.chatStateStore.forget(this.sessionId, [...keys]);
     }
   }
 
@@ -198,13 +367,18 @@ export class BaileysSessionStore {
     // newest-message guard so every inbound refreshes it; the timer is cached under both the raw and
     // neutral JID so an outbound send addressed in either dialect (phone or @lid) finds it.
     this.recordEphemeralFromMessage(chatId, msg);
+    const key = this.chatKey(chatId);
     const timestamp = this.toUnixSeconds(msg.messageTimestamp);
-    const existing = this.lastMessages.get(chatId);
+    if (!msg.key.fromMe) {
+      const inbound = this.lastInbound.get(key);
+      if (!inbound || inbound.timestamp < timestamp) this.lastInbound.set(key, { key: msg.key, timestamp });
+    }
+    const existing = this.lastMessages.get(key);
     if (existing && existing.timestamp >= timestamp) {
       return; // keep the newest
     }
     const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
-    this.lastMessages.set(chatId, { key: msg.key, timestamp, text });
+    this.lastMessages.set(key, { key: msg.key, timestamp, text });
   }
 
   /**
@@ -213,10 +387,42 @@ export class BaileysSessionStore {
    */
   recordMessageEdit(chatId: string, messageId: string, text: string): void {
     if (!messageId) return;
-    const rawChatId = this.lastMessages.has(chatId) ? chatId : this.toEngineJid(chatId);
-    const existing = this.lastMessages.get(rawChatId);
+    const key = this.chatKey(chatId);
+    const existing = this.lastMessages.get(key);
     if (!existing || existing.key.id !== messageId) return;
-    this.lastMessages.set(rawChatId, { ...existing, text });
+    this.lastMessages.set(key, { ...existing, text });
+  }
+
+  /**
+   * The key a chat's preview is kept under, for an id in any dialect. One conversation reaches this
+   * store as `<phone>@c.us` (the API and the listing), `<phone>@s.whatsapp.net` and `<lid>@lid`
+   * (Baileys, which addresses a lid-migrated contact by its lid and sends to whatever it is given).
+   * Keying each spelling separately left an API send or an inbound message on a twin the chat row
+   * never reads, so the chat showed no preview and chat actions found no history. The chat record
+   * decides: the twin Baileys keyed the chat under wins, then a twin that already holds a preview,
+   * and a chat known under neither falls back to the engine dialect.
+   */
+  private chatKey(jid: string): string {
+    if (this.chats.has(jid)) return jid;
+    const twins = this.chatTwins(jid);
+    return twins.find(k => this.chats.has(k)) ?? twins.find(k => this.lastMessages.has(k)) ?? this.toEngineJid(jid);
+  }
+
+  /** Every spelling of one chat this session can connect: the id, its engine form, and its lid or phone twin. */
+  private chatTwins(jid: string): string[] {
+    const parsed = parseWaId(jid);
+    const twins = [jid, this.toEngineJid(jid)];
+    if (parsed.kind === 'lid') {
+      twins.push(`${parsed.userPart}@lid`);
+      const phone = this.resolvePhone(jid);
+      if (phone) twins.push(`${phone}@s.whatsapp.net`);
+    } else if (parsed.kind === 'user') {
+      for (const [lid, pn] of this.lidToPn.entries()) {
+        if (userPart(pn) === parsed.userPart) twins.push(lid);
+      }
+      for (const lid of this.lidStore?.lidsForPhone(parsed.userPart) ?? []) twins.push(`${lid}@lid`);
+    }
+    return twins;
   }
 
   /**
@@ -276,21 +482,104 @@ export class BaileysSessionStore {
   }
 
   listContacts(): Contact[] {
-    return [...this.contacts.values()].map(c => this.toNeutralContact(c));
+    // GET /contacts is the address book, not "everyone this session has ever seen". Baileys
+    // documents `name` as the one YOU saved; `notify` is only the pushname they set themselves.
+    //
+    // Deduplicated by neutral id: one person can occupy two entries, one keyed by `@lid` and one by
+    // the phone dialect, and when both carry a saved name they project to the SAME id once the lid
+    // resolves. Listing both put two rows sharing one id into the answer.
+    //
+    // The iteration is over a SNAPSHOT, and must stay that way: `toNeutralContact` resolves a lid
+    // through `resolvePhone`, which reads this very map, and a read moves the entry to the
+    // most-recent end. Iterating the live map therefore hands the same entry back forever, a
+    // synchronous loop that wedges the process rather than answering the request.
+    const byId = new Map<string, ContactTwin>();
+    for (const c of [...this.contacts.values()]) {
+      if (!c.name) continue;
+      const twin: ContactTwin = { contact: this.toNeutralContact(c), rawId: c.id };
+      const existing = byId.get(twin.contact.id);
+      byId.set(twin.contact.id, existing ? mergeContactTwins(existing, twin) : twin);
+    }
+    return [...byId.values()].map(t => t.contact);
   }
 
   findContact(id: string): Contact | null {
-    const c = this.contacts.get(id) ?? this.contacts.get(this.toEngineJid(id));
-    return c ? this.toNeutralContact(c) : null;
+    const parsed = parseWaId(id);
+    const keys = [id, this.toEngineJid(id)];
+    if (parsed.kind === 'lid') {
+      keys.push(`${parsed.userPart}@lid`);
+    }
+    if (parsed.kind === 'user') {
+      keys.push(`${parsed.userPart}@s.whatsapp.net`, `${parsed.userPart}@c.us`);
+    }
+    // One person can occupy two entries, one keyed by `@lid` and one by the phone dialect, and only
+    // one of them carries the saved name. Prefer the named one: the nameless twin answers
+    // `isMyContact: false` and no display name for somebody the account has saved.
+    let unnamed: BaileysContact | undefined;
+    for (const key of keys) {
+      const direct = this.contacts.get(key);
+      if (!direct) continue;
+      if (direct.name) return this.toNeutralContact(direct);
+      unnamed ??= direct;
+    }
+    if (parsed.kind !== 'user' && parsed.kind !== 'lid') {
+      return unnamed ? this.toNeutralContact(unnamed) : null;
+    }
+    // The twin is keyed under the OTHER dialect, so a direct hit cannot reach it; the scan below
+    // can, through `lid`/`phoneNumber`. Run it even when a direct hit was found, as long as that hit
+    // was nameless, and keep the nameless one only if the scan turns up nothing better.
+    const want = parsed.userPart;
+    for (const c of this.contacts.values()) {
+      const phone = c.phoneNumber
+        ? userPart(c.phoneNumber)
+        : c.id.endsWith('@s.whatsapp.net') || c.id.endsWith('@c.us')
+          ? userPart(c.id)
+          : '';
+      const lid = c.lid ? userPart(c.lid) : c.id.endsWith('@lid') ? userPart(c.id) : '';
+      if (phone !== want && lid !== want) continue;
+      if (c.name) return this.toNeutralContact(c);
+      unnamed ??= c;
+    }
+    return unnamed ? this.toNeutralContact(unnamed) : null;
   }
 
   listChats(): ChatSummary[] {
     return [...this.chats.values()].map(c => this.toNeutralChat(c));
   }
 
-  lastMessage(chatId: string): { key: WAMessageKey; timestamp: number } | null {
-    const m = this.lastMessages.get(chatId) ?? this.lastMessages.get(this.toEngineJid(chatId));
-    return m ? { key: m.key, timestamp: m.timestamp } : null;
+  /**
+   * The id the chat is keyed under, for an app-state write addressed with any spelling of it (the
+   * listing's @c.us id of a lid-keyed chat resolves to the lid). Baileys indexes the patch by this jid
+   * and replays it locally under the same id, so any other spelling names a chat the phone does not
+   * hold and lands the echo on a second record.
+   */
+  chatJid(chatId: string): string {
+    return this.chatKey(chatId);
+  }
+
+  /** The chat's newest message, with `jid`, the id the chat itself is keyed under. */
+  lastMessage(chatId: string): { key: WAMessageKey; timestamp: number; jid: string } | null {
+    const m = this.newestAcrossTwins(this.lastMessages, chatId);
+    return m ? { key: m.key, timestamp: m.timestamp, jid: this.chatJid(chatId) } : null;
+  }
+
+  /** The newest message the chat received (not one this account sent), or null when none is known. */
+  lastInboundMessage(chatId: string): { key: WAMessageKey; timestamp: number } | null {
+    return this.newestAcrossTwins(this.lastInbound, chatId) ?? null;
+  }
+
+  /**
+   * The newest entry `map` holds for a chat under any of its spellings. A message recorded under the
+   * contact's lid before the lid->phone mapping was learned stays on the lid twin while the chat key
+   * moves to the phone-keyed chat record, so reading the chat key alone would lose it.
+   */
+  private newestAcrossTwins<T extends { timestamp: number }>(map: LruMap<string, T>, chatId: string): T | undefined {
+    let newest: T | undefined;
+    for (const k of [this.chatKey(chatId), ...this.chatTwins(chatId)]) {
+      const v = map.get(k);
+      if (v && (!newest || v.timestamp > newest.timestamp)) newest = v;
+    }
+    return newest;
   }
 
   /**
@@ -364,9 +653,14 @@ export class BaileysSessionStore {
   }
 
   private toNeutralContact(c: BaileysContact): Contact {
-    const number = c.phoneNumber ? userPart(c.phoneNumber) : c.id.endsWith('@s.whatsapp.net') ? userPart(c.id) : '';
+    // The number is read off the NEUTRAL id, which has already done the lid resolution: a lid-keyed
+    // entry whose mapping is known projects to `<phone>@c.us` and carries its number, where reading
+    // the raw `@lid` key answered an empty string for somebody the account has saved. An unresolved
+    // lid still answers '', which is the honest answer there.
+    const id = this.toNeutralJid(c.id);
+    const number = c.phoneNumber ? userPart(c.phoneNumber) : id.endsWith('@c.us') ? userPart(id) : '';
     return {
-      id: this.toNeutralJid(c.id),
+      id,
       name: c.name ?? c.verifiedName,
       pushName: c.notify,
       number,
@@ -414,11 +708,13 @@ export class BaileysSessionStore {
    * `conversationTimestamp` beside it. So it is normalised by magnitude: below 1e12 is seconds (an
    * epoch-ms stamp below 1e12 is a date before 2001-09) and is scaled to ms. The current state survives a
    * reconnect via {@link persistChatState}, because Baileys re-emits only app-state mutations newer than
-   * the persisted version, never an already-applied mute.
+   * the persisted version, never an already-applied mute. A negative value is WhatsApp's "Always"
+   * sentinel (-1, the value WhatsApp Web sends too), a mute with no end.
    */
   private isMuted(muteEndTime: number | { toNumber(): number } | null | undefined): boolean {
     const raw = this.toUnixSeconds(muteEndTime);
     if (!raw) return false;
+    if (raw < 0) return true;
     const endMs = raw < 1e12 ? raw * 1000 : raw;
     return endMs > Date.now();
   }
@@ -426,11 +722,12 @@ export class BaileysSessionStore {
   /**
    * The expiry instant (epoch ms) for {@link ChatSummary.muteExpiration}, or undefined when the chat
    * is not muted. Same normalisation as {@link isMuted}, so the two agree: a value only survives here
-   * when it is still in the future.
+   * when it is still in the future. A mute with no end reads 0, the contract's "muted indefinitely".
    */
   private muteExpirationMs(muteEndTime: number | { toNumber(): number } | null | undefined): number | undefined {
     const raw = this.toUnixSeconds(muteEndTime);
     if (!raw) return undefined;
+    if (raw < 0) return 0;
     const endMs = raw < 1e12 ? raw * 1000 : raw;
     return endMs > Date.now() ? endMs : undefined;
   }
@@ -452,10 +749,14 @@ export class BaileysSessionStore {
     }
   }
 
-  /** Normalise a raw muteEndTime to canonical epoch ms, or null (0/absent = unmuted). See {@link isMuted}. */
+  /**
+   * Normalise a raw muteEndTime to canonical epoch ms, or null (0/absent = unmuted). A mute with no end
+   * keeps the -1 sentinel rather than scaling it. See {@link isMuted}.
+   */
   private normalizeMuteEndTime(v: number | { toNumber(): number } | null | undefined): number | null {
     const n = this.toUnixSeconds(v);
     if (!n) return null;
+    if (n < 0) return -1;
     return n < 1e12 ? n * 1000 : n;
   }
 

@@ -101,6 +101,26 @@ describe('StatsService time-series + hourly activity on SQLite (end-to-end regre
     expect(chat?.chatName).toBe('Alice');
   });
 
+  // chatName holds the SENDER's push name, so a group's MAX over it named the group after whichever member
+  // sorts last, and an outgoing row would carry the operator's own name. Only a 1:1 chat's inbound rows name it.
+  it('topChats names a 1:1 chat from its inbound rows only and leaves a group unnamed, in both queries', async () => {
+    await ds
+      .getRepository(Session)
+      .save(ds.getRepository(Session).create({ id: 's1', name: 'n', status: SessionStatus.READY, config: {} }));
+    await seedMessage({ chatId: 'g1@g.us', chatName: 'Andi', direction: MessageDirection.INCOMING });
+    await seedMessage({ chatId: 'g1@g.us', chatName: 'Zul', direction: MessageDirection.INCOMING });
+    await seedMessage({ chatId: 'bob@c.us', chatName: 'Bob', direction: MessageDirection.INCOMING });
+    await seedMessage({ chatId: 'bob@c.us', chatName: 'Zz Operator', direction: MessageDirection.OUTGOING });
+
+    const overall = await service.getMessageStats('24h');
+    expect(overall.topChats.find(c => c.chatId === 'g1@g.us')?.chatName).toBeNull();
+    expect(overall.topChats.find(c => c.chatId === 'bob@c.us')?.chatName).toBe('Bob');
+
+    const perSession = await service.getSessionStats('s1');
+    expect(perSession.topChats.find(c => c.chatId === 'g1@g.us')?.chatName).toBeNull();
+    expect(perSession.topChats.find(c => c.chatId === 'bob@c.us')?.chatName).toBe('Bob');
+  });
+
   it('getMessageStats byType excludes content-less system/event rows (no body AND no metadata)', async () => {
     await ds
       .getRepository(Session)
@@ -114,6 +134,20 @@ describe('StatsService time-series + hourly activity on SQLite (end-to-end regre
 
     const stats = await service.getMessageStats('24h');
     expect(stats.byType).toEqual({ text: 1, image: 1 });
+  });
+
+  it('getMessageStats byType counts only rows inside the period, metadata-carrying rows included', async () => {
+    await ds
+      .getRepository(Session)
+      .save(ds.getRepository(Session).create({ id: 's1', name: 'n', status: SessionStatus.READY, config: {} }));
+    const oldImage = await seedMessage({ type: 'image', body: '', metadata: { media: { mimetype: 'image/png' } } });
+    const oldReply = await seedMessage({ body: '', metadata: { quotedMessageId: 'q1' } });
+    const old = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    await ds.getRepository(Message).update([oldImage.id, oldReply.id], { createdAt: old });
+    await seedMessage({ type: 'image', body: '', metadata: { media: { mimetype: 'image/png' } } });
+
+    expect((await service.getMessageStats('24h')).byType).toEqual({ image: 1 });
+    expect((await service.getMessageStats('7d')).byType).toEqual({ image: 1 });
   });
 
   it('time-series query never groups by the bare reserved word `timestamp` (Postgres-safe)', async () => {

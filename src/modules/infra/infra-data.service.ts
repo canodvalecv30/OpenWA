@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { DataSource, QueryRunner } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -8,7 +9,10 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { SessionService } from '../session/session.service';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { ChatStateStoreService } from '../../engine/adapters/baileys-chat-state-store.service';
 import { SessionOwnershipService } from '../session/session-ownership.service';
+import { ScopeBindingService } from '../integration/scope-binding.service';
+import { ReKeyChatStatesBySessionId1786500000000 } from '../../database/migrations/1786500000000-ReKeyChatStatesBySessionId';
 import { Session as SessionEntity, SessionStatus } from '../session/entities/session.entity';
 import { In } from 'typeorm';
 import { DateUtils } from 'typeorm/util/DateUtils';
@@ -291,6 +295,13 @@ export class InfraDataService {
     // direct-construction unit tests, and every use is `?.`-guarded.
     @Optional()
     private readonly ownership?: SessionOwnershipService,
+    @Optional()
+    private readonly chatStateStore?: ChatStateStoreService,
+    // Resolves ScopeBindingService lazily (strict: false) for the post-import plugin binding resync.
+    // A lookup rather than a module import: importing IntegrationModule here would move it deeper in
+    // the module graph and reorder its lifecycle hooks relative to the rest of the app.
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
 
   /**
@@ -632,6 +643,19 @@ export class InfraDataService {
         // does not reach it. Without this, a restore onto an instance that already holds chat_states rows
         // collides on those PKs and the all-or-nothing gate rolls the whole import back.
         await clearTable('chat_states');
+        // The runtime plugin bindings (activeSessions, per-session config) were projected from the rows
+        // about to be deleted. Remember which scopes they bound so the post-commit resync can retire
+        // the ones the restore drops. Probed first: on PostgreSQL a failed SELECT would abort the
+        // transaction, and a missing table is tolerated by clearTable below.
+        const previousPluginBindings = (await queryRunner.hasTable('plugin_instances'))
+          ? (
+              (await queryRunner.query('SELECT "pluginId", "sessionScope", enabled FROM plugin_instances')) as Array<{
+                pluginId: string;
+                sessionScope: string | null;
+                enabled: boolean | number;
+              }>
+            ).map(row => ({ ...row, enabled: Number(row.enabled) === 1 }))
+          : [];
         // Integration Fabric + both DLQs: none carry an FK constraint to sessions (sessionId is provenance),
         // so clearing them here before the sessions DELETE keeps the replace-semantics complete.
         await clearTable('plugin_instances');
@@ -675,7 +699,7 @@ export class InfraDataService {
         // SQLite only: archived datetime values are normalized to the form TypeORM writes there, so a
         // PostgreSQL-made backup compares and sorts like rows the app wrote itself.
         const datetimeColumns = isPostgres ? undefined : sqliteDatetimeColumns(this.dataDataSource);
-        for (const importer of TABLE_IMPORTERS) {
+        restore: for (const importer of TABLE_IMPORTERS) {
           const rows = data.tables[importer.key];
           if (!rows?.length) continue;
           const dateColumns = datetimeColumns?.get(importer.key) ?? [];
@@ -706,6 +730,9 @@ export class InfraDataService {
               warnings.push(
                 `Failed to import ${importer.label} ${importer.id(row)}: ${err instanceof Error ? err.message : String(err)}`,
               );
+              // PostgreSQL aborts the transaction on a failed statement: every later one would fail with
+              // "current transaction is aborted" and bury this row's real error. Stop at the first.
+              if (isPostgres) break restore;
             }
           }
         }
@@ -716,12 +743,50 @@ export class InfraDataService {
         // bug it fixes — on PostgreSQL a failed statement aborts the transaction, so the COMMIT would
         // execute as a ROLLBACK and the endpoint would report a fully discarded import as a success,
         // with per-table counts, to an operator restoring after data loss.
-        try {
-          await restoreSessionOwnership(preservedOwnership, insert, ownershipReadAt);
-        } catch (error) {
-          warnings.push(
-            `Failed to restore session ownership: ${error instanceof Error ? error.message : String(error)}`,
-          );
+        // Skipped once a row has failed: the rollback below is already certain, and on PostgreSQL the
+        // aborted transaction would only add a misleading warning.
+        if (warnings.length === 0) {
+          try {
+            await restoreSessionOwnership(preservedOwnership, insert, ownershipReadAt);
+          } catch (error) {
+            warnings.push(
+              `Failed to restore session ownership: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+
+        // An archive taken before 0.23.5 keys chat_states by session NAME. The migration that re-keys
+        // them to the session id has already run on this database, so a restored name-keyed row would
+        // never be read again and its mute, archive and pin state would be silently lost. Run the same
+        // re-key here, inside the transaction. A failure takes the rollback below, like the ownership
+        // restore, because on PostgreSQL it has already aborted the transaction.
+        if (warnings.length === 0) {
+          try {
+            if (await queryRunner.hasTable('chat_states')) {
+              await queryRunner.query(
+                ReKeyChatStatesBySessionId1786500000000.rekey('name', 'id', { skipAlreadyKeyed: true }),
+              );
+            }
+          } catch (error) {
+            warnings.push(`Failed to re-key chat states: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
+        // "Replace all data" must be all-or-nothing: the import already DELETEd every row, so if any
+        // INSERT failed we must roll back (restoring the pre-import data) rather than commit a
+        // half-wiped DB and report success. A partial restore reported as imported:true was how
+        // message history could silently vanish on a SQLite->Postgres migration. It must precede
+        // every further statement: on PostgreSQL a failure has aborted the transaction, so the
+        // normalization UPDATE below would throw and turn this answer into a 500.
+        if (warnings.length > 0) {
+          await queryRunner.rollbackTransaction();
+          return {
+            imported: false,
+            counts,
+            warnings,
+            notices,
+            ...engineStateAfterRollback,
+          };
         }
 
         // Normalize imported statuses the same way boot does: an ACTIVE status (ready,
@@ -756,21 +821,6 @@ export class InfraDataService {
           );
         }
 
-        // "Replace all data" must be all-or-nothing: the import already DELETEd every row, so if any
-        // INSERT failed we must roll back (restoring the pre-import data) rather than commit a
-        // half-wiped DB and report success. A partial restore reported as imported:true was how
-        // message history could silently vanish on a SQLite->Postgres migration.
-        if (warnings.length > 0) {
-          await queryRunner.rollbackTransaction();
-          return {
-            imported: false,
-            counts,
-            warnings,
-            notices,
-            ...engineStateAfterRollback,
-          };
-        }
-
         // A wrong/empty/garbage backup file restores zero rows but the DELETE already ran — committing
         // would silently WIPE the database and report success. Refuse it and roll back instead. (#488 review)
         const totalRestored = Object.values(counts).reduce((sum, n) => sum + n, 0);
@@ -792,7 +842,27 @@ export class InfraDataService {
         // reach it — resolution would keep serving stale entries (and miss restored ones) until the next
         // process start. Reload from the new DB contents. Best-effort: a miss falls back to engine
         // re-resolution, so a reload failure degrades instead of failing the (already committed) import.
+        // The chat-state mirror has the same shape: left stale, GET /chats would serve the old
+        // archived/pinned/muted flags and the next live update would write them back over the restore.
         await this.lidMappingStore?.reload();
+        await this.chatStateStore?.reload();
+
+        // Plugin runtime bindings are projected from plugin_instances rows and saved to the plugin
+        // registry, and the boot pass only ever adds to them. Without this resync, an instance the
+        // restore dropped keeps receiving its session's hooks with its old config, even after a
+        // restart. Best-effort: the import is already committed.
+        if (this.moduleRef) {
+          try {
+            await this.moduleRef.get(ScopeBindingService, { strict: false }).resyncAfterImport(previousPluginBindings);
+          } catch (error) {
+            restartRequired = true;
+            notices.push(
+              `Plugin instance bindings could not be re-applied after the restore ` +
+                `(${error instanceof Error ? error.message : String(error)}): check each plugin's active sessions ` +
+                `and per-session config (GET /api/plugins/:id, PUT /api/plugins/:id/sessions) against its restored instances.`,
+            );
+          }
+        }
 
         // Audit the destructive replace-all restore, only on the committed-success path (the rollback /
         // refused-empty branches above return without emitting, since no data actually changed). Any

@@ -1,4 +1,4 @@
-import type { WASocket } from '@whiskeysockets/baileys';
+import type { NewsletterMetadata, WASocket } from '@whiskeysockets/baileys';
 import { Channel } from '../interfaces/whatsapp-engine.interface';
 import { ChannelNotFoundError } from '../../common/errors/channel-not-found.error';
 import { mapServerRefusal } from './baileys-groups';
@@ -28,21 +28,42 @@ export interface BaileysChannelsHost {
  * reads. It throws `Boom(msg, { statusCode: errorCode, data: firstError })` instead — the code on
  * the Boom, the error node as `data`.
  *
- * A non-null OBJECT `data` is the discriminator, and it is safe here specifically: Boom defaults
- * `data` to null, so every transport failure carries null, and so does executeWMexQuery's OTHER
- * throw for an unanswered query (`data: result` with result undefined). Kept local to this file
- * rather than folded into refusedStatusCode, because promiseTimeout's Boom also carries an object
- * `data` with a 4xx code and must never be read as a refusal.
+ * The discriminator is a `data` that is a GraphQL error node, one carrying `message` or
+ * `extensions`. Any object is not enough: promiseTimeout (Utils/generics.js) rejects a stalled send
+ * or an unanswered query with `Boom('Timed Out', { statusCode: 408, data: { stack } })`, and
+ * executeWMexQuery's OTHER throw carries the raw result node as `data`. Both are transport
+ * failures, and reading their 4xx code as a refusal would turn a stalled socket into a 403 or 404.
  */
 export function wmexRefusalCode(error: unknown): number | undefined {
   const err = error as { data?: unknown; output?: { statusCode?: unknown } } | null | undefined;
   if (typeof err?.data === 'number') {
     return err.data;
   }
-  if (err?.data !== null && typeof err?.data === 'object' && typeof err.output?.statusCode === 'number') {
+  const node = err?.data as { message?: unknown; extensions?: unknown } | null | undefined;
+  const isGraphQlError = typeof node === 'object' && node !== null && ('message' in node || 'extensions' in node);
+  if (isGraphQlError && typeof err?.output?.statusCode === 'number') {
     return err.output.statusCode;
   }
   return undefined;
+}
+
+/**
+ * `thread_metadata` as newsletterMetadata actually returns it (recorded live in
+ * scripts/patch-baileys-newsletter-create.spec.js). The .d.ts types it as the flattened create shape.
+ */
+interface RawNewsletterThread {
+  name?: { text?: string } | null;
+  description?: { text?: string } | null;
+  invite?: string;
+  subscribers_count?: string;
+  verification?: 'VERIFIED' | 'UNVERIFIED';
+  creation_time?: string;
+}
+
+/** A wire number that may come as a string, or as NaN from the create parser; undefined unless finite. */
+function finiteNumber(value: number | string | undefined): number | undefined {
+  const n = typeof value === 'string' ? Number.parseInt(value, 10) : value;
+  return n !== undefined && Number.isFinite(n) ? n : undefined;
 }
 
 export class BaileysChannels {
@@ -68,20 +89,40 @@ export class BaileysChannels {
   async getChannelById(channelId: string): Promise<Channel | null> {
     this.host.ensureReady();
     // newsletterMetadata resolves ANY channel by jid (richer than the wwjs subscribed-list lookup).
-    const meta = await this.bounded(this.sock().newsletterMetadata('jid', channelId), 'the channel lookup');
+    const meta = await this.lookup('jid', channelId, 'the channel lookup');
     return meta ? this.toChannel(meta) : null;
   }
 
   async subscribeToChannel(inviteCode: string): Promise<Channel> {
     this.host.ensureReady();
-    const meta = await this.bounded(this.sock().newsletterMetadata('invite', inviteCode), 'the invite lookup');
+    const meta = await this.lookup('invite', inviteCode, 'the invite lookup');
     if (!meta) {
       throw new ChannelNotFoundError(inviteCode);
     }
-    await mapServerRefusal('Subscribing to the channel', () =>
-      this.bounded(this.sock().newsletterFollow(meta.id), 'the channel subscribe'),
+    await mapServerRefusal(
+      'Subscribing to the channel',
+      () => this.bounded(this.sock().newsletterFollow(meta.id), 'the channel subscribe'),
+      wmexRefusalCode,
     );
     return this.toChannel(meta);
+  }
+
+  /**
+   * A channel lookup that WhatsApp refuses (an unknown id, a bad invite code) comes back as a w:mex
+   * GraphQL error rather than an empty node, so a 4xx refusal is read as "no such channel", the same
+   * way the group invite lookup reads one. A rate limit (429) or a timeout (408) says nothing about
+   * the channel, so it propagates, as does the deadline, which stays inside.
+   */
+  private async lookup(type: 'jid' | 'invite', key: string, operation: string) {
+    try {
+      return await this.bounded(this.sock().newsletterMetadata(type, key), operation);
+    } catch (error) {
+      const code = wmexRefusalCode(error);
+      if (code !== undefined && code >= 400 && code < 500 && code !== 408 && code !== 429) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -161,34 +202,40 @@ export class BaileysChannels {
 
   async unsubscribeFromChannel(channelId: string): Promise<void> {
     this.host.ensureReady();
-    // The other channel writes map WhatsApp's refusal; this one did not, so unfollowing a channel
-    // the account no longer follows answered 500 where whatsapp-web.js answers the documented 403.
-    await mapServerRefusal('Unsubscribing from the channel', () =>
-      this.bounded(this.sock().newsletterUnfollow(channelId), 'the channel unsubscribe'),
+    // Unfollowing a channel the account no longer follows is refused like the other channel writes,
+    // on either refusal channel, and answers the documented 403 as whatsapp-web.js does.
+    await mapServerRefusal(
+      'Unsubscribing from the channel',
+      () => this.bounded(this.sock().newsletterUnfollow(channelId), 'the channel unsubscribe'),
+      wmexRefusalCode,
     );
   }
 
-  /** Map a Baileys NewsletterMetadata to the neutral Channel shape (optionals only when present). */
-  private toChannel(meta: {
-    id: string;
-    name: string;
-    description?: string;
-    invite?: string;
-    creation_time?: number;
-    subscribers?: number;
-    picture?: { url?: string };
-    verification?: string;
-    thread_metadata?: { creation_time?: number };
-  }): Channel {
-    const createdAt = meta.creation_time ?? meta.thread_metadata?.creation_time;
+  /**
+   * Map a channel to the neutral Channel shape (optionals only when present).
+   *
+   * Two shapes arrive here. newsletterCreate flattens its response (parseNewsletterCreateResponse),
+   * but newsletterMetadata returns the raw GraphQL node untouched: fields nested under
+   * `thread_metadata`, name and description as `{ text }`, counts and timestamps as strings. The
+   * flat fields are read first and the nested ones fill the gaps. The flat parse uses parseInt, so
+   * a missing number arrives as NaN and is dropped rather than serialized as null.
+   *
+   * No `picture`: neither shape carries a URL, only a CDN direct path.
+   */
+  private toChannel(meta: NewsletterMetadata): Channel {
+    const thread = meta.thread_metadata as RawNewsletterThread | undefined;
+    const description = meta.description ?? thread?.description?.text;
+    const invite = meta.invite ?? thread?.invite;
+    const subscriberCount = finiteNumber(meta.subscribers) ?? finiteNumber(thread?.subscribers_count);
+    const verification = meta.verification ?? thread?.verification;
+    const createdAt = finiteNumber(meta.creation_time) ?? finiteNumber(thread?.creation_time);
     return {
       id: meta.id,
-      name: meta.name,
-      ...(meta.description ? { description: meta.description } : {}),
-      ...(meta.invite ? { inviteCode: meta.invite } : {}),
-      ...(meta.subscribers !== undefined ? { subscriberCount: meta.subscribers } : {}),
-      ...(meta.picture?.url ? { picture: meta.picture.url } : {}),
-      ...(meta.verification ? { verified: meta.verification === 'VERIFIED' } : {}),
+      name: meta.name ?? thread?.name?.text ?? '',
+      ...(description ? { description } : {}),
+      ...(invite ? { inviteCode: invite } : {}),
+      ...(subscriberCount !== undefined ? { subscriberCount } : {}),
+      ...(verification ? { verified: verification === 'VERIFIED' } : {}),
       ...(createdAt !== undefined ? { createdAt } : {}),
     };
   }

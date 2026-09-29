@@ -55,6 +55,46 @@ describe('data CLI DataSource', () => {
       jest.resetModules();
     }
   });
+
+  // Boot rejects a padded selector, but the CLI compared it raw: 'postgres ' from the host env, or
+  // quoted in .env, picked the SQLite options and migrated a file named after the Postgres database.
+  it.each(['postgres ', ' sqlite', 'postgre'])('refuses to load with DATABASE_TYPE %j', value => {
+    const prevType = process.env.DATABASE_TYPE;
+    process.env.DATABASE_TYPE = value;
+    jest.resetModules();
+    try {
+      expect(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('./data-source');
+      }).toThrow(`DATABASE_TYPE must be "sqlite" or "postgres" (got ${JSON.stringify(value)})`);
+    } finally {
+      if (prevType !== undefined) process.env.DATABASE_TYPE = prevType;
+      else delete process.env.DATABASE_TYPE;
+      jest.resetModules();
+    }
+  });
+
+  it('refuses to load a postgres CLI connection with a mixed-case POSTGRES_SCHEMA', () => {
+    // search_path is unquoted (folded to lower case) while TypeORM quotes the schema, so migration DDL
+    // and the ledger would land in two different schemas.
+    const prevType = process.env.DATABASE_TYPE;
+    const prevSchema = process.env.POSTGRES_SCHEMA;
+    process.env.DATABASE_TYPE = 'postgres';
+    process.env.POSTGRES_SCHEMA = 'OpenWA';
+    jest.resetModules();
+    try {
+      expect(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('./data-source');
+      }).toThrow(/POSTGRES_SCHEMA/);
+    } finally {
+      if (prevType !== undefined) process.env.DATABASE_TYPE = prevType;
+      else delete process.env.DATABASE_TYPE;
+      if (prevSchema !== undefined) process.env.POSTGRES_SCHEMA = prevSchema;
+      else delete process.env.POSTGRES_SCHEMA;
+      jest.resetModules();
+    }
+  });
 });
 
 // The migration CLI connection runs DDL (CREATE INDEX, unique backfills) that can legitimately take

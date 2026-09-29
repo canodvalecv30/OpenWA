@@ -1,5 +1,6 @@
 import type { ExecutionContext } from '@nestjs/common';
-import type { Reflector } from '@nestjs/core';
+import { Reflector } from '@nestjs/core';
+import { ThrottlerException, ThrottlerStorageService } from '@nestjs/throttler';
 import { ProxyAwareThrottlerGuard } from './proxy-aware-throttler.guard';
 
 /**
@@ -22,8 +23,9 @@ describe('ProxyAwareThrottlerGuard.getTracker', () => {
   });
   afterEach(() => warn.mockRestore());
 
-  // getTracker uses only process.env + the pure resolveClientIp (no `this`), so we can
-  // invoke it on a prototype instance without the throttler's storage/reflector deps.
+  // getTracker uses process.env, resolveClientIp, and this.ipv6SubnetPrefix (which defaults to
+  // 64 when undefined), so we can invoke it on a prototype instance without the throttler's
+  // storage/reflector deps.
   const guard = Object.create(ProxyAwareThrottlerGuard.prototype) as ProxyAwareThrottlerGuard;
   const track = (req: unknown): Promise<string> =>
     (guard as unknown as { getTracker(r: unknown): Promise<string> }).getTracker(req);
@@ -54,6 +56,52 @@ describe('ProxyAwareThrottlerGuard.getTracker', () => {
     process.env.TRUSTED_PROXIES = '172.18.0.0/16';
     // peer 203.0.113.9 is NOT a trusted proxy → its XFF is ignored, key on the socket IP
     expect(await track(reqFrom('203.0.113.9', '10.0.0.1'))).toBe('203.0.113.9');
+  });
+
+  it('masks directly connected IPv6 clients to a /64 so addresses in the same subnet share a tracker', async () => {
+    delete process.env.TRUSTED_PROXIES;
+    const a = await track(reqFrom('2001:db8:0:1::1'));
+    const b = await track(reqFrom('2001:db8:0:1:dead:beef:1:2'));
+    expect(a).toBe('2001:db8:0:1::/64');
+    expect(b).toBe('2001:db8:0:1::/64');
+    expect(a).toBe(b);
+  });
+
+  it('gives directly connected IPv6 clients in different /64 subnets independent buckets', async () => {
+    delete process.env.TRUSTED_PROXIES;
+    const a = await track(reqFrom('2001:db8:0:1::1'));
+    const b = await track(reqFrom('2001:db8:0:2::1'));
+    expect(a).toBe('2001:db8:0:1::/64');
+    expect(b).toBe('2001:db8:0:2::/64');
+    expect(a).not.toBe(b);
+  });
+
+  it('masks forwarded IPv6 clients behind a trusted proxy to a /64', async () => {
+    process.env.TRUSTED_PROXIES = '172.18.0.0/16';
+    const a = await track(reqFrom('172.18.0.5', '2001:db8:0:1::1'));
+    const b = await track(reqFrom('172.18.0.5', '2001:db8:0:1::2'));
+    const c = await track(reqFrom('172.18.0.5', '2001:db8:0:2::1'));
+    expect(a).toBe('2001:db8:0:1::/64');
+    expect(b).toBe('2001:db8:0:1::/64');
+    expect(a).toBe(b);
+    expect(c).toBe('2001:db8:0:2::/64');
+    expect(a).not.toBe(c);
+  });
+
+  it('leaves IPv4, IPv4-mapped, and loopback addresses unchanged', async () => {
+    delete process.env.TRUSTED_PROXIES;
+    expect(await track(reqFrom('203.0.113.9'))).toBe('203.0.113.9');
+    expect(await track(reqFrom('::ffff:203.0.113.9'))).toBe('203.0.113.9');
+    expect(await track(reqFrom('::1'))).toBe('::1');
+  });
+
+  it('honors a custom ipv6SubnetPrefix configured on the guard', async () => {
+    delete process.env.TRUSTED_PROXIES;
+    const customGuard = Object.create(ProxyAwareThrottlerGuard.prototype) as ProxyAwareThrottlerGuard;
+    Object.assign(customGuard, { ipv6SubnetPrefix: 48 });
+    const trackCustom = (req: unknown): Promise<string> =>
+      (customGuard as unknown as { getTracker(r: unknown): Promise<string> }).getTracker(req);
+    expect(await trackCustom(reqFrom('2001:db8:0:1::1'))).toBe('2001:db8::/48');
   });
 });
 
@@ -227,5 +275,43 @@ describe('ProxyAwareThrottlerGuard.throwThrottlingException', () => {
     const { headers, threw } = await invoke(false);
     expect(headers['Retry-After']).toBeUndefined();
     expect(threw).toBe(true);
+  });
+});
+
+/**
+ * Pins the bucket scope the docs describe: every window is counted per route handler per client IP
+ * (the library's generateKey includes the controller and handler names). docs/04 section 4.6,
+ * docs/10 and docs/12 say so; a generateKey override that changes the scope must update them too.
+ */
+describe('ProxyAwareThrottlerGuard bucket scope', () => {
+  class SessionsController {}
+  const list = function list(): void {};
+  const get = function get(): void {};
+  let storage: ThrottlerStorageService;
+
+  afterEach(() => storage.onApplicationShutdown());
+
+  it('counts each route handler separately for one client IP', async () => {
+    storage = new ThrottlerStorageService();
+    const guard = new ProxyAwareThrottlerGuard(
+      { throttlers: [{ name: 'short', ttl: 1000, limit: 10 }] },
+      storage,
+      new Reflector(),
+    );
+    await guard.onModuleInit();
+    delete process.env.TRUSTED_PROXIES;
+    const req = { ip: '203.0.113.9', socket: { remoteAddress: '203.0.113.9' }, headers: {} };
+    const contextFor = (handler: () => void): ExecutionContext =>
+      ({
+        getHandler: () => handler,
+        getClass: () => SessionsController,
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => ({ header: () => undefined }) }),
+      }) as unknown as ExecutionContext;
+    for (let i = 0; i < 10; i++) {
+      await expect(guard.canActivate(contextFor(list))).resolves.toBe(true);
+      await expect(guard.canActivate(contextFor(get))).resolves.toBe(true);
+    }
+    await expect(guard.canActivate(contextFor(list))).rejects.toThrow(ThrottlerException);
+    await expect(guard.canActivate(contextFor(get))).rejects.toThrow(ThrottlerException);
   });
 });

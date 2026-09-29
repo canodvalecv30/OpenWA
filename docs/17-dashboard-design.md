@@ -379,29 +379,40 @@ a non-admin hitting the path falls through to the `*` redirect.
 ### Bespoke components
 
 The UI is built from a small set of project-specific components under `dashboard/src/components/`,
-most with a colocated CSS file. Five ship none: `ErrorBoundary` styles inline via `style={{...}}`,
-`GithubIcon` carries no styling beyond `fill="currentColor"`, `Modal` reuses the global `.modal-*`
-rules from `index.css`, and the `chats/` pair take their classes from the page stylesheet
-(`pages/Chats.css`) plus the `yet-another-react-lightbox` vendor CSS. There is no design-system
-package to pull from.
+most with a colocated CSS file. Six top-level components ship none: `ErrorBoundary` styles inline
+via `style={{...}}`, `GithubIcon` carries no styling beyond `fill="currentColor"`, `Modal` reuses the
+global `.modal-*` rules from `index.css`, `GroupPicker` and `SessionScopePicker` are styled by the
+one page that uses each (`pages/MessageTester.css`, `pages/ApiKeys.css`), and `RoleProvider` renders
+no DOM. Nothing under `chats/` ships its own stylesheet either: those components take their classes
+from `pages/Chats.css`, and `MediaLightbox` adds the `yet-another-react-lightbox` vendor CSS. There
+is no design-system package to pull from.
 
-| Component                    | File                             | Responsibility                                                                                                        |
-| ---------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Layout`                     | `components/Layout.tsx`          | App shell: collapsible sidebar nav, mobile drawer, language menu, light/dark theme toggle, logout, live version badge |
-| `ToastProvider` / `useToast` | `components/Toast.tsx`           | Context-based toast notifications (success/error/warning/info) with de-dup keys                                       |
-| `PageHeader`                 | `components/PageHeader.tsx`      | Shared page title / subtitle / badge / actions header                                                                 |
-| `Modal`                      | `components/Modal.tsx`           | Accessible dialog (`role="dialog"`, Escape/overlay close, focus trap + restore); uses the global `.modal-*` styles    |
-| `CustomSelect`               | `components/CustomSelect.tsx`    | Keyboard-navigable select replacement (type-ahead, arrow keys) used by Sessions / Logs / Login                        |
-| `DashboardCharts`            | `components/DashboardCharts.tsx` | `recharts`-based message-volume / activity charts on the Dashboard                                                    |
-| `FilterBuilder`              | `components/FilterBuilder.tsx`   | Visual condition builder for webhook event filters                                                                    |
-| `GlobalSearch`               | `components/GlobalSearch.tsx`    | Debounced message-search box in the Chats header, with all-sessions / current-session scope                           |
-| `PluginInstances`            | `components/PluginInstances.tsx` | Per-plugin instance list: create / edit / delete and secret regeneration                                              |
-| `ErrorBoundary`              | `components/ErrorBoundary.tsx`   | Top-level React error boundary wrapping the whole app                                                                 |
-| `GithubIcon`                 | `components/GithubIcon.tsx`      | Inline brand SVG                                                                                                      |
+| Component                    | File                                | Responsibility                                                                                                        |
+| ---------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Layout`                     | `components/Layout.tsx`             | App shell: collapsible sidebar nav, mobile drawer, language menu, light/dark theme toggle, logout, live version badge |
+| `ToastProvider` / `useToast` | `components/Toast.tsx`              | Context-based toast notifications (success/error/warning/info) with de-dup keys                                       |
+| `PageHeader`                 | `components/PageHeader.tsx`         | Shared page title / subtitle / badge / actions header                                                                 |
+| `Modal`                      | `components/Modal.tsx`              | Accessible dialog (`role="dialog"`, Escape/overlay close, focus trap + restore); uses the global `.modal-*` styles    |
+| `CustomSelect`               | `components/CustomSelect.tsx`       | Keyboard-navigable select replacement (type-ahead, arrow keys) used by Sessions / Logs / Login                        |
+| `DashboardCharts`            | `components/DashboardCharts.tsx`    | `recharts`-based message-volume / activity charts on the Dashboard                                                    |
+| `FilterBuilder`              | `components/FilterBuilder.tsx`      | Visual condition builder for webhook event filters                                                                    |
+| `GlobalSearch`               | `components/GlobalSearch.tsx`       | Debounced message-search box in the Chats header, with all-sessions / current-session scope                           |
+| `PluginInstances`            | `components/PluginInstances.tsx`    | Per-plugin instance list: create / edit / delete and secret regeneration                                              |
+| `ErrorBoundary`              | `components/ErrorBoundary.tsx`      | Top-level React error boundary wrapping the whole app                                                                 |
+| `GithubIcon`                 | `components/GithubIcon.tsx`         | Inline brand SVG                                                                                                      |
+| `GroupPicker`                | `components/GroupPicker.tsx`        | Searchable multi-select of a session's groups, used by the Message Tester's multi-group send                          |
+| `SessionScopePicker`         | `components/SessionScopePicker.tsx` | Per-key session scope checklist on the API Keys page                                                                  |
+| `RoleProvider`               | `components/RoleProvider.tsx`       | Context holding the logged-in key's role, read with `useRole` (`canWrite` gates write actions)                        |
 
 Chat-specific pieces live one level down in `components/chats/`: `MessageBody` (WhatsApp text
-formatting + link detection) and `MediaLightbox` (the media viewer, built on
-`yet-another-react-lightbox`).
+formatting + link detection), `ChatThread` (bubble list, including inbound Baileys prompt buttons
+that call `POST /sessions/:id/messages/click-button`), and `MediaLightbox` (the media viewer, built
+on `yet-another-react-lightbox`). The rest of the room is split the same way: `ChatSidebar`,
+`ChatComposer`, `ChatAvatar`, `KindIcon`, `StatusComposeModal` and `StatusMedia`. Prompt choices
+arrive on live `message.received` as top-level `buttons` and are also stored in message
+`metadata.buttons` so a reload can re-render them. Clicking still requires the prompt to be in the
+engine store; an evicted prompt 404s. A read-only key sees the choices disabled and gets no reply,
+react or delete actions, the same as the disabled composer.
 
 The message thread is paged. `useChatMessages` is a `useInfiniteQuery` whose cursor is the number
 of DB rows fetched so far, not the length of the rendered list — the thread also carries engine
@@ -537,9 +548,9 @@ export function useStopSessionMutation() {
 Real-time updates use **socket.io** (`socket.io-client`), not a raw browser `WebSocket`. The hook is
 `src/hooks/useWebSocket.ts`. Key facts:
 
-- **Namespace `/events`** (not `/ws`). The client connects to
-  `${VITE_WS_URL || window.location.origin}/events` — same-origin by default; `VITE_WS_URL` only
-  overrides it for split-origin deployments.
+- **Namespace `/events`** (not `/ws`). The client connects to `<origin>/events`, where the origin is
+  `VITE_WS_URL` when set, else the origin of `VITE_API_URL` (so a split-origin build reaches the
+  API), else `window.location.origin`.
 - **API key via the socket.io `auth` payload (and an `X-API-Key` header for proxies), deliberately
   _not_ in the query string** — a key in the handshake URL would leak into access logs / `Referer`.
 - **Reconnection is socket.io's built-in mechanism** — `reconnectionAttempts: 5`,
@@ -555,8 +566,11 @@ Real-time updates use **socket.io** (`socket.io-client`), not a raw browser `Web
 // src/hooks/useWebSocket.ts (abridged)
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { API_ORIGIN } from '../services/api';
+import { resolveSocketUrl } from '../utils/urlSecurity';
 
-const SOCKET_URL = import.meta.env.VITE_WS_URL || window.location.origin;
+// VITE_WS_URL, else the VITE_API_URL origin, else the page origin.
+const SOCKET_URL = resolveSocketUrl(import.meta.env.VITE_WS_URL, API_ORIGIN, window.location.origin);
 
 interface ServerEventEnvelope {
   type: string; // 'event'
@@ -690,7 +704,8 @@ export default defineConfig({
   server: {
     port: 2886,
     proxy: {
-      '/api': {
+      // Trailing slash: a plain '/api' prefix would also proxy the /api-keys SPA route.
+      '/api/': {
         target: 'http://localhost:2785',
         changeOrigin: true,
         secure: false,
@@ -734,8 +749,9 @@ VITE_API_URL=https://api.example.com npm run build   # in dashboard/
 ```
 
 `dashboard/src/services/api.ts` reads `VITE_API_URL` and calls that origin instead of same-origin
-`/api`. Set `SERVE_DASHBOARD=false` on the API so it stops serving its own copy. Remember to add the
-dashboard's origin to `CORS_ORIGINS` on the API.
+`/api`. The realtime socket follows the same origin unless `VITE_WS_URL` overrides it. Set
+`SERVE_DASHBOARD=false` on the API so it stops serving its own copy. Remember to add the dashboard's
+origin to `CORS_ORIGINS` on the API.
 
 For TLS or public exposure of the default single-port setup, terminate at your own reverse proxy
 (nginx, Caddy, a cloud load balancer, or a k8s Ingress) in front of the API; see

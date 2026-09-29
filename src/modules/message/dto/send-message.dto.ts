@@ -5,7 +5,6 @@ import {
   IsNotEmpty,
   IsOptional,
   MaxLength,
-  IsUrl,
   ValidateIf,
   IsArray,
   ArrayMaxSize,
@@ -15,6 +14,8 @@ import {
 import { Type } from 'class-transformer';
 import { IsMentionWidConstraint } from './is-mention-wid.validator';
 import { ToStrictBoolean } from '../../../common/utils/strict-boolean';
+import { IsMediaUrl } from '../../../common/media/media-url';
+import { stripBase64DataUri } from '../media-cap.util';
 
 export const MENTIONS_DESCRIPTION =
   'WIDs to @mention (e.g. ["62811@c.us"]). The text/caption must also contain the @<number> token.';
@@ -40,6 +41,12 @@ export const CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH = 1024;
 // Single source of truth for the text-body cap, shared with the agent-tool input schemas
 // (src/core/agent-tools/tools/message.tools.ts) so MCP and REST enforce the same limit.
 export const MESSAGE_TEXT_MAX_LENGTH = 4096;
+
+// The cap on a prompt choice's id. It must equal BUTTON_TEXT_MAX_LENGTH in the Baileys message
+// mapper, which refuses to offer any inbound choice whose id is longer, so an id past this bound
+// can never name a choice that exists. Validating it against the text cap instead accepted such a
+// request and let the engine answer a confusing "unknown button" a few layers later.
+export const BUTTON_ID_MAX_LENGTH = 256;
 
 /**
  * Shared wording for the quoted-send field (issue #1271). One constant rather than five copies so
@@ -187,8 +194,9 @@ export class SendMediaMessageDto {
     example: 'https://example.com/image.jpg',
   })
   @IsOptional()
-  @IsUrl()
-  @ValidateIf((o: SendMediaMessageDto) => !o.base64)
+  // base64 wins when it holds data, so a url next to it is not fetched and not checked; a base64 that
+  // is only a data-URI prefix strips to nothing, and then the url is what gets sent.
+  @IsMediaUrl<SendMediaMessageDto>({ ignoreWhen: o => !!stripBase64DataUri(o.base64) })
   url?: string;
 
   @ApiPropertyOptional({

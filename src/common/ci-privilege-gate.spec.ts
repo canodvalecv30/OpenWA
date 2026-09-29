@@ -80,6 +80,33 @@ describe('the non-root drop is enforced, not merely documented', () => {
     const entrypoint = fs.readFileSync(path.join(__dirname, '..', '..', 'docker-entrypoint.sh'), 'utf8');
     expect(entrypoint).toMatch(/exec\s+gosu\s+openwa/);
   });
+
+  // The Dockerfile explains the missing USER directive by pointing at the entrypoint. A line number
+  // goes stale on the next entrypoint edit and sends the reader to the wrong statement.
+  it('does not cite entrypoint line numbers from the Dockerfile', () => {
+    const dockerfile = fs.readFileSync(path.join(__dirname, '..', '..', 'Dockerfile'), 'utf8');
+    expect(dockerfile).toContain('docker-entrypoint.sh ends with');
+    expect(dockerfile).not.toMatch(/docker-entrypoint\.sh:\d/);
+    expect(dockerfile).not.toMatch(/chowns? on lines? \d/);
+  });
+
+  // Chromium's Singleton* locks, a relocated session profile and a backup staging copy are all
+  // symlinks under /app/data. A bind mount that refuses to chown a symlink (Docker Desktop file
+  // sharing) failed a recursive chown under `set -e` and crash-looped the container (#1722), and a
+  // lock cleanup can only cover the default path. The ownership fix itself has to skip links.
+  // `-h` too: find tests the type before the batched chown runs, so without it a path replaced by a
+  // link in between would have root re-own the link's target.
+  it('re-owns /app/data without touching symlinks', () => {
+    const entrypoint = fs.readFileSync(path.join(__dirname, '..', '..', 'docker-entrypoint.sh'), 'utf8');
+    const cleanup = entrypoint.search(/^rm -f \/app\/data\/sessions\/\*\/Singleton\*/m);
+    const chown = entrypoint.search(/^find \/app\/data ! -type l -exec chown -h openwa:openwa \{\} \+$/m);
+    expect(entrypoint).not.toMatch(/^\s*chown\s+-R\b.*\/app\/data/m);
+    // Swallowing the failure would hide a real refusal (NFS root_squash, SELinux).
+    expect(entrypoint).not.toMatch(/-exec chown[^\n]*\|\|/);
+    expect(cleanup).toBeGreaterThan(-1);
+    expect(chown).toBeGreaterThan(-1);
+    expect(cleanup).toBeLessThan(chown);
+  });
 });
 
 /**
@@ -108,5 +135,125 @@ describe('a job that runs a repo script checks the repo out', () => {
       .filter(entry => !entry.hasCheckout)
       .map(entry => `${entry.job} runs ${entry.scripts.join(', ')} without actions/checkout`);
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * A job granted `id-token: write` can mint a registry publish credential, so every tool it installs
+ * runs with that ability. A floating spec (`npm@latest`, a bare major) resolves to whatever was
+ * published most recently at tag time; pin the exact version the way the Dockerfile pins its npm.
+ *
+ * Python installs cannot be pinned that way: `pip install` resolves the ranges in pyproject.toml, and
+ * `python -m build` fetches its build backend into an isolated environment no pin reaches. The same
+ * holds for pipx, uv, uvx, poetry and pyproject-build. So an id-token job runs none of them; the
+ * install, test and build happen in a job without the grant.
+ *
+ * Only these two families are checked: other installers (npx, a local npm install, gem, go) in an
+ * id-token job are not caught here.
+ */
+describe('a job that can mint a publish credential pins global npm installs and runs no Python installer', () => {
+  type Permissions = Record<string, string> | string | null | undefined;
+  type OidcJob = { permissions?: Permissions; steps?: Step[] };
+  type OidcWorkflow = { permissions?: Permissions; jobs?: Record<string, OidcJob> };
+  const workflows = fs.readdirSync(workflowDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+  const GLOBAL_INSTALL = /\bnpm\s+(?:install|i|add)\s+(?:-g|--global)\s+([^\n;&|]+)/g;
+  // `pip`, `pip3`, `python -m pip` and `uv pip` all contain `pip install`.
+  const PYTHON_INSTALL =
+    /\bpip[\d.]*\s+(?:install|wheel|download)\b|\bpython[\d.]*\s+-m\s+build\b|\bpyproject-build\b|\bpipx\s+(?:install|run)\b|\buvx\b|\buv\s+(?:sync|build|run|add|tool)\b|\bpoetry\s+(?:install|build|add)\b/g;
+
+  // A job without its own `permissions` inherits the workflow-level block; `write-all` grants id-token too.
+  const grantsIdToken = (perms: Permissions): boolean =>
+    perms === 'write-all' || (typeof perms === 'object' && perms !== null && perms['id-token'] === 'write');
+
+  const oidcJobRuns = (source: string | OidcWorkflow): Array<{ job: string; run: string }> => {
+    const workflow =
+      typeof source === 'string'
+        ? (yaml.load(fs.readFileSync(path.join(workflowDir, source), 'utf8')) as OidcWorkflow)
+        : source;
+    return Object.entries(workflow.jobs ?? {})
+      .filter(([, def]) => grantsIdToken(def.permissions !== undefined ? def.permissions : workflow.permissions))
+      .flatMap(([job, def]) => (def.steps ?? []).map(step => ({ job, run: executableLines(step.run ?? '') })));
+  };
+
+  const globalInstallsInOidcJobs = (source: string | OidcWorkflow): Array<{ job: string; spec: string }> =>
+    oidcJobRuns(source).flatMap(({ job, run }) =>
+      [...run.matchAll(GLOBAL_INSTALL)].flatMap(match =>
+        match[1]
+          .trim()
+          .split(/\s+/)
+          .filter(arg => !arg.startsWith('-'))
+          .map(spec => ({ job, spec })),
+      ),
+    );
+
+  const pythonInstallsInOidcJobs = (source: string | OidcWorkflow): string[] =>
+    oidcJobRuns(source).flatMap(({ job, run }) => [...run.matchAll(PYTHON_INSTALL)].map(m => `${job}: ${m[0]}`));
+
+  // Non-vacuity: the JS SDK release job installs its own npm, so the finder must see it.
+  it('finds the global npm install in the JS SDK publish job', () => {
+    expect(globalInstallsInOidcJobs('js-sdk-release.yml').map(entry => entry.spec)).toEqual([
+      expect.stringMatching(/^npm@/),
+    ]);
+  });
+
+  it('treats a job that inherits id-token: write or write-all from the workflow as able to mint', () => {
+    const job = { steps: [{ run: 'npm install -g npm@latest' }] };
+    expect(globalInstallsInOidcJobs({ permissions: { 'id-token': 'write' }, jobs: { publish: job } })).toHaveLength(1);
+    expect(globalInstallsInOidcJobs({ permissions: 'write-all', jobs: { publish: job } })).toHaveLength(1);
+    expect(globalInstallsInOidcJobs({ jobs: { publish: { ...job, permissions: 'write-all' } } })).toHaveLength(1);
+    // A job-level block replaces the workflow-level one, so it can also withdraw the grant.
+    expect(
+      globalInstallsInOidcJobs({ permissions: 'write-all', jobs: { publish: { ...job, permissions: {} } } }),
+    ).toHaveLength(0);
+  });
+
+  it.each(workflows)('%s: global installs in id-token jobs are pinned to an exact version', file => {
+    const floating = globalInstallsInOidcJobs(file).filter(entry => !/@\d+\.\d+\.\d+$/.test(entry.spec));
+    expect(floating).toEqual([]);
+  });
+
+  // Non-vacuity: the single-job shape the PyPI release used to have, and the Python install that
+  // still exists in the release workflow, just outside the id-token job.
+  it('finds pip installs and python -m build in an id-token job', () => {
+    const singleJob: OidcWorkflow = {
+      jobs: {
+        publish: {
+          permissions: { contents: 'read', 'id-token': 'write' },
+          steps: [
+            { run: "pip install -e '.[dev]'\npytest" },
+            { run: 'python -m pip install --upgrade build\npython -m build' },
+          ],
+        },
+      },
+    };
+    expect(pythonInstallsInOidcJobs(singleJob)).toEqual([
+      'publish: pip install',
+      'publish: pip install',
+      'publish: python -m build',
+    ]);
+    expect(runCommandsOf('python-sdk-release.yml').join('\n')).toMatch(PYTHON_INSTALL);
+  });
+
+  it('finds the other Python installers and build frontends in an id-token job', () => {
+    const commands = [
+      'pipx install twine',
+      'pipx run build',
+      'uvx twine upload dist/*',
+      'uv sync',
+      'uv build',
+      'uv tool install twine',
+      'poetry install',
+      'poetry build',
+      'pyproject-build',
+      'python -m pip wheel .',
+    ];
+    const job: OidcWorkflow = {
+      jobs: { publish: { permissions: { 'id-token': 'write' }, steps: commands.map(run => ({ run })) } },
+    };
+    expect(pythonInstallsInOidcJobs(job)).toHaveLength(commands.length);
+  });
+
+  it.each(workflows)('%s: id-token jobs run no Python installer or build frontend', file => {
+    expect(pythonInstallsInOidcJobs(file)).toEqual([]);
   });
 });

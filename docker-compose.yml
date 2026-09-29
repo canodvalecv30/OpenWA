@@ -72,7 +72,7 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - CHOWN # entrypoint: chown -R openwa /app/data on the named volume
+      - CHOWN # entrypoint: chown openwa /app/data on the named volume
       - DAC_OVERRIDE # entrypoint: chown across pre-existing files
       - FOWNER
       - SETGID # gosu: drop to the openwa group
@@ -131,6 +131,9 @@ services:
       # PostgreSQL schema (blank-forwarded like the other DATABASE_* keys so a dashboard-saved
       # POSTGRES_SCHEMA in data/.env.generated applies; a real host value pins). Ignored for sqlite.
       - POSTGRES_SCHEMA=${POSTGRES_SCHEMA:-}
+      # TLS to a managed PostgreSQL, blank-forwarded the same way.
+      - DATABASE_SSL=${DATABASE_SSL:-}
+      - DATABASE_SSL_REJECT_UNAUTHORIZED=${DATABASE_SSL_REJECT_UNAUTHORIZED:-}
       - DATABASE_SYNCHRONIZE=${DATABASE_SYNCHRONIZE:-false}
       # Engine. Forwarded empty by default so the dashboard (Infrastructure > Engine) selects the
       # active engine via data/.env.generated (defaults to whatsapp-web.js); main.ts treats a blank
@@ -371,6 +374,8 @@ services:
       - PLUGIN_CATALOG_URL=${PLUGIN_CATALOG_URL:-}
       - PLUGIN_CAP_TIMEOUT_MS=${PLUGIN_CAP_TIMEOUT_MS:-}
       - PLUGIN_STORAGE_MAX_BYTES=${PLUGIN_STORAGE_MAX_BYTES:-}
+      # The dashboard's update notice asks GitHub for the latest release; false turns that request off.
+      - UPDATE_CHECK_ENABLED=${UPDATE_CHECK_ENABLED:-}
       # Misc application tuning.
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-}
       - BULK_MAX_CONCURRENT_BATCHES=${BULK_MAX_CONCURRENT_BATCHES:-}

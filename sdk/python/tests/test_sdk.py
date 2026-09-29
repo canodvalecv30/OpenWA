@@ -44,6 +44,19 @@ class TestClientCore:
         assert backend.last_call.headers["content-type"] == "application/json"
         assert backend.last_call.headers["x-trace"] == "keep"  # benign custom headers still pass through
 
+    def test_default_headers_cannot_override_api_key_in_another_case(self):
+        # Header names are case-insensitive: a lowercase copy must be replaced, not sent alongside.
+        backend = MockBackend().on("GET", "/api/sessions", body=[])
+        client = OpenWAClient(
+            base_url="http://localhost",
+            api_key="REAL_KEY",
+            default_headers={"x-api-key": "EVIL", "content-type": "text/plain"},
+            transport=backend.as_transport(),
+        )
+        client.sessions.list()
+        assert backend.last_call.headers["x-api-key"] == "REAL_KEY"
+        assert backend.last_call.headers["content-type"] == "application/json"
+
     def test_non_json_2xx_body_returns_text(self):
         import httpx
 
@@ -61,6 +74,22 @@ class TestClientCore:
         backend2 = MockBackend().on("GET", "/history", body=[])
         make_client(backend2).messages.history("s", "a@c.us")
         assert "/messages/a@c.us/history" in backend2.last_call.url  # @ preserved
+
+    def test_empty_or_dot_ids_are_refused_before_sending(self):
+        # httpx resolves dot segments, so such an id would otherwise reach the
+        # parent resource.
+        backend = MockBackend()
+        client = make_client(backend)
+        with pytest.raises(ValueError):
+            client.webhooks.delete("s1", "..")
+        with pytest.raises(ValueError):
+            client.contacts.delete("s1", ".")
+        with pytest.raises(ValueError):
+            client.templates.delete("s1", "")
+        assert backend.calls == []
+        backend.on("DELETE", "/webhooks/", status=204)
+        client.webhooks.delete("s1", "628123@c.us")
+        assert backend.last_call.url == "http://localhost:2785/api/sessions/s1/webhooks/628123@c.us"
 
     def test_raw_request_escape_hatch(self):
         backend = MockBackend().on("GET", "/api/anything", body={"ok": True})
@@ -133,9 +162,9 @@ class TestClientCore:
             make_client(backend).sessions.get("missing")
 
     def test_maps_503_to_service_unavailable(self):
-        # The gateway answers 503 when the engine never confirmed an operation -- the one typed error
-        # here worth retrying. It used to fall through to the base class while the permanent 501 had a
-        # subclass of its own.
+        # The gateway answers 503 when the engine never confirmed an operation: a transport failure,
+        # which is worth retrying, as a 429 is. It used to fall through to the base class while the
+        # permanent 501 had a subclass of its own.
         backend = MockBackend()
         backend.on("GET", "/api/sessions/s1", 503, {
             "statusCode": 503, "message": "WhatsApp did not answer", "error": "Service Unavailable"

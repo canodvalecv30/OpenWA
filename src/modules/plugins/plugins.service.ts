@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, ConflictException, 
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { PluginLoaderService, PluginStatus, resolvePluginEntryPath } from '../../core/plugins';
+import { PluginLoaderService, PluginStatus, PluginType, resolvePluginEntryPath } from '../../core/plugins';
 import { pluginUpdateBackupDirName, pluginUpdateStagingDirName } from '../../core/plugins';
 import type { PluginConfigSchema } from '../../core/plugins';
 import { PluginDto } from './dto/plugin.dto';
@@ -163,6 +163,21 @@ export class PluginsService {
       }
       this.pluginLoader.setOperatorEnabled(id, false);
       return { success: true, message: `Plugin ${id} is not loaded; it will not be enabled on boot` };
+    }
+
+    if (
+      plugin.manifest.type === PluginType.ENGINE &&
+      id === (this.configService.get<string>('engine.type') ?? 'whatsapp-web.js')
+    ) {
+      // The engine factory is pinned to engine.type and never reads plugin status, and boot re-enables
+      // that engine regardless: "disabling" it here reported success while sessions kept starting on
+      // it. Refuse it in the same shape enable uses for a non-active engine. Kept at this layer, not in
+      // the lifecycle, because shutdown and unload must still tear engines down. An engine that is not
+      // engine.type runs nothing, so it takes the ordinary path below.
+      return {
+        success: false,
+        message: `Engine "${id}" cannot be disabled at runtime. Set engine.type and restart to switch engines.`,
+      };
     }
 
     if (plugin.status !== PluginStatus.ENABLED) {
@@ -443,6 +458,9 @@ export class PluginsService {
     try {
       const parsed: unknown = JSON.parse(raw.toString('utf8'));
       if (!Array.isArray(parsed)) throw new Error('catalog is not a JSON array');
+      if (!parsed.every(e => typeof e === 'object' && e !== null && !Array.isArray(e))) {
+        throw new Error('catalog entries must be JSON objects');
+      }
       entries = parsed as CatalogEntry[];
     } catch (error) {
       throw new BadRequestException(
@@ -559,12 +577,20 @@ export class PluginsService {
     });
 
     try {
-      // ctx.storage files share the package directory under shipped defaults. Restore service-owned
-      // state from the backup unless the new package explicitly supplied that exact path. Copy (rather
-      // than move) so the rollback below still has a complete original directory.
+      // ctx.storage files share the package directory under shipped defaults. Restore state from the
+      // backup unless the new package explicitly supplied that exact path: encoded key-* files and the
+      // legacy <key>.json files the storage service still reads (every top-level *.json except the
+      // package's manifest.json/package.json). Copy (rather than move) so the rollback below still has
+      // a complete original directory.
       const packagePaths = new Set(entries.map(entry => entry.relPath));
       for (const entry of fs.readdirSync(backup, { withFileTypes: true })) {
-        if (!entry.isFile() || !/^key-[A-Za-z0-9_-]+\.json$/.test(entry.name) || packagePaths.has(entry.name)) {
+        if (
+          !entry.isFile() ||
+          !entry.name.endsWith('.json') ||
+          entry.name === 'manifest.json' ||
+          entry.name === 'package.json' ||
+          packagePaths.has(entry.name)
+        ) {
           continue;
         }
         const stateFile = path.join(dir, entry.name);

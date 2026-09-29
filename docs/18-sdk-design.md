@@ -18,9 +18,9 @@ OpenWA ships five official, hand-written client libraries for the REST API. They
 
 - **One client, fluent resources.** A single client object (`OpenWAClient` / `OpenWA\Client`) exposes every resource as a property — `client.messages.sendText(...)`, `client.sessions.start(...)`. All five SDKs expose the **same** resource surface; only the language idioms differ (camelCase methods + objects in JS/PHP/Java, snake_case methods + dicts in Python, exported fields + structs in Go).
 - **It is a request/response client, not an event SDK.** There is no WebSocket, EventEmitter, or `client.on(...)`. To receive inbound messages and acks, register a webhook (the `webhooks` resource) and host your own receiver, or connect to the real-time Socket.IO API directly (see [API Specification §6.5](./06-api-specification.md)).
-- **Typed errors.** Non-2xx responses raise/throw a typed error mapped from the HTTP status (`401/403/404/409/429/501`), plus a timeout error — all `instanceof`/`catch`-checkable. See each language's Error Handling subsection.
+- **Typed errors.** Non-2xx responses raise/throw a typed error mapped from the HTTP status (`401/403/404/409/429/501/503`), plus a timeout error — all `instanceof`/`catch`-checkable. See each language's Error Handling subsection.
 - **Injectable transport.** The HTTP layer is replaceable (`fetch` in JS, an `httpx` transport in Python, a Guzzle client in PHP) — the extension point for retry/observability middleware and for testing without the network.
-- **Safe by default.** Redirects are never followed (so the API key is never re-sent to a redirect target), the auth/JSON headers always take precedence over caller-supplied defaults, path segments are percent-encoded, a base-URL path prefix (e.g. behind a reverse proxy at `/v1`) is preserved, and there is a default 30s per-request timeout. **No automatic retries by default** — in JS, Python, PHP, and Java wrap calls in your own backoff if you need them (especially for `429`); the Go SDK additionally ships an opt-in `WithRetry(RetryPolicy)` that never replays a `POST` after a network error and limits `POST` retries to `429`/`503`.
+- **Safe by default.** Redirects are never followed (so the API key is never re-sent to a redirect target), the auth/JSON headers always take precedence over caller-supplied defaults, path segments are percent-encoded, a base-URL path prefix (e.g. behind a reverse proxy at `/v1`) is preserved, and there is a default 30s per-request timeout. **No automatic retries by default** — in JS, Python, PHP, and Java wrap calls in your own backoff if you need them (especially for `429`); the Go SDK additionally ships an opt-in `WithRetry(RetryPolicy)` that never replays a `POST` or `PATCH` after a network error and limits their retries to `429`/`503`.
 
 ### Resource Coverage
 
@@ -29,7 +29,7 @@ All five SDKs expose the same fluent surface:
 | Resource    | Methods                                                                                                                                                                                                                                                                                                  |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `sessions`  | list, get, getConfig, updateConfig, getProxy, updateProxy, create, delete, start, stop, logout, forceKill, getQrCode, requestPairingCode, setOnlinePresence, stats                                                                                                                                       |
-| `messages`  | list, sendText, sendImage/Video/Audio/Document/Sticker, sendLocation, sendContact, sendTemplate, sendPoll, reply, forward, react, delete, editMessage, history, reactions, media, pin, unpin, star, votePoll, sendBulk, batchStatus, cancelBatch                                                         |
+| `messages`  | list, sendText, sendImage/Video/Audio/Document/Sticker, sendLocation, sendContact, sendTemplate, sendPoll, reply, forward, clickButton, react, delete, editMessage, history, reactions, media, pin, unpin, star, votePoll, sendBulk, batchStatus, cancelBatch                                            |
 | `contacts`  | list, get, check, profilePicture, profilePictures, phone, upsert, delete, block, unblock, listBlocked                                                                                                                                                                                                    |
 | `groups`    | list, get, create, joinInfo, joinGroup, add/remove/promote/demoteParticipants, setSubject, setDescription, getGroupSettings, updateGroupSettings, leave, getPicture, setPicture, deletePicture, inviteCode, revokeInviteCode, getMembershipRequests, approveMembershipRequests, rejectMembershipRequests |
 | `webhooks`  | list, listAll, deliveryFailures, get, create, update, delete, test                                                                                                                                                                                                                                       |
@@ -76,11 +76,13 @@ const client = new OpenWAClient({
 });
 
 async function main() {
-  // Start a session and bring the WhatsApp connection up.
-  await client.sessions.start('my-session');
+  // Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+  // afterwards, find its id with client.sessions.list({ name: 'my-session' }).
+  const session = await client.sessions.create({ name: 'my-session' });
+  await client.sessions.start(session.id);
 
   // Send a text message.
-  const result = await client.messages.sendText('my-session', {
+  const result = await client.messages.sendText(session.id, {
     chatId: '628123456789@c.us',
     text: 'Hello from the OpenWA SDK!',
   });
@@ -103,13 +105,13 @@ const { OpenWAClient } = require('@rmyndharis/openwa');
 
 The constructor takes a single `OpenWAClientOptions` object. `baseUrl` and `apiKey` are required (the constructor throws synchronously if either is missing).
 
-| Option           | Type                     | Required | Default            | Description                                                                                                                                                                    |
-| ---------------- | ------------------------ | -------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `baseUrl`        | `string`                 | yes      | —                  | Base URL of the OpenWA API, e.g. `http://localhost:2785`. A trailing slash is trimmed; a path prefix (e.g. `https://host/v1`) is preserved.                                    |
-| `apiKey`         | `string`                 | yes      | —                  | API key sent as the `X-API-Key` header on every request.                                                                                                                       |
-| `timeoutMs`      | `number`                 | no       | `30000`            | Per-request timeout in milliseconds. Overridable per call via `RequestOptions.timeoutMs` on the raw `request()` method.                                                        |
-| `defaultHeaders` | `Record<string, string>` | no       | `{}`               | Headers merged onto every request. The `Content-Type: application/json` and `X-API-Key` headers always take precedence.                                                        |
-| `fetch`          | `FetchLike`              | no       | `globalThis.fetch` | Injectable transport (the WHATWG `fetch` signature). Use this to wrap requests with retry/observability middleware, or to supply a `fetch` on runtimes that lack a global one. |
+| Option           | Type                     | Required | Default            | Description                                                                                                                                                                                                                 |
+| ---------------- | ------------------------ | -------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`        | `string`                 | yes      | —                  | Base URL of the OpenWA API, e.g. `http://localhost:2785`. A trailing slash is trimmed; a path prefix (e.g. `https://host/v1`) is preserved.                                                                                 |
+| `apiKey`         | `string`                 | yes      | —                  | API key sent as the `X-API-Key` header on every request.                                                                                                                                                                    |
+| `timeoutMs`      | `number`                 | no       | `30000`            | Per-request timeout in milliseconds; `0` or `Infinity` turns it off, and a value that is not a non-negative number throws a `TypeError`. Overridable per call via `RequestOptions.timeoutMs` on the raw `request()` method. |
+| `defaultHeaders` | `Record<string, string>` | no       | `{}`               | Headers merged onto every request. The `Content-Type: application/json` and `X-API-Key` headers always take precedence.                                                                                                     |
+| `fetch`          | `FetchLike`              | no       | `globalThis.fetch` | Injectable transport (the WHATWG `fetch` signature). Use this to wrap requests with retry/observability middleware, or to supply a `fetch` on runtimes that lack a global one.                                              |
 
 ### Resources & Methods
 
@@ -117,10 +119,10 @@ All resources are accessed as properties on the client (`client.<resource>.<meth
 
 The top-level client also exposes:
 
-| Method    | Signature                    | Description                                                                |
-| --------- | ---------------------------- | -------------------------------------------------------------------------- |
-| `auth`    | `client.auth()`              | Validate the configured API key and resolve its role (`{ valid, role? }`). |
-| `request` | `client.request<T>(options)` | Raw escape hatch — issue an arbitrary request against the API.             |
+| Method    | Signature                    | Description                                                                                                    |
+| --------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `auth`    | `client.auth()`              | Validate the configured API key and resolve its role and the running engine (`{ valid, role?, engineType? }`). |
+| `request` | `client.request<T>(options)` | Raw escape hatch — issue an arbitrary request against the API.                                                 |
 
 #### `sessions`
 
@@ -160,6 +162,7 @@ The top-level client also exposes:
 | `sendPoll`     | `sendPoll(sessionId, body)`               | Send a poll message. **OPERATOR**                                                                                                                 |
 | `reply`        | `reply(sessionId, body)`                  | Reply to a specific message. **OPERATOR**                                                                                                         |
 | `forward`      | `forward(sessionId, body)`                | Forward a message to another chat. **OPERATOR**                                                                                                   |
+| `clickButton`  | `clickButton(sessionId, body)`            | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                        |
 | `react`        | `react(sessionId, body)`                  | React to a message (empty `reaction` removes it). **OPERATOR**                                                                                    |
 | `delete`       | `delete(sessionId, body)`                 | Delete a message. **OPERATOR**                                                                                                                    |
 | `editMessage`  | `editMessage(sessionId, body)`            | Edit the text of a message already sent. **OPERATOR**                                                                                             |
@@ -352,17 +355,17 @@ Media bodies share the `SendMediaRequest` shape: `{ chatId, url? | base64?, mime
 
 On a non-2xx response the SDK throws a typed `OpenWAApiError` subclass carrying `.status` (HTTP status), `.body` (parsed JSON error envelope, or raw text), and `.errorKind` (the NestJS `error` field, `undefined` when the gateway omits it — which is the norm for a validation rejection in production, where `disableErrorMessages` is on). All error classes extend `OpenWAError` and are exported, so they are `instanceof`-checkable. A timeout throws `OpenWATimeoutError`, which extends `OpenWAError` directly (not `OpenWAApiError`).
 
-| Error class                     | HTTP status | Meaning                                                                                                                                                                                                                                                                                                 |
-| ------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OpenWAAuthError`               | 401         | Missing or invalid API key.                                                                                                                                                                                                                                                                             |
-| `OpenWAForbiddenError`          | 403         | The key's role is insufficient (e.g. an OPERATOR-only route).                                                                                                                                                                                                                                           |
-| `OpenWANotFoundError`           | 404         | Resource not found.                                                                                                                                                                                                                                                                                     |
-| `OpenWAConflictError`           | 409         | Conflict — typically the engine is not ready.                                                                                                                                                                                                                                                           |
-| `OpenWARateLimitError`          | 429         | Rate limited.                                                                                                                                                                                                                                                                                           |
-| `OpenWANotImplementedError`     | 501         | The active engine does not support this operation.                                                                                                                                                                                                                                                      |
-| `OpenWAServiceUnavailableError` | 503         | The engine did not confirm in time. The only retryable error here — 501 is permanent. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on. |
-| `OpenWAApiError`                | any other   | Generic non-2xx (the base API error, e.g. `400`; also surfaced for unfollowed 3xx redirects).                                                                                                                                                                                                           |
-| `OpenWATimeoutError`            | —           | The request exceeded the configured timeout.                                                                                                                                                                                                                                                            |
+| Error class                     | HTTP status | Meaning                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAAuthError`               | 401         | Missing or invalid API key.                                                                                                                                                                                                                                                                                                                                                                        |
+| `OpenWAForbiddenError`          | 403         | The key's role is insufficient (e.g. an OPERATOR-only route).                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWANotFoundError`           | 404         | Resource not found.                                                                                                                                                                                                                                                                                                                                                                                |
+| `OpenWAConflictError`           | 409         | Conflict — typically the engine is not ready.                                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWARateLimitError`          | 429         | Rate limited. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default); its delay is only in the `Retry-After` response header, which the error does not carry. A 429 whose body has `code: "SEND_PACING_LIMITED"` is not transient: do not retry it before the body's `retryAfterSeconds`, which can be hours. |
+| `OpenWANotImplementedError`     | 501         | The active engine does not support this operation.                                                                                                                                                                                                                                                                                                                                                 |
+| `OpenWAServiceUnavailableError` | 503         | The engine did not confirm in time. Transient, though a catalog 503 can persist because WhatsApp may never answer that query; 501 is permanent. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on.                                  |
+| `OpenWAApiError`                | any other   | Generic non-2xx (the base API error, e.g. `400`; also surfaced for unfollowed 3xx redirects).                                                                                                                                                                                                                                                                                                      |
+| `OpenWATimeoutError`            | —           | The request exceeded the configured timeout.                                                                                                                                                                                                                                                                                                                                                       |
 
 ```typescript
 import {
@@ -375,7 +378,7 @@ import {
 } from '@rmyndharis/openwa';
 
 try {
-  await client.messages.sendText('my-session', {
+  await client.messages.sendText(sessionId, {
     chatId: '628123456789@c.us',
     text: 'Hi!',
   });
@@ -401,6 +404,7 @@ try {
 - **Redirects are never followed.** The transport uses `redirect: 'manual'`, so a `3xx` surfaces to the caller as an error (via `OpenWAApiError`) rather than being followed — this guarantees the `X-API-Key` header is never re-sent to a redirect target (potentially a different origin).
 - **Auth and JSON headers take precedence.** Request headers are merged in the order `defaultHeaders` → per-call headers → `Content-Type: application/json` → `X-API-Key`. Both `Content-Type` and `X-API-Key` are applied last, so neither can be overridden by a caller-supplied header.
 - **Path segments are percent-encoded.** Ids (session, chat, message, etc.) are encoded so a value cannot break out of its path position, while keeping the WhatsApp-safe characters `@`, `:`, and `+` readable (e.g. `628123456789@c.us`).
+- **Empty and dot segments are refused.** An empty, `.` or `..` segment rejects with a `TypeError` and nothing is sent, because `fetch` would otherwise resolve it to the parent resource.
 - **Base-URL path prefix is preserved.** A `baseUrl` such as `https://gateway.example.com/v1` keeps its `/v1` prefix on every request; only a trailing slash is trimmed.
 - **No automatic retries.** A failed request rejects immediately — the SDK does not retry, even on `429`. Wrap calls in your own backoff if you need retries.
 - **Injectable transport.** Supply a custom `fetch` to wrap outbound calls with retry, logging, or observability middleware, or to run on a runtime without a global `fetch`. This is also the recommended way to unit-test without monkey-patching globals.
@@ -439,12 +443,13 @@ client = OpenWAClient(
     api_key="owa_k1_…",
 )
 
-# Create then start a session
-client.sessions.create({"name": "my-session"})
-client.sessions.start("my-session")
+# Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+# afterwards, find its id with client.sessions.list({"name": "my-session"}).
+session = client.sessions.create({"name": "my-session"})
+client.sessions.start(session["id"])
 
 # Send a text message
-result = client.messages.send_text("my-session", {
+result = client.messages.send_text(session["id"], {
     "chatId": "628123456789@c.us",
     "text": "Hello from the OpenWA Python SDK!",
 })
@@ -533,6 +538,7 @@ Resources are accessed as properties on the client (e.g. `client.messages`). All
 | `send_poll`     | `send_poll(session_id, body) -> MessageResponse`                       | Send a poll message. **OPERATOR**                                                                                                                 |
 | `reply`         | `reply(session_id, body) -> MessageResponse`                           | Reply to a message. **OPERATOR**                                                                                                                  |
 | `forward`       | `forward(session_id, body) -> MessageResponse`                         | Forward a message. **OPERATOR**                                                                                                                   |
+| `click_button`  | `click_button(session_id, body) -> MessageResponse`                    | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                        |
 | `react`         | `react(session_id, body) -> SuccessResult`                             | React to a message. **OPERATOR**                                                                                                                  |
 | `delete`        | `delete(session_id, body) -> SuccessResult`                            | Delete a message. **OPERATOR**                                                                                                                    |
 | `edit_message`  | `edit_message(session_id, body) -> MessageResponse`                    | Edit the text of a message already sent. **OPERATOR**                                                                                             |
@@ -721,17 +727,17 @@ Resources are accessed as properties on the client (e.g. `client.messages`). All
 
 Every error inherits from `OpenWAError`. A non-2xx response raises an `OpenWAApiError` (or a more specific subclass picked by status); a timeout raises `OpenWATimeoutError`. The API-error classes carry `.status` (HTTP code), `.body` (parsed JSON or raw text), and `.error_kind` (the NestJS `error` field).
 
-| Exception                       | Trigger                                                                                                                                                                                                                                                                  |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `OpenWAAuthError`               | HTTP `401` — missing or invalid API key                                                                                                                                                                                                                                  |
-| `OpenWAForbiddenError`          | HTTP `403` — insufficient role                                                                                                                                                                                                                                           |
-| `OpenWANotFoundError`           | HTTP `404` — resource not found                                                                                                                                                                                                                                          |
-| `OpenWAConflictError`           | HTTP `409` — typically engine-not-ready                                                                                                                                                                                                                                  |
-| `OpenWARateLimitError`          | HTTP `429` — too many requests                                                                                                                                                                                                                                           |
-| `OpenWANotImplementedError`     | HTTP `501` — active engine doesn't support the operation                                                                                                                                                                                                                 |
-| `OpenWAServiceUnavailableError` | HTTP `503` — engine did not confirm in time; retryable. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on |
-| `OpenWAApiError`                | any other non-2xx status (incl. unfollowed `3xx`)                                                                                                                                                                                                                        |
-| `OpenWATimeoutError`            | request exceeded `timeout` (has a `.timeout` attribute)                                                                                                                                                                                                                  |
+| Exception                       | Trigger                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAAuthError`               | HTTP `401` — missing or invalid API key                                                                                                                                                                                                                                                                                                                                                                              |
+| `OpenWAForbiddenError`          | HTTP `403` — insufficient role                                                                                                                                                                                                                                                                                                                                                                                       |
+| `OpenWANotFoundError`           | HTTP `404` — resource not found                                                                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWAConflictError`           | HTTP `409` — typically engine-not-ready                                                                                                                                                                                                                                                                                                                                                                              |
+| `OpenWARateLimitError`          | HTTP `429` — too many requests. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default); its delay is only in the `Retry-After` response header, which the error does not carry. A 429 whose body has `code: "SEND_PACING_LIMITED"` is not transient: do not retry it before the body's `retryAfterSeconds`, which can be hours. |
+| `OpenWANotImplementedError`     | HTTP `501` — active engine doesn't support the operation                                                                                                                                                                                                                                                                                                                                                             |
+| `OpenWAServiceUnavailableError` | HTTP `503` — engine did not confirm in time; transient, though a catalog 503 can persist because WhatsApp may never answer that query. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on                                                              |
+| `OpenWAApiError`                | any other non-2xx status (incl. unfollowed `3xx`)                                                                                                                                                                                                                                                                                                                                                                    |
+| `OpenWATimeoutError`            | request exceeded `timeout` (has a `.timeout` attribute)                                                                                                                                                                                                                                                                                                                                                              |
 
 ```python
 from openwa import (
@@ -746,7 +752,7 @@ from openwa import (
 client = OpenWAClient(base_url="http://localhost:2785", api_key="owa_k1_…")
 
 try:
-    client.messages.send_text("my-session", {
+    client.messages.send_text(session_id, {
         "chatId": "628123456789@c.us",
         "text": "Hi!",
     })
@@ -767,6 +773,7 @@ except OpenWAApiError as e:
 - **Redirects are never followed.** `follow_redirects` is forced off so the `X-API-Key` header is never re-sent to a redirect target. An unfollowed `3xx` therefore surfaces as an `OpenWAApiError` rather than a success.
 - **Auth/JSON headers always win.** `default_headers` are applied first; the SDK then sets `Content-Type: application/json` and `X-API-Key`, so caller headers can never clobber them.
 - **Path segments are percent-encoded.** Each path value (session/chat/message id, etc.) is encoded so a `/`, `#`, or `?` can't break out of its position; already-safe id characters `@`, `:`, `+` are left readable. Boolean query params are serialized lowercase (`true`/`false`); `None` query values are dropped.
+- **Empty and dot segments are refused.** An empty, `.` or `..` id raises `ValueError` before anything is sent, because httpx would otherwise resolve it to the parent resource.
 - **Base-URL path prefix is preserved.** A trailing `/` is stripped from `base_url`, but any path prefix (e.g. when running behind a reverse proxy) is kept on every request.
 - **No automatic retries.** Each call issues exactly one request; retry/backoff is the caller's responsibility. Wrap or inject a custom `transport` for retry or observability middleware.
 - **Testable transport injection.** Pass `transport=httpx.MockTransport(handler)` to intercept requests in tests — no global monkey-patching.
@@ -802,9 +809,12 @@ $client = new Client([
     'apiKey'  => 'owa_k1_…',
 ]);
 
-$client->sessions->start('my-session');
+// Sessions are addressed by the UUID that create() returns, not by name. Create a session once;
+// afterwards, find its id with $client->sessions->list(['name' => 'my-session']).
+$session = $client->sessions->create(['name' => 'my-session']);
+$client->sessions->start($session['id']);
 
-$result = $client->messages->sendText('my-session', [
+$result = $client->messages->sendText($session['id'], [
     'chatId' => '628123456789@c.us',
     'text'   => 'Hello from the OpenWA PHP SDK!',
 ]);
@@ -825,13 +835,14 @@ Two escape hatches sit on the client itself:
 
 The constructor takes a single associative `$config` array:
 
-| Key              | Type                           | Default          | Description                                                                                                                                                        |
-| ---------------- | ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `baseUrl`        | `string`                       | — (**required**) | API base URL, e.g. `http://localhost:2785`. A trailing `/` is stripped; any path prefix (e.g. `/v1` behind a proxy) is preserved.                                  |
-| `apiKey`         | `string`                       | — (**required**) | Sent as the `X-API-Key` header on every request.                                                                                                                   |
-| `timeout`        | `float`                        | `30.0`           | Per-request timeout in seconds.                                                                                                                                    |
-| `httpClient`     | `?\GuzzleHttp\ClientInterface` | `null`           | Inject a Guzzle client (e.g. one built on a `MockHandler`) for testing or middleware. When `null`, a default Guzzle client is created with the configured timeout. |
-| `defaultHeaders` | `array<string,string>`         | `[]`             | Extra headers applied on every request, **under** the SDK's auth/JSON headers (which always win).                                                                  |
+| Key                 | Type                           | Default          | Description                                                                                                                                                        |
+| ------------------- | ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `baseUrl`           | `string`                       | — (**required**) | API base URL, e.g. `http://localhost:2785`. A trailing `/` is stripped; any path prefix (e.g. `/v1` behind a proxy) is preserved.                                  |
+| `apiKey`            | `string`                       | — (**required**) | Sent as the `X-API-Key` header on every request.                                                                                                                   |
+| `timeout`           | `float`                        | `30.0`           | Per-request timeout in seconds.                                                                                                                                    |
+| `httpClient`        | `?\GuzzleHttp\ClientInterface` | `null`           | Inject a Guzzle client (e.g. one built on a `MockHandler`) for testing or middleware. When `null`, a default Guzzle client is created with the configured timeout. |
+| `defaultHeaders`    | `array<string,string>`         | `[]`             | Extra headers applied on every request, **under** the SDK's auth/JSON headers (which always win).                                                                  |
+| `allowInsecureHttp` | `bool`                         | `false`          | Skip the `error_log()` warning written for an `http://` `baseUrl` whose host is not localhost (e.g. a private Docker network or a TLS-terminating proxy).          |
 
 Missing `baseUrl` or `apiKey` throws `OpenWA\Exceptions\OpenWAException` from the constructor.
 
@@ -877,6 +888,7 @@ All payloads are associative arrays; all listed methods are synchronous and retu
 | `sendPoll`     | `sendPoll(string $sessionId, array $body): array`                        | Send a native poll (2–12 options). **OPERATOR**                                                                                                   |
 | `reply`        | `reply(string $sessionId, array $body): array`                           | Reply to a message. **OPERATOR**                                                                                                                  |
 | `forward`      | `forward(string $sessionId, array $body): array`                         | Forward a message. **OPERATOR**                                                                                                                   |
+| `clickButton`  | `clickButton(string $sessionId, array $body): array`                     | Tap a button or list row on a stored WhatsApp Business prompt (Baileys only). **OPERATOR**                                                        |
 | `react`        | `react(string $sessionId, array $body): array`                           | React to a message. **OPERATOR**                                                                                                                  |
 | `delete`       | `delete(string $sessionId, array $body): array`                          | Delete a message. **OPERATOR**                                                                                                                    |
 | `editMessage`  | `editMessage(string $sessionId, array $body): array`                     | Edit the text of a message already sent (`$body` needs `chatId`, `messageId`, `body`). **OPERATOR**                                               |
@@ -1065,18 +1077,18 @@ All payloads are associative arrays; all listed methods are synchronous and retu
 
 All exceptions live in `OpenWA\Exceptions` and descend from `OpenWAException` (which extends PHP's `\Exception`). Any non-2xx response is raised as an `OpenWAApiException`; the static `classify()` factory picks the most specific subclass by status code. An `OpenWAApiException` carries the HTTP status (`getStatus(): int`), the parsed error body (`getBody(): mixed`), and the NestJS `error` kind when present (`getErrorKind(): ?string`).
 
-| Exception                           | Extends              | Trigger                                                                                                                                                                                                                                                                           |
-| ----------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OpenWAException`                   | `\Exception`         | Base for all SDK errors (also thrown for missing `baseUrl`/`apiKey`).                                                                                                                                                                                                             |
-| `OpenWAApiException`                | `OpenWAException`    | Any non-2xx (including unfollowed 3xx and other 4xx/5xx).                                                                                                                                                                                                                         |
-| `OpenWAAuthException`               | `OpenWAApiException` | `401` — missing/invalid API key.                                                                                                                                                                                                                                                  |
-| `OpenWAForbiddenException`          | `OpenWAApiException` | `403` — insufficient role (e.g. operator-only endpoint).                                                                                                                                                                                                                          |
-| `OpenWANotFoundException`           | `OpenWAApiException` | `404` — resource not found.                                                                                                                                                                                                                                                       |
-| `OpenWAConflictException`           | `OpenWAApiException` | `409` — conflict (e.g. engine not ready).                                                                                                                                                                                                                                         |
-| `OpenWARateLimitException`          | `OpenWAApiException` | `429` — rate limited.                                                                                                                                                                                                                                                             |
-| `OpenWANotImplementedException`     | `OpenWAApiException` | `501` — active engine does not support the operation.                                                                                                                                                                                                                             |
-| `OpenWAServiceUnavailableException` | `OpenWAApiException` | `503` — engine did not confirm in time; the only retryable one. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on. |
-| `OpenWATimeoutException`            | `OpenWAException`    | Request exceeded the timeout (`getTimeout(): float`). Not an API error — has no status/body.                                                                                                                                                                                      |
+| Exception                           | Extends              | Trigger                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenWAException`                   | `\Exception`         | Base for all SDK errors (also thrown for missing `baseUrl`/`apiKey`).                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWAApiException`                | `OpenWAException`    | Any non-2xx (including unfollowed 3xx and other 4xx/5xx).                                                                                                                                                                                                                                                                                                                                                  |
+| `OpenWAAuthException`               | `OpenWAApiException` | `401` — missing/invalid API key.                                                                                                                                                                                                                                                                                                                                                                           |
+| `OpenWAForbiddenException`          | `OpenWAApiException` | `403` — insufficient role (e.g. operator-only endpoint).                                                                                                                                                                                                                                                                                                                                                   |
+| `OpenWANotFoundException`           | `OpenWAApiException` | `404` — resource not found.                                                                                                                                                                                                                                                                                                                                                                                |
+| `OpenWAConflictException`           | `OpenWAApiException` | `409` — conflict (e.g. engine not ready).                                                                                                                                                                                                                                                                                                                                                                  |
+| `OpenWARateLimitException`          | `OpenWAApiException` | `429` — rate limited. The global rate limiter's 429 lifts when its window expires (seconds for the per-second tier, up to an hour for the hourly tier by default); its delay is only in the `Retry-After` response header, which the error does not carry. A 429 whose body has `code: "SEND_PACING_LIMITED"` is not transient: do not retry it before the body's `retryAfterSeconds`, which can be hours. |
+| `OpenWANotImplementedException`     | `OpenWAApiException` | `501` — active engine does not support the operation.                                                                                                                                                                                                                                                                                                                                                      |
+| `OpenWAServiceUnavailableException` | `OpenWAApiException` | `503` — engine did not confirm in time; transient, though a catalog 503 can persist because WhatsApp may never answer that query. In a routed deployment a forwarded request answers 503 only when the owner node was never reached; a forward that fails after the request was sent answers 502 or 504, which the owner may already have acted on.                                                        |
+| `OpenWATimeoutException`            | `OpenWAException`    | Request exceeded the timeout (`getTimeout(): float`). Not an API error — has no status/body.                                                                                                                                                                                                                                                                                                               |
 
 ```php
 <?php
@@ -1087,7 +1099,7 @@ use OpenWA\Exceptions\OpenWATimeoutException;
 use OpenWA\Exceptions\OpenWAApiException;
 
 try {
-    $result = $client->messages->sendText('my-session', [
+    $result = $client->messages->sendText($sessionId, [
         'chatId' => '628123456789@c.us',
         'text'   => 'Hello!',
     ]);
@@ -1108,7 +1120,8 @@ try {
 
 - **Redirects are never followed.** Guzzle is configured with `allow_redirects => false`, so a `3xx` surfaces as an `OpenWAApiException` rather than being followed — the `X-API-Key` header is never re-sent to a redirect target.
 - **Auth/JSON headers take precedence.** `defaultHeaders` are merged in first, then `X-API-Key`, `Content-Type: application/json`, and `Accept: application/json` are applied on top, so they can't be clobbered.
-- **Path segments are percent-encoded.** Ids (chat/message/group ids, session names) pass through `encodeSegment()`, which `rawurlencode`s the value but keeps the WhatsApp-id-safe characters `@`, `:`, and `+` readable — so a value containing `/`, `#`, or `?` cannot break out of its path position.
+- **Path segments are percent-encoded.** Ids (session/chat/message/group ids) pass through `encodeSegment()`, which `rawurlencode`s the value but keeps the WhatsApp-id-safe characters `@`, `:`, and `+` readable — so a value containing `/`, `#`, or `?` cannot break out of its path position.
+- **Empty and dot segments are refused.** An empty, `.` or `..` id throws `InvalidArgumentException` before anything is sent, because the HTTP stack would otherwise resolve it to the parent resource.
 - **Base-URL path prefix is preserved.** The base URL has its trailing `/` trimmed and requests are issued against an absolute `baseUrl . $path`; Guzzle's `base_uri` is intentionally unset, so a prefix like `/v1` behind a reverse proxy is retained.
 - **Null query values are dropped.** Absent optional query parameters (`null`) are filtered out before the request, so they are never sent.
 - **No automatic retries.** A failed request throws immediately; wrap calls in your own backoff if you need retries (notably for `429`). The injectable `httpClient` is the extension point for retry/observability middleware.

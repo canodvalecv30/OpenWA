@@ -24,10 +24,12 @@ import {
   isNodeEnvUnset,
 } from './config/bootstrap-security';
 import { BullBoardAuthMiddleware } from './common/security/bull-board-auth.middleware';
+import { invalidTrustedProxies } from './common/utils/ip';
 import { AuthService } from './modules/auth/auth.service';
 import { AuditService } from './modules/audit/audit.service';
 import { Request, Response, NextFunction } from 'express';
 import { RedisIoAdapter } from './modules/events/redis-io.adapter';
+import { prestartBuiltinDatabase } from './modules/docker/docker.service';
 
 // The created app, exposed at module scope so the fatal handler below can run a best-effort teardown
 // (engine sessions, Redis/pg) when bootstrap fails AFTER NestFactory.create succeeded — notably a
@@ -93,6 +95,15 @@ async function bootstrap() {
     );
   }
 
+  // Advisory (not enforced): a TRUSTED_PROXIES entry that is not an IP or CIDR never matches, so the
+  // proxy it meant to name is treated as a client. Failing the boot would break configs that run today.
+  const badTrustedProxies = invalidTrustedProxies(process.env.TRUSTED_PROXIES);
+  if (badTrustedProxies.length > 0) {
+    bootstrapLogger.warn(
+      `TRUSTED_PROXIES entries that are not an IP address or CIDR range are ignored: ${badTrustedProxies.join(', ')}`,
+    );
+  }
+
   // Fail fast on a media storage root the app cannot write to, BEFORE Nest builds the module graph:
   // StorageService only checks that the root EXISTS, so a root owned by another user passes boot and
   // fails later on the first media write instead (#1065). Runs ahead of NestFactory.create so
@@ -101,6 +112,10 @@ async function bootstrap() {
     configured: process.env.STORAGE_LOCAL_PATH,
     logger: bootstrapLogger,
   });
+
+  // The data connection dials PostgreSQL inside NestFactory.create, so a stopped built-in container
+  // must be started before it, not from DockerService.onModuleInit (see the helper).
+  await prestartBuiltinDatabase();
 
   // Disable Nest's default body parser so we can set an explicit size cap below.
   const app = await NestFactory.create(AppModule, { bodyParser: false });

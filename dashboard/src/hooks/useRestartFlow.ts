@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { infraApi } from '../services/api';
 import { restartPollAttempts } from '../utils/restartPoll';
 
-export type RestartStatus = 'idle' | 'restarting' | 'waiting' | 'success' | 'error';
+// 'unknown': a proxy gave up waiting for the restart request, so whether it went through cannot be told.
+export type RestartStatus = 'idle' | 'restarting' | 'waiting' | 'success' | 'error' | 'unknown';
 
 export interface RestartOpenRequest {
   profiles: string[];
+  // The built-in profiles running now; the restart stops each one the new config no longer needs.
+  running: string[];
   dbSwitch: boolean;
   storageSwitch: boolean;
 }
@@ -14,8 +17,12 @@ export interface RestartFlow {
   showRestartModal: boolean;
   restartCountdown: number;
   restartStatus: RestartStatus;
+  /** The server's reason when it refused the restart; shown in place of the generic error text. */
+  restartError: string | null;
+  /** Services the server reported it could not start or stop; the page does not reload over them. */
+  restartWarnings: string[];
   pendingProfiles: string[];
-  previousProfiles: string[];
+  runningProfiles: string[];
   dbSwitch: boolean;
   storageSwitch: boolean;
   open: (req: RestartOpenRequest) => void;
@@ -24,22 +31,24 @@ export interface RestartFlow {
 }
 
 /**
- * Owns the post-save restart modal: the show/countdown/status state machine, the pending/previous
+ * Owns the post-save restart modal: the show/countdown/status state machine, the pending/running
  * profile pair that drives `infraApi.restart(...)`, and the db/storage-switch flags the modal's
  * data-loss warning reads (#488). `open()` is the single entry point a caller (the page's save
  * `onSaved`) uses to hand over a fresh save result.
  *
- * The profile pair is one state object rotated by a single functional update, not two separate
- * setters reading each other's render-scoped value — React StrictMode double-invokes updater
- * functions, which would otherwise make the rotation order fragile.
+ * The running set is taken from the caller on every open, not carried over from an earlier save: the
+ * page reloads after each restart, so an earlier save is usually not there, and when it is, it says
+ * what that save wanted rather than what is running.
  */
 export function useRestartFlow(): RestartFlow {
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [restartCountdown, setRestartCountdown] = useState(0);
   const [restartStatus, setRestartStatus] = useState<RestartStatus>('idle');
-  const [profiles, setProfiles] = useState<{ pending: string[]; previous: string[] }>({
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const [restartWarnings, setRestartWarnings] = useState<string[]>([]);
+  const [profiles, setProfiles] = useState<{ pending: string[]; running: string[] }>({
     pending: [],
-    previous: [],
+    running: [],
   });
   // Set when the just-saved config changes the DB or storage backend vs what's running, so the restart
   // modal can warn that the new backend starts empty and offer a data backup before switching (#488).
@@ -81,11 +90,12 @@ export function useRestartFlow(): RestartFlow {
   };
 
   const open = ({
-    profiles: newProfiles,
+    profiles: pending,
+    running,
     dbSwitch: nextDbSwitch,
     storageSwitch: nextStorageSwitch,
   }: RestartOpenRequest) => {
-    setProfiles(prev => ({ previous: prev.pending, pending: newProfiles }));
+    setProfiles({ pending, running });
     setDbSwitch(nextDbSwitch);
     setStorageSwitch(nextStorageSwitch);
     setShowRestartModal(true);
@@ -98,7 +108,7 @@ export function useRestartFlow(): RestartFlow {
     if (restartStatus === 'idle') setShowRestartModal(false);
   };
 
-  const checkServerHealth = (estimatedTime?: number) => {
+  const checkServerHealth = (estimatedTime: number | undefined, hasWarnings: boolean) => {
     let attempts = 0;
     const maxAttempts = restartPollAttempts(estimatedTime);
 
@@ -108,7 +118,8 @@ export function useRestartFlow(): RestartFlow {
         stopCountdown();
         setRestartCountdown(0);
         setRestartStatus('success');
-        schedulePollTimeout(() => window.location.reload(), 2000);
+        // With warnings on screen the operator reloads by hand, after reading them.
+        if (!hasWarnings) schedulePollTimeout(() => window.location.reload(), 2000);
       } catch {
         attempts++;
         if (attempts < maxAttempts) schedulePollTimeout(check, 1000);
@@ -123,17 +134,37 @@ export function useRestartFlow(): RestartFlow {
     setRestartStatus('restarting');
     setRestartCountdown(30);
 
-    const profilesToRemove = profiles.previous.filter(p => !profiles.pending.includes(p));
+    const profilesToRemove = profiles.running.filter(p => !profiles.pending.includes(p));
 
     // Kept outside the try: the poll deadline is derived from it, and the restart call is expected to
     // fail sometimes (the server may go down before it answers).
     let estimatedTime: number | undefined;
+    let warnings: string[] = [];
     try {
       const response = await infraApi.restart(profiles.pending, profilesToRemove);
       estimatedTime = response.estimatedTime;
       if (response.estimatedTime) setRestartCountdown(response.estimatedTime);
-    } catch {
-      // Expected — server shutting down
+      warnings = [...(response.orchestration?.errors ?? []), ...(response.removal?.errors ?? [])];
+      setRestartWarnings(warnings);
+    } catch (err) {
+      // An HTTP status (a proxy 503 included) means no shutdown was confirmed and the old
+      // process may still be serving, so a readiness poll would report a restart that never happened.
+      // Only a status-less network failure is the expected sign of the server going down mid-answer.
+      const failure = err as { status?: unknown; code?: unknown } | null;
+      if (typeof failure?.status === 'number') {
+        stopCountdown();
+        setRestartCountdown(0);
+        // A 504, or a 502 the gateway did not stamp with a code, came from a proxy that stopped waiting.
+        // The request may still be running (a first-time enable pulls an image before the restart), so
+        // this is neither a refusal nor something a readiness poll can settle: the old process answers.
+        if (failure.status === 504 || (failure.status === 502 && failure.code === undefined)) {
+          setRestartStatus('unknown');
+          return;
+        }
+        setRestartError(err instanceof Error ? err.message : String(err));
+        setRestartStatus('error');
+        return;
+      }
     }
 
     setRestartStatus('waiting');
@@ -148,15 +179,17 @@ export function useRestartFlow(): RestartFlow {
       });
     }, 1000);
 
-    checkServerHealth(estimatedTime);
+    checkServerHealth(estimatedTime, warnings.length > 0);
   };
 
   return {
     showRestartModal,
     restartCountdown,
     restartStatus,
+    restartError,
+    restartWarnings,
     pendingProfiles: profiles.pending,
-    previousProfiles: profiles.previous,
+    runningProfiles: profiles.running,
     dbSwitch,
     storageSwitch,
     open,

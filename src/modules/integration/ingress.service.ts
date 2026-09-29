@@ -164,7 +164,16 @@ export class IngressService {
     // Other schemes retain the existing x-delivery/body-hash behavior for compatibility.
     const defaultDedupHeader = route.signature.scheme === 'standard-webhooks' ? 'webhook-id' : 'x-delivery';
     const dedupHeader = (route.dedupHeader ?? route.signature.dedupHeader ?? defaultDedupHeader).toLowerCase();
-    const deliveryId = req.headers[dedupHeader] ?? deriveDeliveryId(req);
+    // A route that declares dedupOn: 'body' keys retries on the raw body: its provider mints a fresh
+    // delivery id per attempt, so trusting the header would let every retry through as new.
+    //
+    // A header that is present but blank is no id at all, and it used to be taken as one: every
+    // delivery then shared the empty key, so the dedup row admitted the first and dropped the rest
+    // while answering each provider with the route's success ack. Nothing was enqueued, nothing was
+    // dead-lettered, and the deliveries were simply gone. Fall through to the body hash, which is
+    // exactly the "provider supplied no id" case it already exists for.
+    const headerId = req.headers[dedupHeader]?.trim();
+    const deliveryId = route.dedupOn === 'body' || !headerId ? deriveDeliveryId(req) : headerId;
     // Provider request headers persist with the event (redrive/debugging); credentials must not.
     // Signature headers are re-derivable, auth material is not — redact before the first write.
     // A shared-secret route carries the instance secret itself in its declared header.
@@ -177,10 +186,12 @@ export class IngressService {
       body: req.rawBody,
       rawBody: req.rawBody,
     };
-    // Rendered BEFORE the dedup check so a provider retry gets the byte-identical ack rather than a
-    // second contract on the same route. The ctx is the request in hand (rawBody, deliveryId, now),
-    // never stored state, which is what makes rendering it on a dedup hit sound: an ack field that had
-    // to reflect the PERSISTED row would echo the retry's values as the original's. Keep it that way.
+    // Rendered BEFORE the dedup check so a provider retry gets the route's ack (same status and headers)
+    // rather than a second contract on the same route. A body template renders from the retry, not the
+    // first delivery, and a retry still passes the preflight above first. The ctx is the request in
+    // hand (rawBody, deliveryId, now), never stored state, which is what makes rendering it on a dedup
+    // hit sound: an ack field that had to reflect the PERSISTED row would echo the retry's values as the
+    // original's. Keep it that way.
     const ack = renderAck(route.response?.ack, {
       rawBody: req.rawBody,
       timestamp: String(Math.floor(this.deps.now() / 1000)),
@@ -197,7 +208,7 @@ export class IngressService {
       payloadHash: createHash('sha256').update(req.rawBody).digest('hex'),
       sessionId: instance.sessionScope,
     });
-    if (!isNew) return ack; // already persisted/acked; a retry gets the first delivery's ack
+    if (!isNew) return ack; // already persisted/acked; a retry gets the route's ack, not enqueued again
 
     // Best-effort conversation id for P1 ordering. Never throws — a malformed body just yields undefined.
     const providerConversationId = extractConversationId(route.conversationId, req.headers, req.rawBody);

@@ -390,6 +390,9 @@ flowchart TB
 ```bash
 # .env — excerpt of the commonly-tuned keys. The repo's `.env.example` is the canonical,
 # fully annotated list; add nothing here that does not appear there.
+# Keys the dashboard manages (Dashboard > Infrastructure) are commented out with their defaults:
+# an uncommented key in .env pins that value over the one the dashboard saves (see the header of
+# `.env.example`). Uncomment only what you intend to manage by hand.
 
 # ===========================================
 # APPLICATION
@@ -405,8 +408,8 @@ LOG_FORMAT=json
 # ===========================================
 # Option 1: SQLite (for minimal deployments)
 # For SQLite, DATABASE_NAME is the database FILE PATH.
-DATABASE_TYPE=sqlite
-DATABASE_NAME=./data/openwa.sqlite
+# DATABASE_TYPE=sqlite
+# DATABASE_NAME=./data/openwa.sqlite
 
 # Option 2: PostgreSQL (for production) — DATABASE_NAME is the database NAME here
 # DATABASE_TYPE=postgres
@@ -424,8 +427,8 @@ DATABASE_NAME=./data/openwa.sqlite
 # STORAGE_TYPE accepts only `local` or `s3` — env validation rejects anything else and the app
 # FAILS TO BOOT ("Invalid environment configuration"). There is no silent fallback to local disk.
 # Option 1: Local filesystem (default)
-STORAGE_TYPE=local
-STORAGE_LOCAL_PATH=./data/media
+# STORAGE_TYPE=local
+# STORAGE_LOCAL_PATH=./data/media
 
 # Option 2: S3 (AWS) — leave S3_ENDPOINT unset; the SDK derives it from the region
 # STORAGE_TYPE=s3
@@ -448,9 +451,9 @@ STORAGE_LOCAL_PATH=./data/media
 # Both are opt-in and both need a reachable Redis, configured with the discrete host/port pair
 # (there is no REDIS_URL). Defaults: no cache at all (CacheService is a no-op and every read falls
 # through to the database — there is no in-memory tier) and inline (non-queued) dispatch.
-REDIS_ENABLED=false
-REDIS_HOST=localhost
-REDIS_PORT=6379
+# REDIS_ENABLED=false
+# REDIS_HOST=localhost
+# REDIS_PORT=6379
 # Redis-backed caching switches on when REDIS_ENABLED=true OR CACHE_ENABLED=true — enabling Redis
 # for the queue alone therefore also enables the cache.
 # CACHE_ENABLED=true
@@ -462,12 +465,12 @@ REDIS_PORT=6379
 # ENGINE_TYPE=baileys   # whatsapp-web.js (default) | baileys; omit to use the dashboard selection
 
 # Session
-SESSION_DATA_PATH=./data/sessions
+# SESSION_DATA_PATH=./data/sessions
 
 # Puppeteer (for whatsapp-web.js)
 PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-PUPPETEER_HEADLESS=true
-PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox
+# PUPPETEER_HEADLESS=true
+# PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu
 # Optional per-browser-command budget, ms. Unset = Puppeteer's own budget. Raise only after seeing
 # "Runtime.callFunctionOn timed out"; positive integer, max 2147483647 (cost: see docs/12).
 # PUPPETEER_PROTOCOL_TIMEOUT_MS=300000
@@ -475,10 +478,12 @@ PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox
 # ===========================================
 # SECURITY
 # ===========================================
-# Generate with: openssl rand -base64 32
-API_MASTER_KEY=your-master-api-key
-# Optional HMAC pepper so a DB leak alone can't precompute key hashes
-API_KEY_PEPPER=optional-key-hashing-pepper
+# First-boot seed for the initial ADMIN key, ignored once any key exists. Leave it unset to
+# generate a random key into data/.api-key, or set one generated with: openssl rand -base64 32
+# API_MASTER_KEY=
+# Optional HMAC pepper so a DB leak alone can't precompute key hashes. Generate a random value
+# (openssl rand -base64 32); setting or changing it invalidates every API key issued before.
+# API_KEY_PEPPER=
 
 # ===========================================
 # WEBHOOK
@@ -487,12 +492,12 @@ WEBHOOK_TIMEOUT=10000
 WEBHOOK_RETRY_DELAY=5000
 WEBHOOK_DISPATCH_CONCURRENCY=16
 WEBHOOK_DISPATCH_MAX_QUEUED=1000
-# Retry attempts are configured per webhook with the retryCount API field (default 3, range 0-5).
+# Delivery attempts (total, including the first) are set per webhook with the retryCount API field (default 3, range 0-5).
 
 # ===========================================
 # RATE LIMITING
 # ===========================================
-# Three global per-IP windows (short/medium/long); defaults shown
+# Three windows (short/medium/long), each counted per route and client IP; defaults shown
 RATE_LIMIT_MEDIUM_TTL=60000
 RATE_LIMIT_MEDIUM_LIMIT=100
 ```
@@ -541,12 +546,15 @@ export default () => ({
     puppeteer: {
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: process.env.PUPPETEER_HEADLESS !== 'false',
-      // Split on commas AND whitespace; the default is a four-flag string, not an empty list
-      args: (
-        process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu'
-      )
-        .split(/[\s,]+/)
-        .filter(Boolean),
+      // Split on whitespace, and on a comma only before the next flag, so a flag value keeps its
+      // commas (--disable-features=A,B). The default is a four-flag string, not an empty list, and
+      // --lang=en-US is appended unless a --lang flag is already present.
+      args: withPinnedBrowserLocale(
+        (process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu')
+          .split(/\s+|,+(?=-)/)
+          .map(arg => arg.replace(/^,+|,+$/g, ''))
+          .filter(Boolean),
+      ),
     },
   },
   webhook: {
@@ -935,13 +943,13 @@ export class MetricsService {
 | `openwa_process_uptime_seconds`              | gauge     | —                                   | Process uptime                                                                               |
 | `openwa_process_resident_memory_bytes`       | gauge     | —                                   | RSS                                                                                          |
 | `openwa_process_heap_used_bytes`             | gauge     | —                                   | V8 heap used                                                                                 |
-| `openwa_stats_available`                     | gauge     | —                                   | 1 when the database-derived series below could be read on this scrape, 0 when they could not |
+| `openwa_stats_available`                     | gauge     | —                                   | 1 when the last overview read of the database-derived series below succeeded, 0 if it failed |
 | `openwa_sessions_total`                      | gauge     | —                                   | Configured sessions                                                                          |
 | `openwa_sessions_active`                     | gauge     | —                                   | READY (active) sessions                                                                      |
 | `openwa_sessions`                            | gauge     | `status`                            | Session count per status                                                                     |
 | `openwa_messages_total`                      | gauge     | `direction` (`incoming`/`outgoing`) | Current stored messages by direction                                                         |
 | `openwa_messages_failed_total`               | gauge     | —                                   | Current messages in FAILED state                                                             |
-| `openwa_webhook_delivery_failures_total`     | counter   | —                                   | Webhook deliveries that terminally failed (all retries exhausted) since process start        |
+| `openwa_webhook_delivery_failures_total`     | counter   | —                                   | Webhook delivery failures since process start: retries exhausted, or never sent              |
 | `openwa_session_reconnect_attempts_total`    | counter   | —                                   | Reconnect attempts scheduled across all sessions since process start                         |
 | `openwa_session_reconnect_loop_alerts_total` | counter   | —                                   | Reconnect-loop alerts emitted since process start                                            |
 | `openwa_sessions_restricted`                 | gauge     | —                                   | Sessions whose account WhatsApp is currently restricting                                     |
@@ -966,12 +974,16 @@ from a module that is neither — and not spliced through `lines.push(...renderX
 seen, so keep new renderers on that composition.
 
 > **The database-derived series can be absent.** `openwa_sessions_*`, `openwa_messages_*` and the per-status
-> breakdown are read from the data database on each scrape. If that read fails — an outage, a statement
+> breakdown come from `StatsService.getOverview()`, which is memoized for `STATS_CACHE_TTL_MS` (default 30 s,
+> shared with `GET /api/stats/overview`) behind the 5 s render cache. If that read fails — an outage, a statement
 > timeout, pool exhaustion, a `SQLITE_BUSY` under load — they are OMITTED rather than reported as zero, and
 > `openwa_stats_available` goes to 0. The process, HTTP and webhook series keep being served, so `up` stays 1
 > and still means "the process is alive". Alert on `openwa_stats_available == 0` for the degradation itself;
 > an alert written as `openwa_sessions_active == 0` would never fire for it, and one written with `absent()`
-> would.
+> would. Because of the two caches, `openwa_stats_available` can keep reporting 1, and the series their last
+> values, for up to `STATS_CACHE_TTL_MS` + 5 s after the data database fails, so give an alert on it a `for:`
+> at least that long. `STATS_CACHE_TTL_MS=0` makes the signal live at the cost of a full overview query per
+> render.
 
 ### Grafana Dashboard Definition
 

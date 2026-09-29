@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isLocalhostHost, warnIfInsecureHttpUrl } from './urlSecurity.ts';
+import { isLocalhostHost, resolveSocketUrl, warnIfInsecureHttpUrl } from './urlSecurity.ts';
 
 test('isLocalhostHost recognizes loopback hosts', () => {
   assert.ok(isLocalhostHost('localhost'));
@@ -55,4 +55,21 @@ test('warnIfInsecureHttpUrl is silent on https', () => {
 
 test('warnIfInsecureHttpUrl returns the URL unchanged (does not throw)', () => {
   assert.equal(warnIfInsecureHttpUrl('http://gateway.example.com', 'x'), 'http://gateway.example.com');
+});
+
+test('resolveSocketUrl prefers VITE_WS_URL, then the API origin, then the page origin', () => {
+  const page = 'https://dashboard.example.com';
+  const api = 'https://api.example.com';
+  assert.equal(resolveSocketUrl(undefined, '', page), page);
+  assert.equal(resolveSocketUrl('', '', page), page);
+  assert.equal(resolveSocketUrl(undefined, api, page), api);
+  assert.equal(resolveSocketUrl('https://ws.example.com', api, page), 'https://ws.example.com');
+});
+
+test('resolveSocketUrl keeps only the origin of a VITE_API_URL that carries a path', () => {
+  const page = 'https://dashboard.example.com';
+  assert.equal(resolveSocketUrl(undefined, 'https://api.example.com/gw', page), 'https://api.example.com');
+  assert.equal(resolveSocketUrl(undefined, 'https://api.example.com:8443/gw/v1', page), 'https://api.example.com:8443');
+  // A relative value is a path on the page's own host.
+  assert.equal(resolveSocketUrl(undefined, '/gw', page), page);
 });

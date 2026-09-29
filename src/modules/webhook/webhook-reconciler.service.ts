@@ -108,9 +108,10 @@ export class WebhookReconcilerService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
         const webhook = await this.webhooks.findOne({ where: { id: row.webhookId } });
-        if (!webhook || !webhook.active) {
-          // The subscription is gone or switched off; replaying it would deliver an event the
-          // operator has already unsubscribed from.
+        if (!webhook || !webhook.active || !(webhook.events.includes(row.event) || webhook.events.includes('*'))) {
+          // The subscription is gone, switched off or no longer lists this event; replaying it would
+          // deliver an event the operator has already unsubscribed from. Same test as the queue
+          // processor applies before every attempt.
           await this.outbox.close(row.webhookId, row.idempotencyKey, 'failed');
           stats.skipped++;
           continue;

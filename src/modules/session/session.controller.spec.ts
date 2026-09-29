@@ -5,6 +5,8 @@ import type { Session } from './entities/session.entity';
 import type { SessionService } from './session.service';
 import type { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
+import { ChatScopeService } from '../auth/chat-scope.service';
+import type { ChatSummary } from '../../engine/interfaces/whatsapp-engine.interface';
 import type { ApiKey } from '../auth/entities/api-key.entity';
 import { BadGatewayException, BadRequestException, ConflictException } from '@nestjs/common';
 
@@ -32,18 +34,22 @@ describe('SessionController — create() response contract', () => {
     updatedAt: new Date('2026-01-01T00:00:00Z'),
   };
 
-  let sessionService: { create: jest.Mock; isActive: jest.Mock };
+  let sessionService: { create: jest.Mock; engineLoaded: jest.Mock };
   let auditService: { logInfo: jest.Mock };
   let controller: SessionController;
 
   beforeEach(() => {
     // transformSession reads live engine state for `engineLoaded`; a freshly created session has no
     // engine yet, which is what the response must say.
-    sessionService = { create: jest.fn().mockResolvedValue({ ...entity }), isActive: jest.fn().mockReturnValue(false) };
+    sessionService = {
+      create: jest.fn().mockResolvedValue({ ...entity }),
+      engineLoaded: jest.fn().mockReturnValue(false),
+    };
     auditService = { logInfo: jest.fn().mockResolvedValue(undefined) };
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -74,15 +80,15 @@ describe('SessionController — create() response contract', () => {
     });
   });
 
-  // engineLoaded is live process state, not an entity column, so the only thing that can get it wrong
+  // engineLoaded is live state, not an entity column, so the only thing that can get it wrong
   // is the wiring. Assert both answers come from the service rather than from the row's status.
   it('reports engineLoaded from the live engine map, not from the row status', async () => {
-    sessionService.isActive.mockReturnValue(true);
+    sessionService.engineLoaded.mockReturnValue(true);
 
     const result = await controller.create({ name: 'test-session' });
 
     expect(result.engineLoaded).toBe(true);
-    expect(sessionService.isActive).toHaveBeenCalledWith(entity.id);
+    expect(sessionService.engineLoaded).toHaveBeenCalledWith(expect.objectContaining({ id: entity.id }));
   });
 
   it('still audits the creation with the session id and name', async () => {
@@ -118,16 +124,17 @@ describe('SessionController — logout() audit + error forwarding contract', () 
     updatedAt: new Date('2026-01-01T00:00:00Z'),
   };
 
-  let sessionService: { logout: jest.Mock; isActive: jest.Mock };
+  let sessionService: { logout: jest.Mock; engineLoaded: jest.Mock };
   let auditService: { logInfo: jest.Mock };
   let controller: SessionController;
 
   beforeEach(() => {
-    sessionService = { logout: jest.fn(), isActive: jest.fn().mockReturnValue(false) };
+    sessionService = { logout: jest.fn(), engineLoaded: jest.fn().mockReturnValue(false) };
     auditService = { logInfo: jest.fn().mockResolvedValue(undefined) };
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -182,7 +189,7 @@ describe('SessionController — start/stop lifecycle', () => {
     updatedAt: new Date('2026-01-01T01:00:00Z'),
   };
 
-  let sessionService: { start: jest.Mock; stop: jest.Mock; forceKill: jest.Mock; isActive: jest.Mock };
+  let sessionService: { start: jest.Mock; stop: jest.Mock; forceKill: jest.Mock; engineLoaded: jest.Mock };
   let auditService: { logInfo: jest.Mock };
   let controller: SessionController;
 
@@ -191,24 +198,25 @@ describe('SessionController — start/stop lifecycle', () => {
       start: jest.fn(),
       stop: jest.fn(),
       forceKill: jest.fn(),
-      isActive: jest.fn().mockReturnValue(false),
+      engineLoaded: jest.fn().mockReturnValue(false),
     };
     auditService = { logInfo: jest.fn().mockResolvedValue(undefined) };
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
   it('start returns the session with engineLoaded read from the live engine map', async () => {
     sessionService.start.mockResolvedValue({ ...runningEntity });
-    sessionService.isActive.mockReturnValue(true);
+    sessionService.engineLoaded.mockReturnValue(true);
 
     const result = await controller.start('sess-uuid-1');
 
     expect(result.status).toBe(SessionStatus.READY);
     expect(result.engineLoaded).toBe(true);
-    expect(sessionService.isActive).toHaveBeenCalledWith('sess-uuid-1');
+    expect(sessionService.engineLoaded).toHaveBeenCalledWith(expect.objectContaining({ id: 'sess-uuid-1' }));
   });
 
   it('start audits SESSION_STARTED once the service has resolved', async () => {
@@ -287,6 +295,7 @@ describe('SessionController — muteChat', () => {
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -306,14 +315,15 @@ describe('SessionController — muteChat', () => {
 
 describe('SessionController findAll name filter', () => {
   const apiKey = { allowedSessions: ['sess-uuid-1'] } as unknown as ApiKey;
-  let sessionService: { findAll: jest.Mock; isActive: jest.Mock };
+  let sessionService: { findAll: jest.Mock; engineLoaded: jest.Mock };
   let controller: SessionController;
 
   beforeEach(() => {
-    sessionService = { findAll: jest.fn().mockResolvedValue([]), isActive: jest.fn().mockReturnValue(false) };
+    sessionService = { findAll: jest.fn().mockResolvedValue([]), engineLoaded: jest.fn().mockReturnValue(false) };
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       { logInfo: jest.fn() } as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -355,6 +365,7 @@ describe('SessionController — pinChat', () => {
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -401,6 +412,7 @@ describe('SessionController — proxy() response contract', () => {
     controller = new SessionControllerClass(
       sessionService as unknown as SessionService,
       auditService as unknown as AuditService,
+      new ChatScopeService(),
     );
   });
 
@@ -427,5 +439,50 @@ describe('SessionController — proxy() response contract', () => {
         },
       }),
     );
+  });
+});
+
+// GET /sessions/:sessionId/chats is the one list route a chat-restricted key may use, and it must
+// FILTER BEFORE paginating: filtering the page instead hands back a short or empty window while an
+// allowed chat sits just past it.
+describe('SessionController — GET .../chats filters before paginating', () => {
+  const chat = (id: string, timestamp: number): ChatSummary => ({
+    id,
+    name: id,
+    isGroup: id.endsWith('@g.us'),
+    kind: id.endsWith('@g.us') ? 'group' : 'individual',
+    unreadCount: 0,
+    timestamp,
+    archived: false,
+    pinned: false,
+    muted: false,
+  });
+
+  let sessionService: { listChats: jest.Mock };
+  let controller: SessionController;
+
+  beforeEach(() => {
+    sessionService = { listChats: jest.fn() };
+    controller = new SessionControllerClass(
+      sessionService as unknown as SessionService,
+      { logInfo: jest.fn() } as unknown as AuditService,
+      new ChatScopeService(),
+    );
+  });
+
+  it('filters the full list before the window (a page-first filter would return nothing here)', async () => {
+    // The disallowed chat is NEWEST, so a page of 1 taken before filtering would be all-disallowed.
+    sessionService.listChats.mockResolvedValue([chat('999@g.us', 3), chat('123@g.us', 2), chat('123@g.us', 1)]);
+    const apiKey = { allowedChats: ['123@g.us'] } as ApiKey;
+
+    const out = await controller.getChats('sess-uuid-1', apiKey, '1', '0');
+
+    expect(out.map(c => c.id)).toEqual(['123@g.us']);
+  });
+
+  it('passes the whole list through for an unrestricted key', async () => {
+    sessionService.listChats.mockResolvedValue([chat('123@g.us', 3), chat('999@g.us', 2)]);
+    const out = await controller.getChats('sess-uuid-1', { allowedChats: null } as ApiKey, undefined, undefined);
+    expect(out).toHaveLength(2);
   });
 });

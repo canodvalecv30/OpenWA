@@ -479,6 +479,23 @@ describe('WebhookService', () => {
       timeoutSpy.mockRestore();
     });
 
+    // Receivers dedup on X-OpenWA-Idempotency-Key. A key that repeats per webhook makes every test
+    // after the first a silent duplicate that reports success while the handler never runs.
+    it('test() sends a fresh idempotency key on every call, suffixed with the webhook id', async () => {
+      const webhook = createMockWebhook({ events: ['message.received'] });
+      (repository.findOne as jest.Mock).mockResolvedValue(webhook);
+
+      await service.test('sess-1', webhook.id);
+      await service.test('sess-1', webhook.id);
+
+      const keys = (mockFetch.mock.calls as Array<[string, { headers: Record<string, string> }]>).map(
+        ([, init]) => init.headers['X-OpenWA-Idempotency-Key'],
+      );
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).not.toBe(keys[1]);
+      for (const key of keys) expect(key.endsWith(`_${webhook.id}`)).toBe(true);
+    });
+
     // A literal link-local IP is rejected synchronously by the SSRF guard before any fetch/DNS, so this
     // is fully offline. The raw SsrfBlockedError message names the resolved internal IP — an SSRF
     // disclosure oracle — so the test() response must surface the generic constant instead.

@@ -7,11 +7,12 @@
   },
   "common": {
     "appName": "OpenWA",
+    "updateAvailable": "v{{version}} verfügbar",
     "loading": "Wird geladen...",
     "cancel": "Abbrechen",
     "delete": "Löschen",
     "create": "Erstellen",
-    "save": "Save",
+    "save": "Speichern",
     "close": "Schließen",
     "showApiKey": "API-Schlüssel anzeigen",
     "hideApiKey": "API-Schlüssel ausblenden",
@@ -31,7 +32,9 @@
     "never": "Nie",
     "justNow": "Gerade eben",
     "minAgo": "vor {{count}} Min.",
+    "minAgo_other": "vor {{count}} Min.",
     "hoursAgo": "vor {{count}} Std.",
+    "hoursAgo_other": "vor {{count}} Std.",
     "optional": "optional",
     "language": "Sprache",
     "back": "Zurück",
@@ -98,6 +101,25 @@
       "delete": "Nachricht löschen"
     },
     "replyingTo": "Antwort an {{name}}",
+    "messageType": {
+      "text": "Text",
+      "image": "Bild",
+      "video": "Video",
+      "audio": "Audio",
+      "voice": "Sprachnachricht",
+      "document": "Dokument",
+      "sticker": "Sticker",
+      "location": "Standort",
+      "contact": "Kontakt",
+      "poll": "Umfrage",
+      "call": "Anruf",
+      "revoked": "Gelöschte Nachricht",
+      "order": "Bestellung",
+      "product": "Produkt",
+      "masked": "Ausgeblendete Nachricht",
+      "unknown": "Nachricht",
+      "unknownType": "Unbekannter Typ"
+    },
     "you": "Du",
     "youPrefix": "Du: ",
     "yesterday": "Gestern",
@@ -113,13 +135,16 @@
     "groupSubtitle": "Gruppe",
     "privateContactSubtitle": "Privater Kontakt",
     "deleteConfirm": "Diese Nachricht für alle löschen?",
+    "promptButtons": "Nachrichtenoptionen",
     "messageDeleted": "🚫 Diese Nachricht wurde gelöscht",
     "messageMasked": "🔒 Von WhatsApp für verknüpfte Geräte ausgeblendet — prüfe dein Haupttelefon",
     "kind": {
       "group": "Gruppe",
       "channel": "Kanal",
       "status": "Status",
-      "broadcast": "Broadcast"
+      "broadcast": "Broadcast",
+      "individual": "Einzelchat",
+      "unknown": "Unbekannt"
     },
     "tab": {
       "chats": "Chats",
@@ -162,7 +187,9 @@
       "send": "Nachricht konnte nicht gesendet werden",
       "react": "Reaktion auf die Nachricht fehlgeschlagen",
       "delete": "Nachricht konnte nicht gelöscht werden",
-      "fileTooLarge": "Die Datei ist zu groß (max. 18 MB)"
+      "clickButton": "Schaltfläche konnte nicht angeklickt werden",
+      "fileTooLarge": "Die Datei ist zu groß (max. 18 MB)",
+      "searchHitSessionNotReady": "Die Sitzung dieser Nachricht ist nicht verbunden"
     },
     "loadMessagesError": "Nachrichten konnten nicht geladen werden. Prüfe die Serverprotokolle.",
     "messageStatus": {
@@ -213,6 +240,7 @@
     "noSessions": "Keine Sitzungen gefunden. Erstelle eine, um zu beginnen.",
     "view": "Ansehen",
     "disconnect": "Trennen",
+    "disconnectFailed": "Sitzung konnte nicht getrennt werden",
     "errorPrefix": "Fehler: {{message}}",
     "loadError": "Daten konnten nicht geladen werden",
     "charts": {
@@ -223,6 +251,7 @@
         "30d": "30 Tage"
       },
       "overTime": "Nachrichten im Zeitverlauf",
+      "overTimeUtcDays": "Nachrichten im Zeitverlauf (Tage in UTC)",
       "byType": "Nachrichten nach Typ",
       "topChats": "Top-Chats",
       "sent": "Gesendet",
@@ -271,7 +300,8 @@
       "successTitle": "Sitzung erstellt",
       "successDesc": "Sitzung „{{name}}“ wurde erfolgreich erstellt",
       "errorTitle": "Erstellung fehlgeschlagen",
-      "errorDefault": "Sitzung konnte nicht erstellt werden"
+      "errorDefault": "Sitzung konnte nicht erstellt werden",
+      "tooShort": "Der Name muss mindestens 3 Zeichen lang sein."
     },
     "delete": {
       "title": "Löschen bestätigen",
@@ -305,24 +335,24 @@
       "created": "Erstellt",
       "lastActive": "Zuletzt aktiv",
       "autoRejectCalls": "Anrufe automatisch ablehnen",
-      "autoRejectCallsHint": "Eingehende Anrufe werden abgelehnt, sobald sie klingeln. Der Webhook call.received wird trotzdem zuerst ausgelöst. Gilt ab dem nächsten Anruf — kein Neustart nötig. Nur mit der Baileys-Engine: whatsapp-web.js kann keine Anrufe ablehnen."
+      "autoRejectCallsHint": "Eingehende Anrufe werden abgelehnt, sobald sie klingeln. Der Webhook call.received wird trotzdem zuerst ausgelöst. Gilt ab dem nächsten Anruf, kein Neustart nötig. Nur mit der Baileys-Engine: whatsapp-web.js kann keine Anrufe ablehnen."
     },
     "proxy": {
-      "title": "Proxy Configuration",
-      "status": "Current",
-      "enabled": "Use proxy",
-      "url": "Proxy URL",
+      "title": "Proxy-Konfiguration",
+      "status": "Aktuell",
+      "enabled": "Proxy verwenden",
+      "url": "Proxy-URL",
       "urlPlaceholder": "http://user:pass@proxy.example.com:8080",
-      "urlKeepPlaceholder": "Enter new URL to replace {{host}} (credentials not shown)",
+      "urlKeepPlaceholder": "Neue URL eingeben, um {{host}} zu ersetzen (Zugangsdaten werden nicht angezeigt)",
       "configured": "{{host}} ({{type}})",
-      "noProxy": "No proxy configured",
-      "hasCredentials": "Credentials are stored but not shown. Enter a full URL to change them.",
-      "hint": "Changes apply on the next session start, not to a running connection. The proxy must be real and reachable — an unreachable value blocks QR delivery and start returns 504.",
-      "createHint": "Only needed when your network cannot reach WhatsApp directly. Must be a real, reachable proxy.",
-      "invalidUrl": "Enter a valid http, https, socks4, or socks5 proxy URL.",
-      "saveSuccessTitle": "Proxy Saved",
-      "saveSuccess": "Proxy settings saved. They apply on the next session start.",
-      "saveError": "Failed to save proxy settings"
+      "noProxy": "Kein Proxy konfiguriert",
+      "hasCredentials": "Zugangsdaten sind gespeichert, werden aber nicht angezeigt. Gib eine vollständige URL ein, um sie zu ändern.",
+      "hint": "Änderungen gelten ab dem nächsten Sitzungsstart, nicht für eine laufende Verbindung. Der Proxy muss echt und erreichbar sein: Ein nicht erreichbarer Wert blockiert die QR-Zustellung, und der Start gibt 504 zurück.",
+      "createHint": "Nur nötig, wenn dein Netzwerk WhatsApp nicht direkt erreichen kann. Muss ein echter, erreichbarer Proxy sein.",
+      "invalidUrl": "Gib eine gültige http-, https-, socks4- oder socks5-Proxy-URL ein.",
+      "saveSuccessTitle": "Proxy gespeichert",
+      "saveSuccess": "Proxy-Einstellungen gespeichert. Sie gelten ab dem nächsten Sitzungsstart.",
+      "saveError": "Proxy-Einstellungen konnten nicht gespeichert werden"
     },
     "actions": {
       "view": "Ansehen",
@@ -342,7 +372,8 @@
       "actionRequiredTitle": "Handlung erforderlich",
       "actionRequiredDesc": "Diese Sitzung braucht deine Aufmerksamkeit. Öffne die Sitzung, um zu sehen, was zu tun ist.",
       "failedTitle": "Sitzung fehlgeschlagen",
-      "failedDesc": "Die WhatsApp-Sitzung konnte nicht gestartet werden. Öffne die Sitzung, um den Grund anzuzeigen."
+      "failedDesc": "Die WhatsApp-Sitzung konnte nicht gestartet werden. Öffne die Sitzung, um den Grund anzuzeigen.",
+      "stopFailedTitle": "Stoppen fehlgeschlagen"
     },
     "card": {
       "phone": "Telefon",
@@ -437,7 +468,7 @@
         "body": "Nachrichteninhalt",
         "type": "Nachrichtentyp",
         "isGroup": "Ist Gruppenchat",
-        "kind": "Chat kind",
+        "kind": "Chat-Typ",
         "fromMe": "Von mir gesendet",
         "hasMedia": "Enthält Medien",
         "mentions": "Erwähnungen"
@@ -461,7 +492,10 @@
     },
     "empty": {
       "title": "Keine Webhooks konfiguriert",
-      "description": "Füge einen Webhook hinzu, um Ereignisbenachrichtigungen in Echtzeit zu erhalten"
+      "description": "Füge einen Webhook hinzu, um Ereignisbenachrichtigungen in Echtzeit zu erhalten",
+      "loadErrorTitle": "Webhooks konnten nicht geladen werden",
+      "forbiddenTitle": "Kein Zugriff auf Webhooks",
+      "forbiddenDesc": "Webhooks erfordern einen API-Schlüssel mit der Rolle Operator oder Admin."
     },
     "toasts": {
       "created": "Webhook wurde erfolgreich erstellt",
@@ -482,9 +516,27 @@
     "eventDescriptions": {
       "message.received": "Wenn eine Nachricht empfangen wird",
       "message.sent": "Wenn eine Nachricht gesendet wird",
-      "session.connected": "Wenn eine Sitzung verbunden wird",
-      "session.disconnected": "Wenn eine Sitzung getrennt wird",
+      "message.ack": "Wenn sich der Zustell- oder Lesestatus einer Nachricht ändert",
+      "message.failed": "Wenn eine ausgehende Nachricht nicht zugestellt werden kann",
+      "message.revoked": "Wenn eine Nachricht für alle gelöscht wird",
+      "message.reaction": "Wenn eine Reaktion hinzugefügt, geändert oder entfernt wird",
+      "message.edited": "Wenn eine Nachricht bearbeitet wird",
+      "session.status": "Wenn sich der Status einer Sitzung ändert",
       "session.qr": "Wenn ein QR-Code erstellt wird",
+      "session.authenticated": "Wenn eine Sitzung gekoppelt und bereit ist",
+      "session.disconnected": "Wenn eine Sitzung getrennt wird",
+      "session.reconnect_loop": "Wenn eine Sitzung wiederholt nicht neu verbinden kann",
+      "session.restriction": "Wenn WhatsApp das Konto einschränkt oder eine Einschränkung aufhebt",
+      "presence.update": "Wenn ein abonnierter Chat online geht, tippt oder offline geht",
+      "group.join": "Wenn Teilnehmer einer Gruppe beitreten oder hinzugefügt werden",
+      "group.leave": "Wenn Teilnehmer eine Gruppe verlassen oder entfernt werden",
+      "group.update": "Wenn sich Name, Beschreibung oder Einstellungen einer Gruppe ändern",
+      "group.join_request": "Wenn jemand den Beitritt zu einer Gruppe anfragt, die diese Sitzung verwaltet",
+      "call.received": "Wenn ein eingehender Anruf zu klingeln beginnt",
+      "call.accepted": "Wenn ein Anruf angenommen wird",
+      "call.rejected": "Wenn ein Anruf abgelehnt wird",
+      "call.missed": "Wenn ein Anruf unbeantwortet bleibt",
+      "status.received": "Wenn ein Kontakt einen Status veröffentlicht",
       "all": "Alle Ereignisse"
     }
   },
@@ -571,7 +623,10 @@
     },
     "empty": {
       "title": "Keine API-Schlüssel erstellt",
-      "description": "Erstelle einen API-Schlüssel, um deine Anfragen zu authentifizieren"
+      "description": "Erstelle einen API-Schlüssel, um deine Anfragen zu authentifizieren",
+      "loadErrorTitle": "API-Schlüssel konnten nicht geladen werden",
+      "forbiddenTitle": "Kein Zugriff auf API-Schlüssel",
+      "forbiddenDesc": "Zum Verwalten von API-Schlüsseln ist ein Admin-Schlüssel erforderlich, der nicht auf bestimmte Sitzungen beschränkt ist."
     },
     "confirm": {
       "deleteTitle": "API-Schlüssel löschen",
@@ -624,7 +679,12 @@
       "filteredTitle": "Keine Treffer auf dieser Seite",
       "filteredDescription": "Die Suche filtert nur die aktuelle Seite. Leere sie, blättere weiter oder grenze serverseitig über den Severity-Filter ein.",
       "filteredServerDescription": "Keine Protokolle passen auf diese Filter. Passe den Severity-Filter an, um die Suche zu erweitern."
-    }
+    },
+    "exportFailed": "Audit-Protokoll konnte nicht exportiert werden",
+    "exportTruncated": "Der Export umfasst nur die neuesten {{rows}} Einträge. Grenze den Severity-Filter ein, um ältere Einträge zu exportieren.",
+    "exportThrottled": "Der Export umfasst nur die neuesten {{rows}} Einträge, weil das Gateway Abfragen des Audit-Logs drosselt. Warte eine Minute und exportiere erneut.",
+    "exportNoMatches": "Keine Einträge im Audit-Protokoll passen zur Suche, daher wurde nichts exportiert.",
+    "exportNoMatchesTruncated": "Keiner der neuesten {{rows}} durchsuchten Einträge passt zur Suche, daher wurde nichts exportiert. Ältere Einträge wurden nicht durchsucht."
   },
   "messageTester": {
     "title": "Nachrichtentester",
@@ -642,6 +702,12 @@
     "loadingGroups": "Gruppen werden geladen...",
     "noGroupsFound": "Keine Gruppen gefunden",
     "selectGroupHint": "Wähle eine Gruppe aus deinem WhatsApp-Konto aus",
+    "selectAllGroups": "Alle auswählen",
+    "selectMatchingGroups": "Treffer auswählen",
+    "clearGroupSelection": "Auswahl aufheben",
+    "groupsSelectedCount": "Ausgewählt: {{count}}/{{max}}",
+    "noGroupsMatch": "Keine Gruppen passen zu deiner Suche",
+    "forwardUsesFirstGroup": "Weiterleiten verwendet nur die erste ausgewählte Gruppe, als Chat, aus dem weitergeleitet wird.",
     "phoneHint": "Verwende das internationale Format ohne Leerzeichen",
     "messageType": "Nachrichtentyp",
     "types": {
@@ -699,17 +765,29 @@
     "bulkRecipientsCount": "Empfänger: {{count}}",
     "bulkDelay": "Verzögerung zwischen Nachrichten (ms)",
     "bulkDelayHint": "1000–60000 ms (Standard: 3000)",
+    "bulkMediaKind": "Senden als",
+    "bulkMediaHint": "Mit Anhang wird die Nachricht zu dessen Bildunterschrift. Eine ausgewählte Datei wird direkt in der Anfrage mitgesendet, daher brauchen große Dateien für viele Empfänger stattdessen eine öffentliche Medien-URL.",
+    "bulkMediaTooLarge": "Diese Datei ist zu groß, um sie direkt an {{count}} Empfänger zu senden: Bei dieser Anzahl darf eine Datei höchstens {{size}} groß sein. Verwende stattdessen eine öffentliche Medien-URL oder sende an weniger Empfänger.",
+    "bulkMediaUrlInvalid": "Gib eine vollständige http://- oder https://-Adresse ein, z. B. https://example.com/file.pdf.",
+    "bulkCaptionTooLong": "Mit Anhang wird die Nachricht als dessen Bildunterschrift gesendet, die auf {{max}} Zeichen begrenzt ist (aktuell {{count}}).",
+    "bulkAudioNoCaption": "Audio wird ohne Bildunterschrift gesendet, dieser Text würde also nicht verschickt. Leere die Nachricht oder wähle eine andere Art.",
     "send": "Nachricht senden",
     "sending": "Wird gesendet...",
+    "sendingProgress": "Wird gesendet {{current}}/{{total}}...",
     "viewOnly": "Nur ansehen",
     "responseEmpty": "Sende eine Nachricht, um die API-Antwort anzuzeigen",
     "successLabel": "Erfolgreich",
     "failedLabel": "Fehlgeschlagen",
+    "groupsSentSummary": "{{sent}}/{{total}} gesendet",
+    "groupSendCancelled": "{{count}}, abgebrochen",
+    "groupSendStopped": "{{count}}, gestoppt nach HTTP {{status}}",
     "response": {
       "timestamp": "Zeitstempel",
       "messageId": "Nachrichten-ID",
       "batchId": "Batch-ID",
-      "error": "Fehler"
+      "error": "Fehler",
+      "groups": "Gruppen",
+      "notSent": "Nicht gesendet"
     },
     "sendFailed": "Nachricht konnte nicht gesendet werden",
     "notOnWhatsApp": "Diese Nummer ist nicht bei WhatsApp registriert",
@@ -822,8 +900,8 @@
       "export": "Daten exportieren",
       "import": "Daten importieren",
       "exportFailed": "Daten konnten nicht exportiert werden",
-      "exportPartialTitle": "Backup is missing some media",
-      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
+      "exportPartialTitle": "In der Sicherung fehlen einige Medien",
+      "exportPartial": "Anhänge über dem Medienbudget des Exports: {{count}}. Sie wurden als Platzhalter gespeichert. Die Nachrichten werden wiederhergestellt, ihre Medien nicht.",
       "importFailed": "Daten konnten nicht importiert werden",
       "importOk": "Daten wurden importiert",
       "importConfirm": "Beim Import werden alle aktuellen Daten durch die Sicherung ERSETZT ({{rows}} Zeilen). Dies kann nicht rückgängig gemacht werden. Fortfahren?",
@@ -844,12 +922,14 @@
       "dontClose": "Bitte schließe dieses Fenster nicht",
       "successMsg": "Der Server ist wieder online! Die Seite wird automatisch neu geladen.",
       "errorMsg": "Der Server hat nach 30 Sekunden nicht geantwortet. Prüfe die Docker-Protokolle und starte ihn manuell neu.",
+      "outcomeUnknown": "Der Proxy hat das Warten aufgegeben, bevor der Server geantwortet hat. Der Neustart läuft möglicherweise noch; lade die Seite in einer Minute neu, um es zu prüfen.",
       "reload": "Seite neu laden"
     },
     "toasts": {
       "saveFailed": "Speichern fehlgeschlagen"
     },
-    "statusLoadError": "Der aktuelle Infrastrukturstatus konnte nicht geladen werden. Aktualisiere die Seite und versuche es erneut."
+    "statusLoadError": "Der aktuelle Infrastrukturstatus konnte nicht geladen werden. Aktualisiere die Seite und versuche es erneut.",
+    "configLoadError": "Die gespeicherte Konfiguration konnte nicht geladen werden und lässt sich hier daher nicht bearbeiten. Aktualisiere die Seite und versuche es erneut."
   },
   "plugins": {
     "title": "Plugins",
@@ -857,6 +937,19 @@
     "refresh": "Aktualisieren",
     "builtIn": "Integriert",
     "noDescription": "Keine Beschreibung verfügbar",
+    "statuses": {
+      "installed": "Installiert",
+      "enabled": "Aktiviert",
+      "disabled": "Deaktiviert",
+      "error": "Fehler"
+    },
+    "types": {
+      "engine": "Engine",
+      "storage": "Speicher",
+      "queue": "Warteschlange",
+      "auth": "Auth",
+      "extension": "Erweiterung"
+    },
     "enable": "Aktivieren",
     "disable": "Deaktivieren",
     "healthCheck": "Funktionsprüfung",
@@ -931,7 +1024,6 @@
       "title": "Instanzen",
       "description": "Erstelle kontobezogene Instanzen für diese Integration. Jede Instanz besitzt ein eigenes Signaturgeheimnis und eine eigene Ingress-URL.",
       "create": "Instanz erstellen",
-      "save": "Save",
       "empty": "Noch keine Instanzen vorhanden. Erstelle eine, um eine Ingress-URL und ein Geheimnis zu erhalten.",
       "loadError": "Instanzen konnten nicht geladen werden.",
       "allSessions": "Alle Sitzungen",
@@ -955,7 +1047,8 @@
         "title": "Instanz erstellt",
         "hint": "Kopiere das Geheimnis jetzt — es wird nur einmal angezeigt.",
         "secret": "Signaturgeheimnis",
-        "ingressUrls": "Ingress-URL(s)"
+        "ingressUrls": "Ingress-URL(s)",
+        "verifyToken": "Verifizierungstoken"
       },
       "regenerate": {
         "title": "Geheimnis neu erstellen",

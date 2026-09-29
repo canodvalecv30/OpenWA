@@ -54,3 +54,38 @@ describe('release gate parity (the tag path runs every branch gate)', () => {
     expect(gateCommands('release.yml', 'test-postgres').join(' ')).toContain('message-list-ordering.pg.spec.ts');
   });
 });
+
+/**
+ * A tag is a prerelease or it is not, and every release channel has to agree. The image channels
+ * (X.Y, latest) and the promote job treat any tag with a '-' suffix as a prerelease; when the
+ * GitHub Release matched only -rc/-beta/-alpha, a tag such as v1.2.0-next.1 stayed off `latest` on
+ * the registries yet became GitHub's "Latest" release, which is what the in-app update check reads.
+ */
+describe('one prerelease rule across the GitHub Release and the image channels', () => {
+  type ReleaseStep = { uses?: string; run?: string; with?: { prerelease?: string; tags?: string } };
+  const PREDICATE = "contains(github.ref_name, '-')";
+  const steps = (): ReleaseStep[] => {
+    const workflow = yaml.load(fs.readFileSync(path.join(workflowDir, 'release.yml'), 'utf8')) as {
+      jobs?: Record<string, { steps?: ReleaseStep[] }>;
+    };
+    return Object.values(workflow.jobs ?? {}).flatMap(job => job.steps ?? []);
+  };
+
+  it('flags the GitHub Release prerelease by the predicate that keeps a tag off X.Y and latest', () => {
+    const ghRelease = steps().filter(step => (step.uses ?? '').startsWith('softprops/action-gh-release'));
+    expect(ghRelease).toHaveLength(1);
+    expect((ghRelease[0].with?.prerelease ?? '').trim()).toBe(`\${{ ${PREDICATE} }}`);
+
+    const tagRules = steps()
+      .filter(step => (step.uses ?? '').startsWith('docker/metadata-action'))
+      .map(step => step.with?.tags ?? '')
+      .join('\n');
+    const enables = [...tagRules.matchAll(/enable=\$\{\{\s*(.*?)\s*\}\}/g)].map(match => match[1]);
+    // Non-vacuity: the X.Y and latest channels are both gated.
+    expect(enables.length).toBeGreaterThanOrEqual(2);
+    expect(enables.filter(expr => expr !== `!${PREDICATE}`)).toEqual([]);
+
+    // The promote job's own skip for minor tags uses the same '-' test in bash.
+    expect(steps().some(step => /\[\[ "\$REF_NAME" == \*-\* \]\]/.test(step.run ?? ''))).toBe(true);
+  });
+});

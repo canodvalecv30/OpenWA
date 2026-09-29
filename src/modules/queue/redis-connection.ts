@@ -37,9 +37,14 @@ const DEFAULT_WEBHOOK_WORKER_CONCURRENCY = 10;
 /**
  * Webhook Worker concurrency. BullMQ defaults a Worker to 1, which serializes ALL webhook deliveries
  * process-wide: one slow or timing-out receiver head-of-line-blocks every other session's webhooks
- * until it finishes (up to WEBHOOK_TIMEOUT + retries). Running several in parallel decouples healthy
- * receivers from a stuck one. Override via WEBHOOK_WORKER_CONCURRENCY; a non-positive/garbage value
- * falls back to the default. (Read at module import like workerConnectionOptions above.)
+ * until it finishes (up to WEBHOOK_TIMEOUT + retries). Running several in parallel lets healthy
+ * receivers proceed while a few slots wait on a stuck one, but the pool is shared and not isolated
+ * per webhook: each attempt against a dead receiver holds a slot for up to WEBHOOK_TIMEOUT, and its
+ * retries re-enter the same pool. Once that receiver's events per second x attempts x
+ * WEBHOOK_TIMEOUT (in seconds) reach the concurrency, every slot is busy with it and all other
+ * webhooks wait. Size the value above that product. Override via WEBHOOK_WORKER_CONCURRENCY; a
+ * non-positive/garbage value falls back to the default. (Read at module import like
+ * workerConnectionOptions above.)
  */
 export function webhookWorkerConcurrency(): number {
   const parsed = parseInt(process.env.WEBHOOK_WORKER_CONCURRENCY || '', 10);
@@ -52,8 +57,10 @@ const DEFAULT_INGRESS_WORKER_CONCURRENCY = 10;
 /**
  * Ingress Worker concurrency. Ordering within a conversation is now guaranteed by the
  * per-conversation KeyedAsyncLock in the processor, not by a single-worker queue, so raising
- * concurrency here parallelizes unrelated conversations instead of head-of-line-blocking every
- * inbound event behind the slowest one. Override via INGRESS_WORKER_CONCURRENCY; a
+ * concurrency here parallelizes unrelated conversations. A job waiting on a busy key still holds a
+ * slot, though: a burst on one key larger than this value blocks every other key until it drains.
+ * Size it above the largest expected per-key burst; the key is the whole instance unless the route
+ * declares a conversationId pointer. Override via INGRESS_WORKER_CONCURRENCY; a
  * non-positive/garbage value falls back to the default.
  */
 export function ingressWorkerConcurrency(): number {

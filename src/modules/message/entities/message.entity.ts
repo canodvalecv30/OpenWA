@@ -52,14 +52,15 @@ export class Message {
   @Column()
   chatId!: string;
 
-  /** Human-readable name for the chat (contact pushName, group name, etc). Populated on save when available — null for legacy rows. */
+  /** The sender's contact name (pushName) as the engine reported it: in a group that is the member, not
+   *  the group. Null on legacy rows and on rows that carried no contact. */
   @Column({ nullable: true })
   chatName?: string;
 
   /**
-   * Stable sender identity for a group message: the participant JID who actually posted (`from` is
-   * the group JID). Lets the chat view tell two same-named participants apart. Null on 1:1
-   * messages, outgoing echoes, and legacy rows.
+   * Stable sender identity for a group, status or broadcast-list message: the JID who actually
+   * posted (`from` is the group or `@broadcast` id). Lets the chat view tell two same-named
+   * participants apart. Null on 1:1 messages, outgoing echoes, and legacy rows.
    */
   @Column({ nullable: true })
   author?: string;

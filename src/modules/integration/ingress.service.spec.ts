@@ -495,6 +495,76 @@ describe('IngressService.handle', () => {
   });
 });
 
+describe('dedupOn: body (a provider that rotates its delivery id on retry)', () => {
+  // supabase/auth mints a fresh webhook-id for every attempt inside its own retry loop, so a lost
+  // ack means the same signed body arrives under a new id and is treated as a new delivery: the
+  // contact receives a second OTP. A route can declare that the body, not the header, is the
+  // retry key; the header keeps deciding for every route that does not.
+  // The request fixture above is scoped to the service describe, so this block carries its own.
+  const req = {
+    pluginId: 'chatwoot',
+    instanceId: 'acct1',
+    route: 'chatwoot',
+    method: 'POST',
+    headers: { 'x-delivery': 'd1' },
+    query: {},
+    rawBody: '{}',
+  };
+  const bodyKeyedRoute = () => ({
+    route: 'send-sms',
+    mode: 'async',
+    verify: 'core',
+    maxBodyBytes: 1024,
+    // scheme none, as the fixture above: this block is about the retry key, not the signature.
+    signature: { scheme: 'none' },
+    dedupHeader: 'webhook-id',
+    dedupOn: 'body',
+  });
+
+  it('keys the delivery on the body even when the dedup header is present', async () => {
+    const first = deps({ manifestRoute: jest.fn().mockReturnValue(bodyKeyedRoute()) });
+    await new IngressService(first).handle({ ...req, headers: { 'webhook-id': 'attempt-1' } });
+    const firstId = (first.enqueue.mock.calls[0] as [unknown, string])[1];
+
+    const retry = deps({ manifestRoute: jest.fn().mockReturnValue(bodyKeyedRoute()) });
+    await new IngressService(retry).handle({ ...req, headers: { 'webhook-id': 'attempt-2' } });
+    expect((retry.enqueue.mock.calls[0] as [unknown, string])[1]).toBe(firstId);
+
+    const other = deps({ manifestRoute: jest.fn().mockReturnValue(bodyKeyedRoute()) });
+    await new IngressService(other).handle({ ...req, headers: { 'webhook-id': 'attempt-3' }, rawBody: '{"a":1}' });
+    expect((other.enqueue.mock.calls[0] as [unknown, string])[1]).not.toBe(firstId);
+  });
+
+  it('leaves a route without the flag on the header', async () => {
+    const d = deps();
+    await new IngressService(d).handle({ ...req, headers: { 'x-delivery': 'd-1' } });
+    expect((d.enqueue.mock.calls[0] as [unknown, string])[1]).toBe('d-1');
+  });
+
+  // A header that is present but blank is no id at all. Taking it as one gave every delivery the
+  // same empty key, so the dedup row admitted the first and dropped the rest while still answering
+  // each provider with the route's success ack.
+  it('falls back to the body hash when the dedup header is present but blank', async () => {
+    const first = deps();
+    await new IngressService(first).handle({ ...req, headers: { 'x-delivery': '' }, rawBody: '{"n":1}' });
+    const firstId = (first.enqueue.mock.calls[0] as [unknown, string])[1];
+    expect(firstId).not.toBe('');
+
+    const second = deps();
+    await new IngressService(second).handle({ ...req, headers: { 'x-delivery': '' }, rawBody: '{"n":2}' });
+    // The ids differ, which is the whole point: a blank header must not collapse two bodies onto one
+    // dedup row. (A fresh `deps()` always enqueues, so asserting the call count would prove nothing.)
+    expect((second.enqueue.mock.calls[0] as [unknown, string])[1]).not.toBe(firstId);
+
+    // And the fallback is the BODY hash, not a fresh value per delivery: the same bytes must key the
+    // same row, or a provider's retry of a blank-header delivery is processed a second time. An id
+    // minted per call would satisfy the inequality above while breaking what dedup exists for.
+    const repeat = deps();
+    await new IngressService(repeat).handle({ ...req, headers: { 'x-delivery': '' }, rawBody: '{"n":1}' });
+    expect((repeat.enqueue.mock.calls[0] as [unknown, string])[1]).toBe(firstId);
+  });
+});
+
 describe('extractConversationId', () => {
   it('returns undefined when no spec is declared', () => {
     expect(extractConversationId(undefined, {}, '{}')).toBeUndefined();

@@ -11,7 +11,8 @@ const logger = createLogger('SendingGate');
  * Lives here rather than on a service so callers in different modules share one implementation.
  * A second copy of a moderation chokepoint is a chokepoint that will eventually disagree with itself.
  *
- * Current callers: `MessageService` (all senders + edit) and `StatusService` (the three posts).
+ * Current callers: `MessageService` (all senders + edit), `StatusService` (the three posts) and
+ * `CatalogService` (`sendProduct`, which ignores a rewritten `chatId` as bulk does).
  * `BulkMessageService` still runs its own inlined copy — it has to flag a plugin block separately
  * from a delivery failure so the per-item `message:failed` hook is skipped, which this signature
  * cannot express. If you change the gate's semantics here, change it there too
@@ -28,6 +29,11 @@ const logger = createLogger('SendingGate');
  * `source` names the caller in the hook context so a plugin can tell a chat send from a status
  * post without inspecting the payload shape — which matters because the shapes differ: a
  * MessageService `input` is a send DTO carrying `chatId`, a StatusService `input` is not.
+ *
+ * A bulk item's `message:sending` and `message:failed` input carries that item's recipient `chatId`
+ * as well, so a plugin reads the recipient of a bulk item the same way as a single send's. The
+ * difference is on the way back: a single send goes to whatever `chatId` the gate returns, while a
+ * `chatId` rewritten by the gate is ignored for a bulk item, which is always sent to its own recipient.
  */
 export async function applySendingGate<T extends object>(
   hookManager: HookManager,

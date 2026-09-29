@@ -184,10 +184,12 @@ COPY package*.json ./
 # scripts/postinstall.js rides along so a bare local `npm ci` keeps working, but the
 # --ignore-scripts install below skips the hook here: the explicit fatal run right
 # after is the sole (and stricter) applier for the image.
-COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js ./scripts/
+COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-wwebjs-media-id.js scripts/patch-wwebjs-send-error.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js ./scripts/
 
 # Install production dependencies only, then apply the backports. The status patcher runs after
 # the two patchers it depends on: its transforms were written against the tree they leave behind.
+# The send-error patcher runs after the other two that edit Client.js, so theirs still meet the
+# tree they were written against.
 # scripts/dockerfile-patchers.spec.js derives this list from scripts/patch-*.js and fails if a
 # patcher is added without being copied AND run here — a hand-written list loses one silently, and
 # the Baileys one shipped in postinstall for a whole release without ever reaching the image.
@@ -208,6 +210,8 @@ RUN npm ci --omit=dev --ignore-scripts \
     && node scripts/patch-wwebjs-participant-arity.js \
     && node scripts/patch-wwebjs-block.js \
     && node scripts/patch-wwebjs-group-description.js \
+    && node scripts/patch-wwebjs-media-id.js \
+    && node scripts/patch-wwebjs-send-error.js \
     && node scripts/patch-baileys-appstate.js \
     && node scripts/patch-baileys-newsletter-create.js \
     && npm cache clean --force
@@ -298,9 +302,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # then drops to the openwa user via gosu before starting the node process.
 #
 # NOTE — no `USER openwa` directive on purpose (Trivy DS-0002 will flag it, ignore).
-# The Node process does NOT run as root: docker-entrypoint.sh:30 is
-# `exec gosu openwa "$@"` after the chowns on lines 7 and 25. Adding `USER openwa`
-# here would run the entrypoint as openwa and break the chown-before-drop pattern
-# that makes named-volume mounts work on first boot (#254, #259).
+# The Node process does NOT run as root: docker-entrypoint.sh ends with
+# `exec gosu openwa "$@"`, after it chowns /app/data and the Chromium XDG
+# dirs. Adding `USER openwa` here would run the entrypoint as openwa and break
+# the chown-before-drop pattern that makes named-volume mounts work on first
+# boot (#254, #259).
 ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/main"]

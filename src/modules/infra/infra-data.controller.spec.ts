@@ -45,6 +45,9 @@ import { IntegrationDeliveryFailure } from '../integration/entities/integration-
 import { StatusUpdate } from '../status-store/entities/status-update.entity';
 import { AutomationRule } from '../automation/entities/automation-rule.entity';
 import { AuditAction } from '../audit/entities/audit-log.entity';
+import { ScopeBindingService } from '../integration/scope-binding.service';
+import { PluginInstanceService } from '../integration/plugin-instance.service';
+import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
 import { BadRequestException } from '@nestjs/common';
 
 describe('InfraDataController.importData round-trips export-data (no silent message/batch loss)', () => {
@@ -456,6 +459,53 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     // The rollback must have restored the pre-import row, ownership and all.
     const stored = await ds.getRepository(Session).findOneByOrFail({ id: 's1' });
     expect(stored.nodeId).toBe('node-a');
+  });
+
+  it('answers imported:false with the real row error when PostgreSQL aborts the transaction', async () => {
+    await seedSession('s1');
+    await seedSession('s2');
+    const dump = await controller.exportData();
+
+    // PostgreSQL semantics on the SQLite harness: the first sessions INSERT fails, and from then on
+    // every statement except ROLLBACK fails with 25P02, as it would on an aborted PG transaction.
+    // The type flip is what the service keys its PostgreSQL handling on.
+    const realOptions = ds.options;
+    Object.defineProperty(ds, 'options', { value: { ...realOptions, type: 'postgres' }, configurable: true });
+    // better-sqlite3 hands out one runner per DataSource, so the patch is undone on that instance.
+    const runner = ds.createQueryRunner();
+    const realQuery = runner.query.bind(runner);
+    jest.spyOn(ds, 'createQueryRunner').mockImplementation(() => {
+      let aborted = false;
+      runner.query = ((...callArgs: Parameters<typeof realQuery>) => {
+        const sql = callArgs[0];
+        if (aborted && sql !== 'ROLLBACK') {
+          return Promise.reject(
+            new Error('current transaction is aborted, commands ignored until end of transaction block'),
+          );
+        }
+        if (/INSERT INTO sessions/.test(sql)) {
+          aborted = true;
+          return Promise.reject(new Error('duplicate key value violates unique constraint "PK_sessions"'));
+        }
+        return realQuery(...callArgs);
+      }) as typeof runner.query;
+      return runner;
+    });
+
+    let res: Awaited<ReturnType<typeof controller.importData>>;
+    try {
+      res = await controller.importData({ tables: dump.tables });
+    } finally {
+      jest.restoreAllMocks();
+      runner.query = realQuery;
+      Object.defineProperty(ds, 'options', { value: realOptions, configurable: true });
+    }
+
+    expect(res.imported).toBe(false);
+    expect(res.warnings).toEqual([
+      'Failed to import session s1: duplicate key value violates unique constraint "PK_sessions"',
+    ]);
+    expect((await ds.getRepository(Session).find()).map(s => s.id).sort()).toEqual(['s1', 's2']);
   });
 
   it('leaves a session that had no claim unclaimed rather than inventing one', async () => {
@@ -1693,12 +1743,20 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
   let ds: DataSource;
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
 
-  // Positional service constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?).
-  // The @Optional args trail the required ones; auditService is unused in these tests, so its slot
-  // stays undefined.
-  const build = (opts: { sessionService?: unknown; lidMappingStore?: unknown } = {}) =>
+  // Positional service constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?,
+  // ownership?, chatStateStore?). The @Optional args trail the required ones; auditService and
+  // ownership are unused in these tests, so their slots stay undefined.
+  const build = (opts: { sessionService?: unknown; lidMappingStore?: unknown; chatStateStore?: unknown } = {}) =>
     new InfraDataController(
-      new InfraDataService(cfg as never, ds, undefined, opts.sessionService as never, opts.lidMappingStore as never),
+      new InfraDataService(
+        cfg as never,
+        ds,
+        undefined,
+        opts.sessionService as never,
+        opts.lidMappingStore as never,
+        undefined,
+        opts.chatStateStore as never,
+      ),
     );
 
   beforeEach(async () => {
@@ -1787,6 +1845,51 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
 
     expect(res.imported).toBe(true);
     await expect(repo.findOneByOrFail({ id: 'held' })).resolves.toMatchObject({ status: SessionStatus.READY });
+  });
+
+  // Archives taken before 0.23.5 key chat_states by session name; the re-key migration has already
+  // run on the target, so the import has to apply it to the restored rows itself.
+  const chatStateRow = (sessionId: string, updatedAt: unknown) => ({
+    sessionId,
+    chatId: 'c@s.whatsapp.net',
+    muteEndTime: null,
+    archived: false,
+    pinned: true,
+    updatedAt,
+  });
+  const storedChatStates = () =>
+    ds.query<Array<{ sessionId: string; chatId: string }>>(
+      'SELECT "sessionId", "chatId" FROM chat_states ORDER BY "sessionId"',
+    );
+
+  it('re-keys a chat state row restored from a name-keyed archive onto its session id', async () => {
+    const id = '8f5b1d9e-0c4a-4e21-9d6b-2a7c3f0e1b44';
+    await seedSession(id);
+    const dump = await build().exportData();
+    const session = dump.tables.sessions[0];
+
+    const res = await build().importData({
+      tables: { ...dump.tables, chatStates: [chatStateRow(session.name, session.updatedAt)] as never },
+    });
+
+    expect(res.imported).toBe(true);
+    expect(await storedChatStates()).toEqual([{ sessionId: id, chatId: 'c@s.whatsapp.net' }]);
+  });
+
+  it('leaves a chat state row already keyed by a session id alone, even when another session is named that id', async () => {
+    // Session 'a' is named 'session-a', which is also the id of the second session. The row belongs
+    // to the second session and must not be moved onto 'a'.
+    await seedSession('a');
+    await seedSession('session-a');
+    const dump = await build().exportData();
+    const updatedAt = dump.tables.sessions[0].updatedAt;
+
+    const res = await build().importData({
+      tables: { ...dump.tables, chatStates: [chatStateRow('session-a', updatedAt)] as never },
+    });
+
+    expect(res.imported).toBe(true);
+    expect(await storedChatStates()).toEqual([{ sessionId: 'session-a', chatId: 'c@s.whatsapp.net' }]);
   });
 
   it('exports and restores automation_rules, which the session wipe would otherwise cascade away', async () => {
@@ -1908,22 +2011,26 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
     expect((await ds.getRepository(Message).findOneByOrFail({ id: 'm1' })).body).toBe('hello');
   });
 
-  it('reloads the in-memory lid mappings after a committed restore', async () => {
+  it('reloads the in-memory lid mappings and chat states after a committed restore', async () => {
     await seedSession('s1');
     const lidMappingStore = { reload: jest.fn().mockResolvedValue(undefined) };
-    const controller = build({ lidMappingStore });
+    const chatStateStore = { reload: jest.fn().mockResolvedValue(undefined) };
+    const controller = build({ lidMappingStore, chatStateStore });
     const dump = await controller.exportData();
     const res = await controller.importData({ tables: dump.tables });
     expect(res.imported).toBe(true);
     expect(lidMappingStore.reload).toHaveBeenCalledTimes(1);
+    expect(chatStateStore.reload).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT reload lid mappings when the import is refused (nothing committed)', async () => {
+  it('does NOT reload lid mappings or chat states when the import is refused (nothing committed)', async () => {
     await seedSession('s1');
     const lidMappingStore = { reload: jest.fn().mockResolvedValue(undefined) };
-    const res = await build({ lidMappingStore }).importData({ tables: {} });
+    const chatStateStore = { reload: jest.fn().mockResolvedValue(undefined) };
+    const res = await build({ lidMappingStore, chatStateStore }).importData({ tables: {} });
     expect(res.imported).toBe(false);
     expect(lidMappingStore.reload).not.toHaveBeenCalled();
+    expect(chatStateStore.reload).not.toHaveBeenCalled();
   });
 
   it('409s when a live engine would be orphaned by the replace — unless force=true', async () => {
@@ -2282,5 +2389,142 @@ describe('InfraDataController.importData rejects a malformed table value', () =>
     ['carries an empty table', { sessions: [], messages: [] }],
   ])('does not reject an archive that %s', async (_label, tables) => {
     await expect(controller().importData({ tables } as never)).rejects.not.toThrow(/must be an array/);
+  });
+});
+
+// Plugin runtime bindings (activeSessions, per-session config) are projected from plugin_instances
+// rows and kept in the plugin registry, and the boot pass only adds. A restore that drops an instance
+// must retire its binding, or the plugin keeps firing on that session with the dropped config.
+describe('InfraDataController.importData re-syncs plugin instance bindings', () => {
+  let ds: DataSource;
+  const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
+
+  beforeEach(async () => {
+    ds = new DataSource({
+      type: 'better-sqlite3',
+      database: ':memory:',
+      entities: [
+        Session,
+        Webhook,
+        Message,
+        MessageBatch,
+        Template,
+        BaileysStoredMessage,
+        LidMapping,
+        ChatState,
+        PluginInstance,
+        ConversationMapping,
+        IngressEvent,
+        WebhookDeliveryFailure,
+        WebhookOutboxEvent,
+        IntegrationDeliveryFailure,
+        StatusUpdate,
+        AutomationRule,
+      ],
+      synchronize: true,
+    });
+    await ds.initialize();
+  });
+
+  afterEach(async () => {
+    await ds.destroy();
+  });
+
+  const seed = async () => {
+    const sessions = ds.getRepository(Session);
+    for (const id of ['sess-1', 'sess-2']) {
+      await sessions.save(
+        sessions.create({ id, name: `session-${id}`, status: SessionStatus.DISCONNECTED, config: {} }),
+      );
+    }
+    const instances = ds.getRepository(PluginInstance);
+    for (const [instanceId, sessionScope, token] of [
+      ['kept', 'sess-2', 'token-kept'],
+      ['dropped', 'sess-1', 'token-dropped'],
+    ]) {
+      await instances.save(
+        instances.create({
+          id: `chatwoot:${instanceId}`,
+          pluginId: 'chatwoot',
+          instanceId,
+          sessionScope,
+          secret: 's',
+          verifyToken: 'v',
+          config: { token },
+          enabled: true,
+        }),
+      );
+    }
+  };
+
+  /** A loader whose runtime state the resync really mutates, as the plugin registry would hold it. */
+  const statefulLoader = () => {
+    const plugin = {
+      manifest: { id: 'chatwoot' },
+      activeSessions: ['sess-1', 'sess-2'],
+      sessionConfig: { 'sess-1': { token: 'token-dropped' }, 'sess-2': { token: 'token-kept' } } as Record<
+        string,
+        unknown
+      >,
+    };
+    const loader = {
+      getPlugin: (id: string) => (id === 'chatwoot' ? plugin : undefined),
+      setPluginSessionConfig: (_id: string, scope: string, config: unknown) => {
+        plugin.sessionConfig = { ...plugin.sessionConfig, [scope]: config };
+      },
+      setPluginSessions: (_id: string, sessions: string[]) => {
+        plugin.activeSessions = sessions;
+      },
+      updatePluginConfig: jest.fn(),
+    };
+    return { plugin, loader };
+  };
+
+  const serviceWith = (moduleRef: unknown) =>
+    new InfraDataService(cfg as never, ds, undefined, undefined, undefined, undefined, undefined, moduleRef as never);
+
+  it('retires the binding of an instance the backup does not contain', async () => {
+    await seed();
+    const dump = await new InfraDataController(serviceWith(undefined)).exportData();
+    const tables = {
+      ...dump.tables,
+      pluginInstances: dump.tables.pluginInstances?.filter(row => row.instanceId !== 'dropped'),
+    };
+    const { plugin, loader } = statefulLoader();
+    const scopeBinding = new ScopeBindingService(
+      new PluginInstanceService(ds.getRepository(PluginInstance)),
+      loader as unknown as PluginLoaderService,
+      { logInfo: jest.fn(), logWarn: jest.fn() } as never,
+      ds.getRepository(Session),
+    );
+    const moduleRef = { get: jest.fn(() => scopeBinding) };
+
+    const res = await new InfraDataController(serviceWith(moduleRef)).importData({ tables });
+
+    expect(res.imported).toBe(true);
+    expect(res.restartRequired).toBe(false);
+    expect(moduleRef.get).toHaveBeenCalledWith(ScopeBindingService, { strict: false });
+    expect(plugin.activeSessions).toEqual(['sess-2']);
+    expect(plugin.sessionConfig).toEqual({ 'sess-1': {}, 'sess-2': { token: 'token-kept' } });
+  });
+
+  it('commits the import and reports a failed resync as a notice with restartRequired', async () => {
+    await seed();
+    const dump = await new InfraDataController(serviceWith(undefined)).exportData();
+    const resyncAfterImport = jest.fn().mockRejectedValue(new Error('registry write failed'));
+    const moduleRef = { get: () => ({ resyncAfterImport }) };
+
+    const res = await new InfraDataController(serviceWith(moduleRef)).importData({ tables: dump.tables });
+
+    expect(res.imported).toBe(true);
+    expect(res.restartRequired).toBe(true);
+    expect(res.notices.some(n => n.includes('registry write failed'))).toBe(true);
+    // The snapshot handed over is the pre-import state, read before the table was cleared.
+    expect(resyncAfterImport).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ pluginId: 'chatwoot', sessionScope: 'sess-1', enabled: true }),
+        expect.objectContaining({ pluginId: 'chatwoot', sessionScope: 'sess-2', enabled: true }),
+      ]),
+    );
   });
 });

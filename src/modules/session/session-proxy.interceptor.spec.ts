@@ -218,6 +218,21 @@ describe('SessionProxyInterceptor', () => {
       expect(JSON.parse(String(sentBody))).toEqual({ servedBy: 'the-owner' });
     });
 
+    it('labels a re-serialised form body as JSON, so the owner parses what was sent', async () => {
+      const req = request({
+        method: 'POST',
+        originalUrl: `/api/sessions/${SID}/messages/send-text`,
+        headers: { 'x-api-key': 'k-123', 'content-type': 'application/x-www-form-urlencoded' },
+        body: { chatId: '628@c.us', text: 'hi & bye' },
+      });
+      const { interceptor, context, next } = build({ req, row: row({ nodeUrl: serverUrl }) });
+
+      await interceptor.intercept(context, next);
+
+      expect(seen[0].headers['content-type']).toBe('application/json');
+      expect(JSON.parse(seen[0].body)).toEqual({ chatId: '628@c.us', text: 'hi & bye' });
+    });
+
     it('a GET carries no body', async () => {
       const { interceptor, context, next } = build({ req: request(), row: row({ nodeUrl: serverUrl }) });
 
@@ -438,5 +453,18 @@ describe('forwardTarget', () => {
 
   it('carries the owner base path when one is configured', () => {
     expect(forwardTarget('/api/sessions/s1', 'http://10.0.0.5:2785/')).toBe('http://10.0.0.5:2785/api/sessions/s1');
+    // An owner behind a path-prefixed reverse proxy: the prefix is where its API lives.
+    expect(forwardTarget('/api/sessions/s1?x=1', 'https://node-a.example.com/openwa/')).toBe(
+      'https://node-a.example.com/openwa/api/sessions/s1?x=1',
+    );
+    expect(forwardTarget('/api/sessions/s1', 'https://node-a.example.com/openwa')).toBe(
+      'https://node-a.example.com/openwa/api/sessions/s1',
+    );
+  });
+
+  it('keeps the owner origin and prefix for a network-path target under a prefixed base', () => {
+    const target = new URL(forwardTarget('http://attacker.tld//evil.host/x', 'https://node-a.example.com/openwa'));
+    expect(target.origin).toBe('https://node-a.example.com');
+    expect(target.pathname.startsWith('/openwa/')).toBe(true);
   });
 });

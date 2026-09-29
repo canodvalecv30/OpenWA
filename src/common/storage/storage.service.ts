@@ -435,7 +435,7 @@ export class StorageService implements OnModuleDestroy {
   }
 
   // Best-effort, NOT atomic: see the implementation in storage-transfer.ts for the full contract.
-  importFromStream(inputStream: Readable): Promise<number> {
+  importFromStream(inputStream: Readable): Promise<{ imported: number; failed: number }> {
     return importFromStream(inputStream, (filePath, data) => this.putFile(filePath, data), this.logger);
   }
 

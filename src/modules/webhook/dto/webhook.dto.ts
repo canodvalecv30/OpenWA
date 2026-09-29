@@ -49,9 +49,9 @@ class WebhookFilterConditionDto {
 class WebhookFiltersDto {
   @ApiProperty({
     type: [WebhookFilterConditionDto],
-    minItems: 1,
     maxItems: MAX_CONDITIONS,
-    description: 'Every condition must match (AND) for the webhook to fire.',
+    description:
+      'Every condition must match (AND) for the webhook to fire. An empty list means no filter: the webhook fires on every subscribed event.',
   })
   conditions!: WebhookFilterConditionDto[];
 }
@@ -146,7 +146,9 @@ export class CreateWebhookDto {
   @ApiPropertyOptional({
     description:
       'Custom headers to include in webhook requests. Never returned by any webhook route. At delivery, ' +
-      '`content-type` and `x-openwa-*` names are stripped so a custom header cannot shadow a system one.',
+      '`content-type` and `x-openwa-*` names are stripped so a custom header cannot shadow a system one, ' +
+      'and so are the connection-level names the HTTP client owns (`connection`, `content-length`, ' +
+      '`expect`, `keep-alive`, `te`, `trailer`, `transfer-encoding`, `upgrade`).',
     example: { 'X-Custom-Header': 'value' },
   })
   @IsOptional()
@@ -168,7 +170,10 @@ export class CreateWebhookDto {
   filters?: WebhookFilters | null;
 
   @ApiPropertyOptional({
-    description: 'Number of retry attempts on failure',
+    description:
+      'Total delivery attempts per event, including the first (0 and 1 both mean a single attempt with no ' +
+      'retry). An event that exhausts them is recorded in GET /api/webhooks/delivery-failures; the webhook ' +
+      'stays active.',
     example: 3,
     minimum: 0,
     maximum: 5,
@@ -183,7 +188,9 @@ export class CreateWebhookDto {
 
 export class UpdateWebhookDto {
   @ApiPropertyOptional({ description: 'Webhook URL' })
-  @IsOptional()
+  // Not @IsOptional: that also skips validation for null, which these NOT NULL columns cannot store
+  // (save() then failed with a 500). Only an omitted field means "leave unchanged".
+  @ValidateIf((_: UpdateWebhookDto, v: unknown) => v !== undefined)
   @IsUrl({ require_tld: false })
   url?: string;
 
@@ -194,7 +201,7 @@ export class UpdateWebhookDto {
     isArray: true,
     minItems: 1,
   })
-  @IsOptional()
+  @ValidateIf((_: UpdateWebhookDto, v: unknown) => v !== undefined)
   @IsArray()
   @ArrayMinSize(1)
   @IsIn([...WEBHOOK_EVENTS, '*'], { each: true })
@@ -228,7 +235,7 @@ export class UpdateWebhookDto {
     description: 'Custom headers. Replaces the stored map wholesale. Never returned by any webhook route.',
     example: { 'X-Custom-Header': 'value' },
   })
-  @IsOptional()
+  @ValidateIf((_: UpdateWebhookDto, v: unknown) => v !== undefined)
   @IsHeaderMap()
   headers?: Record<string, string>;
 
@@ -248,18 +255,20 @@ export class UpdateWebhookDto {
 
   @ApiPropertyOptional({ description: 'Enable/disable webhook' })
   @ToStrictBoolean()
-  @IsOptional()
+  @ValidateIf((_: UpdateWebhookDto, v: unknown) => v !== undefined)
   @IsBoolean()
   active?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Delivery attempts before the webhook is parked. Same range the create route enforces.',
+    description:
+      'Total delivery attempts per event, including the first (0 and 1 both mean a single attempt). Same ' +
+      'range the create route enforces.',
     example: 3,
     minimum: 0,
     maximum: 5,
   })
   @ToStrictNumber()
-  @IsOptional()
+  @ValidateIf((_: UpdateWebhookDto, v: unknown) => v !== undefined)
   @IsInt()
   @Min(0)
   @Max(5)

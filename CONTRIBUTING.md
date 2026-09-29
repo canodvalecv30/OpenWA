@@ -23,7 +23,6 @@ OpenWA targets **Node.js 22+**.
 ```bash
 # backend
 npm install
-cp .env.example .env        # adjust as needed
 npm run start:dev           # hot-reload, default port 2785
 
 # dashboard (separate terminal)
@@ -31,6 +30,11 @@ cd dashboard && npm install && npm run dev
 ```
 
 Default storage is SQLite, so no external services are required to run locally.
+
+No `.env` is needed: the first boot writes `data/.env.generated` with these defaults. Create a
+`.env` only to pin values. If you copy `.env.example` for that, change its `NODE_ENV=production`
+to `NODE_ENV=development`, or the dev server runs with production behaviour (no Swagger UI,
+generic validation errors, JSON logs).
 
 ## Before opening a pull request
 

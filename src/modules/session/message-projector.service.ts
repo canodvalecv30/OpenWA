@@ -35,6 +35,7 @@ import {
   deliveryStatusToAck,
   ackStatusTransitionFrom,
 } from '../message/message-status.util';
+import { isMessagePayload } from '../../core/hooks/hook-results';
 
 /**
  * Projects engine message events into the `messages` table and out to webhooks/WebSocket.
@@ -84,6 +85,15 @@ export class MessageProjector {
     // or permanently block the message's later mutations.
     this.logger.error(`Unexpected failure applying message mutation: ${key}`, String(err));
   });
+
+  // Inbound messages whose `message:received` chain is running, by `${sessionId}:${waMessageId}`. The
+  // row is written only after the chain, so a handler that quotes the message reads it from here, and
+  // a revoke or edit landing meanwhile finds no row to update: it is recorded here and applied once
+  // the row is written (see applyChangesMadeInFlight).
+  private readonly inboundInFlight = new Map<
+    string,
+    { message: InboundMessageData; revoked?: boolean; editedBody?: string }
+  >();
 
   // Reaction/edit applies, extracted to a plain collaborator. It shares this instance's
   // messageMutations queue, so the public enqueue path and the queued applies serialize on one chain.
@@ -137,15 +147,70 @@ export class MessageProjector {
     void this.sessionRepository.update(id, { lastActiveAt: new Date() }).catch(() => undefined);
     // Convert IncomingMessage to plain object for dispatch
     const messageData = { ...message };
+    // Tracks the chain's current copy, so a quote taken mid-chain carries an earlier handler's rewrite.
+    const inFlightKey = `${id}:${message.id}`;
+    // A re-fire of the same id keeps a change recorded against the chain it replaces.
+    const { revoked, editedBody } = this.inboundInFlight.get(inFlightKey) ?? {};
+    const inFlight = { message: messageData, revoked, editedBody };
+    this.inboundInFlight.set(inFlightKey, inFlight);
 
     // Execute hook for message received - plugins can modify or stop processing
     void this.hookManager
       .execute('message:received', messageData, {
         sessionId: id,
         source: 'Engine',
+        accept: data => {
+          if (!isMessagePayload(data)) return false;
+          inFlight.message = data;
+          return true;
+        },
       })
-      .then(({ data: finalMessage }) => this.projectInboundMessage(id, engine, finalMessage))
-      .catch(err => this.logger.error(`onMessage handler failed for ${id}`, String(err)));
+      .then(({ data }) =>
+        this.projectInboundMessage(id, engine, this.messageOrEngineCopy(id, 'message:received', data, message)),
+      )
+      .catch(err => this.logger.error(`onMessage handler failed for ${id}`, String(err)))
+      .finally(() => {
+        // A re-fire of the same id may have replaced the entry; leave that one to its own chain.
+        if (this.inboundInFlight.get(inFlightKey) === inFlight) this.inboundInFlight.delete(inFlightKey);
+      });
+  }
+
+  /**
+   * The inbound message a `message:received` chain is carrying, as the chain last rewrote it, from the
+   * moment the chain starts until the message's row is written; undefined otherwise. The row does not
+   * exist while the chain runs, so a handler that replies to the message finds nothing to quote in the
+   * table.
+   */
+  inFlightInbound(sessionId: string, waMessageId: string): Pick<IncomingMessage, 'chatId' | 'body'> | undefined {
+    return waMessageId ? this.inboundInFlight.get(`${sessionId}:${waMessageId}`)?.message : undefined;
+  }
+
+  /**
+   * The message a `message:received` / `message:sent` hook chain handed back, or a fresh copy of the
+   * engine's message when it is not one: null, a primitive, or an object without the `id` and `chatId`
+   * every row and dispatch keys on. HookManager already skips such a result per handler
+   * ({@link isMessagePayload}), keeping an earlier handler's rewrite; this is the last guard. A plugin
+   * returning `data: null` to mean "I consumed it" used to throw below and erase the message from
+   * history, webhooks and the websocket. A plugin may rewrite a message; it cannot make the gateway
+   * forget it (see projectInboundMessage).
+   */
+  private messageOrEngineCopy(
+    id: string,
+    event: 'message:received' | 'message:sent',
+    data: unknown,
+    message: IncomingMessage,
+  ): InboundMessageData {
+    const candidate = data as Partial<IncomingMessage> | null;
+    if (isMessagePayload(candidate)) {
+      return candidate as InboundMessageData;
+    }
+    this.logger.warn(`A ${event} hook returned a payload that is not a message; using the engine's copy`, {
+      sessionId: id,
+      messageId: message.id,
+      received: candidate === null ? 'null' : typeof candidate,
+      action: 'hook_message_discarded',
+    });
+    return { ...message };
   }
 
   /** `isStatusBroadcast` arm of {@link handleInboundMessage}: ingest into the status store, not the message pipeline. */
@@ -291,6 +356,7 @@ export class MessageProjector {
       const result = await this.messageRepository.insert(dbMessage as unknown as QueryDeepPartialEntity<Message>);
       Object.assign(dbMessage, result.identifiers[0] ?? {}, result.generatedMaps?.[0] ?? {});
       persisted = true;
+      this.applyChangesMadeInFlight(id, incoming.id);
     } catch (err) {
       if (isUniqueViolation(err)) {
         isNewMessage = false;
@@ -302,6 +368,25 @@ export class MessageProjector {
       return null; // duplicate re-fire — the original already persisted and dispatched
     }
     return { dbMessage, persisted };
+  }
+
+  /**
+   * Write a revoke or edit that arrived while the message's `message:received` chain ran onto the row
+   * that chain just inserted: its own UPDATE matched no row then. Queued on the message's mutation
+   * chain, so it lands after any edit already queued, and a revoke wins over an edit. A change arriving
+   * after the insert finds the row itself.
+   */
+  private applyChangesMadeInFlight(id: string, waMessageId: string): void {
+    const pending = waMessageId ? this.inboundInFlight.get(`${id}:${waMessageId}`) : undefined;
+    if (!pending?.revoked && pending?.editedBody === undefined) return;
+    this.enqueueMessageMutation(id, waMessageId, async () => {
+      const change = pending.revoked ? { body: '', type: 'revoked' } : { body: pending.editedBody };
+      try {
+        await this.messageRepository.update({ sessionId: id, waMessageId }, change);
+      } catch (err) {
+        this.logger.error(`Failed to apply a revoke or edit to message ${waMessageId}`, String(err));
+      }
+    });
   }
 
   /** Fan an accepted inbound message out: `message:persisted` plugin hook, webhook, websocket emit. */
@@ -371,8 +456,10 @@ export class MessageProjector {
       .execute('message:sent', messageData, {
         sessionId: id,
         source: 'Engine',
+        accept: isMessagePayload,
       })
-      .then(async ({ data: finalMessage }) => {
+      .then(async ({ data }) => {
+        const finalMessage = this.messageOrEngineCopy(id, 'message:sent', data, message);
         // `continue: false` is not read here, for the same reason as the message:received path
         // above: the send has already happened, so a plugin can stop the handler chain but cannot
         // un-send it. Skipping the persist below dropped the operator's own outgoing message from
@@ -559,6 +646,8 @@ export class MessageProjector {
     // `message.id` is the revocation notification, which never matches a stored row.
     // `revokedId` falls back to `id` (Baileys, where the two are the same).
     const revokedWaMessageId = message.revokedId ?? message.id;
+    const inFlight = this.inboundInFlight.get(`${id}:${revokedWaMessageId}`);
+    if (inFlight) inFlight.revoked = true;
     void this.messageRepository
       .update({ sessionId: id, waMessageId: revokedWaMessageId }, { body: '', type: 'revoked' })
       .catch(err => {
@@ -573,8 +662,10 @@ export class MessageProjector {
   }
 
   /** History backfill persist, extracted to message-history-projector.ts (stateless function). */
-  persistHistoryMessages(id: string, messages: IncomingMessage[]): Promise<void> {
-    return persistHistoryMessages(this.messageRepository, this.configService, id, messages, this.logger);
+  persistHistoryMessages(id: string, engine: IWhatsAppEngine, messages: IncomingMessage[]): Promise<void> {
+    return persistHistoryMessages(this.messageRepository, this.configService, id, messages, this.logger, () =>
+      this.engines.isLive(id, engine),
+    );
   }
 
   /** Reaction apply, queued on the per-message mutation chain — see MessageMutationProjector. */
@@ -584,6 +675,8 @@ export class MessageProjector {
 
   /** Edit apply, queued on the per-message mutation chain — see MessageMutationProjector. */
   applyMessageEditQueued(id: string, message: EditedMessage): void {
+    const inFlight = this.inboundInFlight.get(`${id}:${message.messageId}`);
+    if (inFlight) inFlight.editedBody = message.body;
     this.mutationProjector.applyMessageEditQueued(id, message);
   }
 

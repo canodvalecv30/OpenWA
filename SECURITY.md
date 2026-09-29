@@ -54,8 +54,11 @@ If you created your `.env` by copying `.env.example` before this advisory, check
 `ENABLE_SWAGGER=true`. Earlier templates shipped that line uncommented alongside
 `NODE_ENV=production`, so a copied file pinned the opt-in that production otherwise
 withholds, and `/api/docs` is served outside the API-key guard. Comment the line out or
-set it to `false` to restore the production default. Docker Compose and the Helm chart
-are unaffected — neither forwards `ENABLE_SWAGGER` and the container never reads `.env`.
+set it to `false` to restore the production default. The bundled Docker Compose files
+(`docker-compose.yml` and `docker-compose.dev.yml`) are affected too: Compose substitutes
+`ENABLE_SWAGGER` from the `.env` next to the compose file and forwards it to the container.
+Fix the line there, then run `docker compose up -d` so the container is recreated with the
+new value. The Helm chart does not set `ENABLE_SWAGGER`.
 
 ### Plugins are full host trust — by design
 
@@ -115,12 +118,14 @@ deployment rather than on a single session:
 
 - Infrastructure routes (`/api/infra/*`)
 - API-key lifecycle routes (`/api/auth/api-keys/*`)
-- Plugin installation and lifecycle (`/api/plugins/*` — per-session activation
-  and per-session config remain available, scoped to the sessions the key
-  allows)
+- Plugin installation, lifecycle and activation (`/api/plugins/*`, including
+  `PUT /api/plugins/:id/sessions`, which replaces the whole activation set);
+  only the per-session config override (`PUT /api/plugins/:id/config/:sessionId`)
+  remains available, scoped to the sessions the key allows
 - Cross-session statistics (`GET /api/stats/overview`, `GET /api/stats/messages`)
 - Application settings (`GET /api/settings`)
 - Session creation (`POST /api/sessions`)
+- Session egress proxy configuration (`PATCH /api/sessions/:sessionId/proxy`)
 - The queue dashboard (`/api/admin/queues`)
 
 Redriving a dead-lettered integration delivery also fails closed (`404`) when

@@ -108,9 +108,11 @@ before touching anything in the logout/forceKill path.
 ### INV-9 — The reconnect loop bounds itself: backoff with jitter, clamp ≤ 5 min and ≤ setTimeout's 32-bit range, alert every 5 consecutive attempts
 
 **Defense:** `reconnect-policy.ts` — a pure decision function (attempt budget, loop alerts)
-consumed by the lifecycle, which resets the budget only when the session reaches READY; the clamps
-exist because a naive `delay * 2^attempt` reaches values `setTimeout` silently truncates.
-**Pinned by:** `reconnect-policy.spec.ts`.
+consumed by the lifecycle, which resets the budget only when the session held READY for
+`STABLE_READY_MS` (5 min) before its next drop or its next READY, so a session that flaps keeps
+backing off and still alerts; the clamps exist because a naive `delay * 2^attempt` reaches values
+`setTimeout` silently truncates, and overflows to `Infinity` on a long enough streak.
+**Pinned by:** `reconnect-policy.spec.ts`, `session.service.spec.ts` (scheduleReconnect cases).
 
 ### INV-10 — Boot auto-start is sequential, staggered (2s per Chromium), and detached from bootstrap
 

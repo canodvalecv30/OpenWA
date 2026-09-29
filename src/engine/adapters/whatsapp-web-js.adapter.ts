@@ -316,7 +316,16 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     const boundedReady = new Promise<MessageMedia | null>(resolve => {
       resolveBounded = resolve;
     });
+    // Set when the caller's wait below expires. A task still queued at that point has nobody left to
+    // read its result, so once admitted it gives the slot straight back instead of pulling a full
+    // base64 blob over CDP and holding the slot for it: after a burst, that backlog is what made
+    // later messages miss their own deadline. A download that already started is unaffected.
+    let abandoned = false;
     const slotHeld = this.inboundLimiter.run(() => {
+      if (abandoned) {
+        resolveBounded(null);
+        return Promise.resolve();
+      }
       // downloadMedia() is async, so a page-side throw (a detached target, a WA Web field rename) arrives
       // as a rejection, which boundedReady adopts and rethrows past the only exit that builds the marker,
       // leaving every call site to emit with no media field at all. It is the same "no usable media"
@@ -362,14 +371,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     // those messages are never emitted AT ALL — strictly worse than the media loss this change set
     // out to fix. The old queue cap provided that degradation by rejecting; this restores it without
     // shedding at a fixed batch size.
-    const media = await withInboundDownloadTimeout(boundedReady, inboundMediaTimeoutMs(), () =>
+    const media = await withInboundDownloadTimeout(boundedReady, inboundMediaTimeoutMs(), () => {
+      abandoned = true;
       this.logger.warn(
         'Inbound media did not arrive within MEDIA_DOWNLOAD_TIMEOUT_MS; emitting message without media',
         {
           msgId,
         },
-      ),
-    );
+      );
+    });
     if (!media) {
       return declaredOnlyMedia(msg);
     }
@@ -728,6 +738,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   votePoll(chatId: string, pollMessageId: string, options: string[]): Promise<void> {
     return this.messaging.votePoll(chatId, pollMessageId, options);
+  }
+
+  // whatsapp-web.js has no interactive button-reply send path; the parameters are not named so the
+  // method reads as the 501 it is, and TypeScript accepts the narrower signature for the interface.
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async clickButton(): Promise<MessageResult> {
+    throw new EngineNotSupportedError('clickButton');
   }
 
   unpinMessage(chatId: string, messageId: string): Promise<void> {

@@ -23,8 +23,15 @@ def quote_segment(segment: Any) -> str:
     """Percent-encode a single path segment so a value containing ``/``, ``#`` or
     ``?`` can't break out of its path position. WhatsApp-id characters that are
     already path-safe (``@``, ``:``, ``+``) are kept readable.
+
+    Raises :class:`ValueError` for an empty, ``.`` or ``..`` segment: httpx
+    resolves dot segments before sending, so such an id would reach the
+    parent resource instead of the intended one.
     """
-    return quote(str(segment), safe="@:+")
+    text = str(segment)
+    if text in ("", ".", ".."):
+        raise ValueError(f"OpenWA: empty or dot path segment {text!r}")
+    return quote(text, safe="@:+")
 
 
 def build_url(base_url: str, path: str, query: Mapping[str, Any] | None = None) -> str:
@@ -67,9 +74,9 @@ class HttpExecutor:
     ) -> None:
         # Caller-supplied default headers are applied FIRST so the auth/JSON
         # headers below always win and can never be clobbered (mirrors the JS SDK).
-        headers: dict[str, str] = {}
-        if default_headers:
-            headers.update(default_headers)
+        # httpx.Headers matches names case-insensitively, so a lowercase copy is
+        # replaced instead of being sent alongside ours.
+        headers = httpx.Headers(default_headers)
         headers["Content-Type"] = "application/json"
         headers["X-API-Key"] = api_key
         client_kwargs: dict[str, Any] = {

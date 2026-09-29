@@ -99,7 +99,10 @@ function makeHost(overrides: Partial<BaileysEventsHost> = {}): BaileysEventsHost
     recordKeyLidMappings: noop,
     recordMessage: noop,
     recordMessageEdit: noop,
+    consumeOwnSend: () => false,
+    getStoredMessage: () => undefined,
     putStoredMessage: () => undefined,
+    updateStoredMessage: () => undefined,
     getOnMessage: () => undefined,
     getOnMessageCreate: () => undefined,
     getOnMessageRevoked: () => undefined,
@@ -483,5 +486,17 @@ describe('BaileysEvents.mapMessage', () => {
       data: buf.toString('base64'),
     });
     expect(downloadMediaMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BaileysEvents record of messages deleted for everyone', () => {
+  it('forgets the oldest id once it holds its limit', () => {
+    const events = new BaileysEvents(makeHost());
+    const limit = BaileysEvents.DELETED_FOR_EVERYONE_LIMIT;
+    for (let i = 0; i <= limit; i++) events.markDeletedForEveryone(`M${i}`);
+
+    expect(events.wasDeletedForEveryone('M0')).toBe(false);
+    expect(events.wasDeletedForEveryone('M1')).toBe(true);
+    expect(events.wasDeletedForEveryone(`M${limit}`)).toBe(true);
   });
 });

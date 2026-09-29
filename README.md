@@ -44,6 +44,7 @@ Built on a **pluggable architecture**, OpenWA lets you select database engines (
 | 🔗 **n8n Integration**        | Community nodes for workflow automation                                                                                                  |
 | 🧩 **Community Adapters**     | Third-party integrations (e.g. ioBroker) — see [docs](./docs/23-community-integrations.md)                                               |
 | 🔐 **Session-scoped keys**    | Operator and viewer (reader) tokens can be limited to chosen sessions — or all sessions if none are selected                             |
+| 🔒 **Chat-scoped keys**       | Those same tokens can also be limited to chosen chats — a few groups and contacts — so an agent on a shared account sees only its own    |
 
 ### Session-scoped operator & viewer tokens
 
@@ -53,6 +54,24 @@ When you create or edit an **operator** or **viewer** API key in the dashboard, 
 - **One or more sessions selected** — the key can only list, read, and (for operator) manage those sessions. A request naming any other session returns `401`; session-filtered lists (sessions, audit, webhook delivery failures) return that key's rows rather than an error; and the key-management routes and the queue dashboard, which name no session at all, return `403`.
 
 Admin keys stay unscoped in the dashboard so they can keep managing other API keys. The HTTP API still accepts `allowedSessions` on any role if you need that from a client.
+
+### Chat-scoped operator & viewer tokens
+
+A session-scoped key still reaches every chat on the sessions it may use. A key can be narrowed further, to **chats** (a chosen set of groups and individual contacts), with `allowedChats` on `POST /auth/api-keys` or `PUT /auth/api-keys/{id}`. The dashboard does not set or show it yet, and editing a key there leaves its chats unchanged.
+
+- **No chats selected** — the key can reach every chat on its sessions.
+- **One or more selected** — the key reaches only those chats. Every authenticated REST route not explicitly marked as safe for a chat-scoped key refuses it with `403` (a request naming a session outside `allowedSessions` still answers `401` first), including routes added in later releases: the refusal is the default. Inside its chats an operator key can do what the marked routes allow, which is more than reading and sending: it can also delete or clear a chat, leave or rename a group, and block the contact. It cannot change who belongs to a group: adding, removing, promoting or demoting participants, answering join requests and reading or resetting the invite link all stay closed.
+- **The two scopes are independent** — a key may be limited to sessions, to chats, to both, or to neither.
+
+This lets you point an **AI agent or third-party integration at a shared account** without handing it every chat. Give the agent a key scoped to the few groups (or DMs) it is meant to handle: it can send and reply there, but it cannot list your other chats, read any other DM, message a contact outside its set, or reach the queue dashboard. It reads its chats through `GET /sessions/{sessionId}/messages/{chatId}/history`, which works on whatsapp-web.js only; on Baileys it sees just each chat's last-message preview. It receives no pushed events, so it has to poll. It can still read the session's own status (`GET /sessions/{sessionId}`) so an integration can tell whether it is connected.
+
+Identity is matched through the lid mapping table: a contact allowlisted by phone number also matches the same person's `@lid` privacy id once the table maps the two, and an unmapped `@lid` is refused rather than guessed. A lid's digits are never mistaken for a phone number, so `555000111@lid` does not admit `555000111@c.us`.
+
+The default covers REST routes only. Surfaces that authenticate outside the REST guard do not inherit it, so each one that can return chat data refuses a chat-scoped key with its own check: the `/events` WebSocket, the MCP mount (per tool call), and the Bull Board queue dashboard. Of the list routes, only `GET /sessions/{sessionId}/chats` is usable, and it filters to the key's chats before paging.
+
+The API also accepts `allowedChats` on an admin key, but no admin-only route is open to a chat-scoped key, and the last usable admin key cannot be scoped this way.
+
+None of this changes the ban-risk guidance below. It limits what a _key_ can reach, not what WhatsApp makes of the account.
 
 ---
 
@@ -79,7 +98,7 @@ These are practical guardrails, not guarantees — but they materially reduce th
 
 1. **Warm up fresh numbers.** For the first several days, behave like a normal human user: scan the QR, exchange a handful of messages with saved contacts, join a group or two, set a profile photo. Don't blast on day one.
 2. **Don't cold-blast strangers.** Sending the first-ever message to a large batch of numbers that have never messaged you is the single most reliable way to get restricted — on either engine.
-3. **Rate-limit yourself.** OpenWA ships with a configurable rate limiter (`RATE_LIMIT_*` env vars). Use it. A few messages per minute per session is sustainable; "thousands in an hour" is not.
+3. **Pace sends per session.** Set `SEND_PACING_ENABLED=true` (off by default) for a per-session daily cap: an allowance that grows with the session's age (`SEND_PACING_WARMUP_SCHEDULE`), a separate cap on new conversations (`SEND_PACING_COLD_DAILY_CAP`) and a consecutive-failure breaker; [R002 in the risk guide](docs/16-risk-management.md#r002-user-account-banned) lists what it counts. No per-minute cap is enforced, so spacing within a day is up to the caller: bulk sends wait `delayBetweenMessages` between messages, and single text sends pause behind a typing indicator (`SIMULATE_TYPING`, on by default). A few messages per minute per session is sustainable; "thousands in an hour" is not. The `RATE_LIMIT_*` variables are API abuse protection per client IP, not a send cap: they throttle every request, including dashboard and read traffic.
 4. **Use opted-in recipients.** The safest workloads are replies and alerts to people who already expect to hear from you (OTP to your own users, order updates, support replies).
 5. **Keep a fallback.** For anything auth-critical or revenue-critical, keep an SMS / email / official-Cloud-API path. Do not bet a login flow solely on an unofficial client.
 6. **Mind the hosting IP.** Cheap datacenter IPs are flagged more aggressively than residential ones. A residential proxy (supported per-session via the proxy settings) can help; it is not a license to spam.
@@ -135,6 +154,7 @@ For any deployment where ethical, legal, or regulatory compliance matters (healt
 | Proxy Support       | ✅     | Per-session proxy configuration                                                                                                                                              |
 | Rate Limiting       | ✅     | Configurable request limits                                                                                                                                                  |
 | CIDR Whitelisting   | ✅     | IP-based access control                                                                                                                                                      |
+| Chat Scoping        | ✅     | Per-key `allowedChats` allowlist (groups and contacts): a key reaches only those chats, and routes not marked safe for it refuse it                                          |
 | Audit Logging       | ✅     | Audit trail for API-key, session, integration-instance, and infra admin operations (message sends and webhook deliveries are tracked in their own tables, not the audit log) |
 
 ### Infrastructure
@@ -241,10 +261,10 @@ For production, use the main `docker-compose.yml` with optional services:
 # Basic production (SQLite, local storage)
 docker compose up -d
 
-# With PostgreSQL database
+# Also start the PostgreSQL container (configure it first, see below)
 docker compose --profile postgres up -d
 
-# Full stack (PostgreSQL, Redis, MinIO)
+# Also start PostgreSQL, Redis and MinIO (configure them first, see below)
 docker compose --profile full up -d
 ```
 
@@ -254,6 +274,20 @@ docker compose --profile full up -d
 | `redis`    | Redis cache           |
 | `minio`    | S3-compatible storage |
 | `full`     | All services above    |
+
+A profile only starts the container; OpenWA keeps using SQLite and local storage until it is told
+to use the new service. The simplest route is **Dashboard > Infrastructure**: pick the built-in
+option, save, and restart from there, and OpenWA starts the container itself. To use a profile
+directly, set these in the `.env` next to `docker-compose.yml` first:
+
+- PostgreSQL: `DATABASE_TYPE=postgres`, `DATABASE_HOST=postgres`, `DATABASE_USERNAME=openwa`,
+  `DATABASE_PASSWORD=<strong password>`
+- Redis: `REDIS_ENABLED=true`, `REDIS_HOST=redis`
+- MinIO: `STORAGE_TYPE=s3`, `S3_ENDPOINT=http://minio:9000`, `S3_ACCESS_KEY_ID=<user>`,
+  `S3_SECRET_ACCESS_KEY=<strong password>`
+
+PostgreSQL and MinIO refuse to initialize with an empty password, and a production boot rejects
+default credentials such as `openwa` or `minioadmin`.
 
 > The dashboard is bundled into the API image and served by NestJS on the API port, so it
 > needs no profile — it is always available wherever `openwa-api` runs. For TLS/public exposure,

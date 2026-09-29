@@ -66,10 +66,9 @@ git remote add upstream https://github.com/rmyndharis/OpenWA.git
 # 4. Install dependencies
 npm install
 
-# 5. Copy environment file
-cp .env.example .env
-
-# 6. Start development
+# 5. Start development (API + dashboard). No .env is needed: the first boot writes
+#    data/.env.generated. A .env only pins values; if you copy .env.example, set
+#    NODE_ENV=development in it.
 npm run dev
 ```
 

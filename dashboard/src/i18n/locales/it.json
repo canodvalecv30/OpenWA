@@ -7,6 +7,7 @@
   },
   "common": {
     "appName": "OpenWA",
+    "updateAvailable": "v{{version}} disponibile",
     "loading": "Caricamento...",
     "cancel": "Annulla",
     "delete": "Elimina",
@@ -31,7 +32,11 @@
     "never": "Mai",
     "justNow": "Ora",
     "minAgo": "{{count}} min fa",
-    "hoursAgo": "{{count}} ore fa",
+    "minAgo_other": "{{count}} min fa",
+    "minAgo_many": "{{count}} min fa",
+    "hoursAgo": "{{count}} ora fa",
+    "hoursAgo_other": "{{count}} ore fa",
+    "hoursAgo_many": "{{count}} ore fa",
     "optional": "opzionale",
     "language": "Lingua",
     "back": "Indietro",
@@ -87,6 +92,7 @@
     "noMessageYet": "Ancora nessun messaggio",
     "unreadBadge": "{{count}} messaggio non letto",
     "unreadBadge_other": "{{count}} messaggi non letti",
+    "unreadBadge_many": "{{count}} messaggi non letti",
     "loadingMessages": "Caricamento messaggi...",
     "loadingOlderMessages": "Caricamento messaggi precedenti...",
     "loadOlderMessagesError": "Impossibile caricare i messaggi precedenti. Scorri verso l’alto per riprovare.",
@@ -98,6 +104,25 @@
       "delete": "Elimina messaggio"
     },
     "replyingTo": "Risposta a {{name}}",
+    "messageType": {
+      "text": "Testo",
+      "image": "Immagine",
+      "video": "Video",
+      "audio": "Audio",
+      "voice": "Messaggio vocale",
+      "document": "Documento",
+      "sticker": "Sticker",
+      "location": "Posizione",
+      "contact": "Contatto",
+      "poll": "Sondaggio",
+      "call": "Chiamata",
+      "revoked": "Messaggio eliminato",
+      "order": "Ordine",
+      "product": "Prodotto",
+      "masked": "Messaggio nascosto",
+      "unknown": "Messaggio",
+      "unknownType": "Tipo sconosciuto"
+    },
     "you": "Tu",
     "youPrefix": "Tu: ",
     "yesterday": "Ieri",
@@ -113,13 +138,16 @@
     "groupSubtitle": "Gruppo",
     "privateContactSubtitle": "Contatto privato",
     "deleteConfirm": "Eliminare questo messaggio per tutti?",
+    "promptButtons": "Opzioni del messaggio",
     "messageDeleted": "🚫 Questo messaggio è stato eliminato",
     "messageMasked": "🔒 Nascosto da WhatsApp sui dispositivi collegati — controlla sul telefono principale",
     "kind": {
       "group": "Gruppo",
       "channel": "Canale",
       "status": "Stato",
-      "broadcast": "Trasmissione"
+      "broadcast": "Trasmissione",
+      "individual": "Individuale",
+      "unknown": "Sconosciuto"
     },
     "tab": {
       "chats": "Chat",
@@ -129,6 +157,7 @@
     "status": {
       "itemCount": "{{count}} aggiornamento",
       "itemCount_other": "{{count}} aggiornamenti",
+      "itemCount_many": "{{count}} aggiornamenti",
       "empty": "Nessun contatto ha uno stato attivo.",
       "loadError": "Impossibile caricare gli stati.",
       "mediaUnavailable": "Contenuto multimediale non disponibile",
@@ -153,7 +182,8 @@
       "empty": "Non sei ancora iscritto a nessun canale.",
       "notReady": "La sessione non è ancora pronta.",
       "subscribers": "{{count}} iscritto",
-      "subscribers_other": "{{count}} iscritti"
+      "subscribers_other": "{{count}} iscritti",
+      "subscribers_many": "{{count}} iscritti"
     },
     "errors": {
       "loadSessions": "Impossibile caricare le sessioni",
@@ -162,7 +192,9 @@
       "send": "Impossibile inviare il messaggio",
       "react": "Impossibile reagire al messaggio",
       "delete": "Impossibile eliminare il messaggio",
-      "fileTooLarge": "Il file è troppo grande (max 18 MB)"
+      "clickButton": "Impossibile cliccare il pulsante",
+      "fileTooLarge": "Il file è troppo grande (max 18 MB)",
+      "searchHitSessionNotReady": "La sessione di questo messaggio non è connessa"
     },
     "loadMessagesError": "Impossibile caricare i messaggi. Controlla i log del server.",
     "messageStatus": {
@@ -213,6 +245,7 @@
     "noSessions": "Nessuna sessione trovata. Creane una per iniziare.",
     "view": "Visualizza",
     "disconnect": "Disconnetti",
+    "disconnectFailed": "Impossibile disconnettere la sessione",
     "errorPrefix": "Errore: {{message}}",
     "loadError": "Impossibile caricare i dati",
     "charts": {
@@ -223,6 +256,7 @@
         "30d": "30 g"
       },
       "overTime": "Messaggi nel tempo",
+      "overTimeUtcDays": "Messaggi nel tempo (giorni in UTC)",
       "byType": "Messaggi per tipo",
       "topChats": "Chat principali",
       "sent": "Inviati",
@@ -271,7 +305,8 @@
       "successTitle": "Sessione Creata",
       "successDesc": "Sessione \"{{name}}\" creata con successo",
       "errorTitle": "Creazione Fallita",
-      "errorDefault": "Impossibile creare la sessione"
+      "errorDefault": "Impossibile creare la sessione",
+      "tooShort": "Il nome deve contenere almeno 3 caratteri."
     },
     "delete": {
       "title": "Conferma Eliminazione",
@@ -305,7 +340,7 @@
       "created": "Creata",
       "lastActive": "Ultima Attività",
       "autoRejectCalls": "Rifiuta automaticamente le chiamate",
-      "autoRejectCallsHint": "Le chiamate in arrivo vengono rifiutate appena squillano. Il webhook call.received viene comunque inviato prima. Si applica alla prossima chiamata — nessun riavvio necessario. Solo con il motore Baileys: whatsapp-web.js non può rifiutare le chiamate."
+      "autoRejectCallsHint": "Le chiamate in arrivo vengono rifiutate appena squillano. Il webhook call.received viene comunque inviato prima. Si applica alla prossima chiamata, nessun riavvio necessario. Solo con il motore Baileys: whatsapp-web.js non può rifiutare le chiamate."
     },
     "proxy": {
       "title": "Configurazione proxy",
@@ -342,7 +377,8 @@
       "actionRequiredTitle": "Azione richiesta",
       "actionRequiredDesc": "Questa sessione richiede la tua attenzione. Apri la sessione per vedere cosa fare.",
       "failedTitle": "Sessione Fallita",
-      "failedDesc": "Avvio della sessione WhatsApp non riuscito. Apri la sessione per vedere il motivo."
+      "failedDesc": "Avvio della sessione WhatsApp non riuscito. Apri la sessione per vedere il motivo.",
+      "stopFailedTitle": "Arresto non riuscito"
     },
     "card": {
       "phone": "Telefono",
@@ -422,6 +458,7 @@
       "hint": "Attiva solo quando tutte le condizioni corrispondono. Si applica agli eventi dei messaggi.",
       "badge": "{{count}} filtro",
       "badge_other": "{{count}} filtri",
+      "badge_many": "{{count}} filtri",
       "addCondition": "Aggiungi condizione",
       "removeCondition": "Rimuovi condizione",
       "caseSensitive": "Distingui maiuscole",
@@ -461,7 +498,10 @@
     },
     "empty": {
       "title": "Nessun webhook configurato",
-      "description": "Aggiungi un webhook per ricevere le notifiche degli eventi in tempo reale"
+      "description": "Aggiungi un webhook per ricevere le notifiche degli eventi in tempo reale",
+      "loadErrorTitle": "Impossibile caricare i webhook",
+      "forbiddenTitle": "Nessun accesso ai webhook",
+      "forbiddenDesc": "I webhook richiedono una chiave API con ruolo operatore o amministratore."
     },
     "toasts": {
       "created": "Webhook creato con successo",
@@ -482,9 +522,27 @@
     "eventDescriptions": {
       "message.received": "Quando viene ricevuto un messaggio",
       "message.sent": "Quando viene inviato un messaggio",
-      "session.connected": "Quando una sessione si connette",
-      "session.disconnected": "Quando una sessione si disconnette",
+      "message.ack": "Quando cambia lo stato di consegna o di lettura di un messaggio",
+      "message.failed": "Quando la consegna di un messaggio in uscita non riesce",
+      "message.revoked": "Quando un messaggio viene eliminato per tutti",
+      "message.reaction": "Quando una reazione viene aggiunta, modificata o rimossa",
+      "message.edited": "Quando un messaggio viene modificato",
+      "session.status": "Quando cambia lo stato di una sessione",
       "session.qr": "Quando viene generato un codice QR",
+      "session.authenticated": "Quando una sessione è associata e pronta",
+      "session.disconnected": "Quando una sessione si disconnette",
+      "session.reconnect_loop": "Quando una sessione continua a non riuscire a riconnettersi",
+      "session.restriction": "Quando WhatsApp limita l'account o rimuove una limitazione",
+      "presence.update": "Quando una chat seguita va online, scrive o va offline",
+      "group.join": "Quando dei partecipanti entrano in un gruppo o vengono aggiunti",
+      "group.leave": "Quando dei partecipanti lasciano un gruppo o vengono rimossi",
+      "group.update": "Quando cambiano il nome, la descrizione o le impostazioni di un gruppo",
+      "group.join_request": "Quando qualcuno chiede di entrare in un gruppo amministrato da questa sessione",
+      "call.received": "Quando una chiamata in arrivo inizia a squillare",
+      "call.accepted": "Quando si risponde a una chiamata",
+      "call.rejected": "Quando una chiamata viene rifiutata",
+      "call.missed": "Quando una chiamata resta senza risposta",
+      "status.received": "Quando un contatto pubblica uno stato",
       "all": "Tutti gli eventi"
     }
   },
@@ -571,7 +629,10 @@
     },
     "empty": {
       "title": "Nessuna chiave API creata",
-      "description": "Crea una chiave API per autenticare le tue richieste"
+      "description": "Crea una chiave API per autenticare le tue richieste",
+      "loadErrorTitle": "Impossibile caricare le chiavi API",
+      "forbiddenTitle": "Nessun accesso alle chiavi API",
+      "forbiddenDesc": "Per gestire le chiavi API serve una chiave amministratore non limitata a sessioni specifiche."
     },
     "confirm": {
       "deleteTitle": "Elimina Chiave API",
@@ -624,7 +685,12 @@
       "filteredTitle": "Nessuna corrispondenza in questa pagina",
       "filteredDescription": "La ricerca filtra solo la pagina corrente. Cancellala, sfoglia le pagine o usa il filtro severità lato server.",
       "filteredServerDescription": "Nessun log corrisponde a questi filtri. Modifica il filtro severità per ampliare la ricerca."
-    }
+    },
+    "exportFailed": "Impossibile esportare il log di controllo",
+    "exportTruncated": "L'esportazione copre solo le {{rows}} voci più recenti. Restringi il filtro severità per esportare quelle più vecchie.",
+    "exportThrottled": "L'esportazione copre solo le {{rows}} voci più recenti perché il gateway sta limitando le letture del registro di audit. Attendi un minuto ed esporta di nuovo.",
+    "exportNoMatches": "Nessuna voce del registro di audit corrisponde alla ricerca, quindi non è stato esportato nulla.",
+    "exportNoMatchesTruncated": "Nessuna delle {{rows}} voci più recenti esaminate corrisponde alla ricerca, quindi non è stato esportato nulla. Le voci più vecchie non sono state esaminate."
   },
   "messageTester": {
     "title": "Messaggio di prova",
@@ -642,6 +708,12 @@
     "loadingGroups": "Caricamento gruppi...",
     "noGroupsFound": "Nessun gruppo trovato",
     "selectGroupHint": "Seleziona un gruppo dal tuo WhatsApp",
+    "selectAllGroups": "Seleziona tutti",
+    "selectMatchingGroups": "Seleziona risultati",
+    "clearGroupSelection": "Deseleziona",
+    "groupsSelectedCount": "Selezionati: {{count}}/{{max}}",
+    "noGroupsMatch": "Nessun gruppo corrisponde alla tua ricerca",
+    "forwardUsesFirstGroup": "L'inoltro usa solo il primo gruppo selezionato, come chat di origine.",
     "phoneHint": "Usa il formato internazionale senza spazi",
     "messageType": "Tipo di Messaggio",
     "types": {
@@ -699,17 +771,29 @@
     "bulkRecipientsCount": "Destinatari: {{count}}",
     "bulkDelay": "Ritardo tra i messaggi (ms)",
     "bulkDelayHint": "1000–60000 ms (predefinito: 3000)",
+    "bulkMediaKind": "Invia come",
+    "bulkMediaHint": "Con un allegato, il messaggio diventa la sua didascalia. Un file selezionato viaggia dentro la richiesta, quindi i file grandi per molti destinatari richiedono invece un URL multimediale pubblico.",
+    "bulkMediaTooLarge": "Questo file è troppo grande per inviarlo direttamente a {{count}} destinatari: con questo numero ogni file può essere al massimo di {{size}}. Usa invece un URL multimediale pubblico o invia a meno destinatari.",
+    "bulkMediaUrlInvalid": "Usa un indirizzo completo con http:// o https://, per esempio https://example.com/file.pdf.",
+    "bulkCaptionTooLong": "Con un allegato il messaggio viene inviato come sua didascalia, limitata a {{max}} caratteri (ora {{count}}).",
+    "bulkAudioNoCaption": "L'audio viene inviato senza didascalia, quindi questo testo non verrebbe inviato. Svuota il messaggio o scegli un altro tipo.",
     "send": "Invia Messaggio",
     "sending": "Invio in corso...",
+    "sendingProgress": "Invio in corso {{current}}/{{total}}...",
     "viewOnly": "Sola Visualizzazione",
     "responseEmpty": "Invia un messaggio per vedere la risposta delle API",
     "successLabel": "Successo",
     "failedLabel": "Fallito",
+    "groupsSentSummary": "{{sent}}/{{total}} inviati",
+    "groupSendCancelled": "{{count}}, annullati",
+    "groupSendStopped": "{{count}}, interrotto dopo HTTP {{status}}",
     "response": {
       "timestamp": "Timestamp",
       "messageId": "ID Messaggio",
       "batchId": "ID batch",
-      "error": "Errore"
+      "error": "Errore",
+      "groups": "Gruppi",
+      "notSent": "Non inviati"
     },
     "sendFailed": "Impossibile inviare il messaggio",
     "notOnWhatsApp": "Questo numero non è registrato su WhatsApp",
@@ -824,6 +908,7 @@
       "dontClose": "Si prega di non chiudere questa finestra",
       "successMsg": "Il server è di nuovo online! La pagina si ricaricherà automaticamente.",
       "errorMsg": "Il server non ha risposto dopo 30 secondi. Controlla i log di Docker e riavvia manualmente.",
+      "outcomeUnknown": "Il proxy è andato in timeout prima che il server rispondesse. Il riavvio potrebbe essere ancora in corso; ricarica la pagina tra un minuto per verificare.",
       "reload": "Ricarica Pagina"
     },
     "toasts": {
@@ -849,7 +934,8 @@
       "invalidFile": "Questo file non è un backup dati valido di OpenWA.",
       "importTooLarge": "Il backup supera il limite della richiesta. Aumenta BODY_SIZE_LIMIT sul server e riprova."
     },
-    "statusLoadError": "Impossibile caricare lo stato attuale dell'infrastruttura. Aggiorna per riprovare."
+    "statusLoadError": "Impossibile caricare lo stato attuale dell'infrastruttura. Aggiorna per riprovare.",
+    "configLoadError": "Impossibile caricare la configurazione salvata, quindi non è modificabile qui. Aggiorna per riprovare."
   },
   "plugins": {
     "title": "Plugin",
@@ -857,6 +943,19 @@
     "refresh": "Aggiorna",
     "builtIn": "Integrato",
     "noDescription": "Nessuna descrizione disponibile",
+    "statuses": {
+      "installed": "Installato",
+      "enabled": "Abilitato",
+      "disabled": "Disabilitato",
+      "error": "Errore"
+    },
+    "types": {
+      "engine": "Motore",
+      "storage": "Archiviazione",
+      "queue": "Coda",
+      "auth": "Autenticazione",
+      "extension": "Estensione"
+    },
     "enable": "Abilita",
     "disable": "Disabilita",
     "healthCheck": "Controllo dello Stato (Health Check)",
@@ -931,7 +1030,6 @@
       "title": "Istanze",
       "description": "Effettua il provisioning di istanze per account per questa integrazione. Ogni istanza ha il proprio segreto di firma e URL di ingresso.",
       "create": "Crea istanza",
-      "save": "Save",
       "empty": "Nessuna istanza ancora. Creane una per ottenere un URL di ingresso e un segreto.",
       "loadError": "Impossibile caricare le istanze.",
       "allSessions": "Tutte le sessioni",
@@ -955,7 +1053,8 @@
         "title": "Istanza creata",
         "hint": "Copia subito il segreto — viene mostrato solo una volta.",
         "secret": "Segreto di firma",
-        "ingressUrls": "URL di ingresso"
+        "ingressUrls": "URL di ingresso",
+        "verifyToken": "Token di verifica"
       },
       "regenerate": {
         "title": "Rigenera segreto",

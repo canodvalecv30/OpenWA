@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { localizePlugin } from '../utils/localizePlugin';
 import { configUiSafeConfig, missingRequiredConfig, sparseSessionOverride } from '../utils/pluginConfigRules';
-import { coerceFieldInput, emptyForField } from '../utils/pluginConfigForm';
+import { coerceFieldInput, emptyForField, fillClearedFields } from '../utils/pluginConfigForm';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Puzzle,
@@ -237,7 +237,7 @@ function ConfigField({
  * to 'self'/data: and forbids connections/forms — see utils/pluginFrameSecurity), and injected
  * as `srcdoc` into a `sandbox="allow-scripts"` iframe (opaque origin — no access to the parent).
  * The editor talks to the host over a postMessage bridge:
- *   iframe → host  { type: 'config:get' }          → host → iframe { type: 'config:value', config, schema, theme }
+ *   iframe → host  { type: 'config:get' }          → host → iframe { type: 'config:value', config, schema, locale, theme }
  *   iframe → host  { type: 'config:save', config }  → host → iframe { type: 'config:saved' } | { type: 'config:error', message }
  * The host makes the authenticated PUT (secret redact/restore applies); the iframe only ever sees the
  * already-redacted config.
@@ -247,11 +247,16 @@ function ConfigField({
  * which is how the Chat Flow editor ended up a glaring white panel inside a dark modal. Additive: an
  * editor that ignores the field renders exactly as it did before.
  *
- * Sending it once, with the handshake, is sufficient: the theme control sits behind the modal overlay,
- * so the theme cannot change while an editor is open, and reopening re-runs the handshake.
+ * `locale` is the dashboard language code ('es', 'zh-CN', ...), and `schema` arrives with field titles and
+ * descriptions localized from the manifest `i18n` block, the same text the generated form shows. The
+ * iframe cannot read the parent's language setting either, and the manifest block covers only top-level
+ * field text, so `locale` is what lets an editor translate its own strings. Additive, like `theme`.
+ *
+ * Sending them once, with the handshake, is sufficient: the theme and language controls sit behind the
+ * modal overlay, so neither can change while an editor is open, and reopening re-runs the handshake.
  */
 function PluginConfigUi({ plugin, sessionId }: { plugin: Plugin; sessionId?: string }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const toast = useToast();
   const queryClient = useQueryClient();
   const { resolvedTheme } = useTheme();
@@ -318,7 +323,8 @@ function PluginConfigUi({ plugin, sessionId }: { plugin: Plugin; sessionId?: str
         post({
           type: 'config:value',
           config: configUiSafeConfig(plugin, sessionId),
-          schema: plugin.configSchema,
+          schema: localizePlugin(plugin, i18n.language).configSchema,
+          locale: i18n.language,
           theme: resolvedTheme,
         });
       } else if (msg?.type === 'config:save') {
@@ -348,7 +354,7 @@ function PluginConfigUi({ plugin, sessionId }: { plugin: Plugin; sessionId?: str
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [plugin, sessionId, queryClient, t, toast, resolvedTheme]);
+  }, [plugin, sessionId, queryClient, t, i18n.language, toast, resolvedTheme]);
 
   if (error) return <div className="config-ui-status config-ui-error">{error}</div>;
   if (html === null)
@@ -365,7 +371,7 @@ function PluginConfigUi({ plugin, sessionId }: { plugin: Plugin; sessionId?: str
         className="plugin-config-ui-frame"
         sandbox="allow-scripts"
         srcDoc={hardenConfigUiHtml(html)}
-        title={plugin.name}
+        title={localizePlugin(plugin, i18n.language).name}
         style={{ height: plugin.configUi?.height ?? 600 }}
       />
     </>
@@ -409,6 +415,11 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
   const [overrideCfg, setOverrideCfg] = useState<Record<string, unknown>>({});
   const [savingOverride, setSavingOverride] = useState(false);
   const overrideFormRef = useRef<HTMLFormElement>(null);
+  // The session selected now, read by a request that resolves after the operator may have switched.
+  const selSessionRef = useRef(selSession);
+  useEffect(() => {
+    selSessionRef.current = selSession;
+  }, [selSession]);
 
   // Seed the override form from the resolved slice (the session's override value where set, else base).
   // Keyed on selSession + plugin.id (NOT the plugin object): `configPlugin` is derived from the live
@@ -435,7 +446,13 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
     if (overrideFormRef.current && !overrideFormRef.current.reportValidity()) return;
     setSavingOverride(true);
     try {
-      await pluginsApi.updateSessionConfig(plugin.id, selSession, sparseSessionOverride(overrideCfg, plugin));
+      // A rejected save answers 200 + {success:false}; the absence of a throw is not success.
+      const res = await pluginsApi.updateSessionConfig(
+        plugin.id,
+        selSession,
+        sparseSessionOverride(overrideCfg, plugin),
+      );
+      if (!res.success) throw new Error(res.message);
       void queryClient.invalidateQueries({ queryKey: queryKeys.plugins });
       toast.success(t('plugins.toasts.savedTitle'), t('plugins.toasts.savedDesc'));
     } catch (err) {
@@ -446,10 +463,23 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
   };
 
   const clearOverride = async () => {
-    if (!selSession) return;
+    const sid = selSession;
+    if (!sid) return;
     setSavingOverride(true);
     try {
-      await pluginsApi.updateSessionConfig(plugin.id, selSession, {});
+      const res = await pluginsApi.updateSessionConfig(plugin.id, sid, {});
+      if (!res.success) throw new Error(res.message);
+      // The seed effect does not re-run on the refetch, so reseed from Global here (the seed with an empty
+      // override). Left as it was, the form keeps the cleared values and the next save pins them back.
+      // Skipped when the operator has since picked another session: the form now holds that one's values.
+      const props = plugin.configSchema?.properties;
+      if (props && selSessionRef.current === sid) {
+        setOverrideCfg(
+          Object.fromEntries(
+            Object.entries(props).map(([key, field]) => [key, plugin.config[key] ?? emptyForField(field)]),
+          ),
+        );
+      }
       void queryClient.invalidateQueries({ queryKey: queryKeys.plugins });
       toast.success(t('plugins.toasts.savedTitle'), t('plugins.toasts.savedDesc'));
     } catch (err) {
@@ -665,7 +695,10 @@ export default function Plugins() {
     try {
       // 200 + {success:false} is how a rejected save arrives; without this the modal closed on a
       // "Saved!" toast and the operator's edit was silently gone on the next open.
-      const res = await pluginsApi.updateConfig(configPlugin.id, schemaConfig);
+      const res = await pluginsApi.updateConfig(
+        configPlugin.id,
+        fillClearedFields(schemaConfig, configPlugin.config, configPlugin.configSchema?.properties ?? {}),
+      );
       if (!res.success) throw new Error(res.message);
       void queryClient.invalidateQueries({ queryKey: queryKeys.plugins });
       toast.success(t('plugins.toasts.savedTitle'), t('plugins.toasts.savedDesc'));
@@ -785,7 +818,7 @@ export default function Plugins() {
     try {
       await pluginsApi.uninstall(plugin.id);
       refetchAll();
-      toast.success(t('plugins.toasts.uninstalled', 'Plugin uninstalled'), plugin.name);
+      toast.success(t('plugins.toasts.uninstalled', 'Plugin uninstalled'), localizePlugin(plugin, i18n.language).name);
     } catch (err) {
       toast.error(t('plugins.toasts.uninstallFailed', 'Uninstall failed'), err instanceof Error ? err.message : '');
     } finally {
@@ -864,7 +897,7 @@ export default function Plugins() {
                   <li key={p.id} className="rail-active-item">
                     <span className="status-dot enabled" />
                     <span className="rail-active-name">{localizePlugin(p, i18n.language).name}</span>
-                    <span className="rail-active-type">{p.type}</span>
+                    <span className="rail-active-type">{t(`plugins.types.${p.type}`, { defaultValue: p.type })}</span>
                   </li>
                 ))}
               </ul>
@@ -917,9 +950,13 @@ export default function Plugins() {
                     <div className="plugin-status-row">
                       <div className="plugin-status">
                         <span className={`status-dot ${plugin.status}`} />
-                        <span className="status-text">{plugin.status}</span>
+                        <span className="status-text">
+                          {t(`plugins.statuses.${plugin.status}`, { defaultValue: plugin.status })}
+                        </span>
                       </div>
-                      <span className="plugin-type-label">{plugin.type}</span>
+                      <span className="plugin-type-label">
+                        {t(`plugins.types.${plugin.type}`, { defaultValue: plugin.type })}
+                      </span>
                     </div>
 
                     {plugin.error && (

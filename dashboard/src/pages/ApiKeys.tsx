@@ -14,8 +14,6 @@ import {
   Copy,
   RefreshCw,
   Trash2,
-  Eye,
-  EyeOff,
   Loader2,
   Check,
   KeyRound,
@@ -66,13 +64,12 @@ export function ApiKeys() {
   const { t } = useTranslation();
   const toast = useToast();
   useDocumentTitle(t('apiKeys.title'));
-  const { data: apiKeys = [], isLoading: loading, isError: apiKeysError } = useApiKeysQuery();
+  const { data: apiKeys = [], isLoading: loading, error: apiKeysError } = useApiKeysQuery();
   const { data: sessions = [] } = useSessionsQuery();
   const createMutation = useCreateApiKeyMutation();
   const updateMutation = useUpdateApiKeyMutation();
   const deleteMutation = useDeleteApiKeyMutation();
   const revokeMutation = useRevokeApiKeyMutation();
-  const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [showModal, setShowModal] = useState(false);
   const [newKey, setNewKey] = useState(emptyKeyForm);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
@@ -166,15 +163,6 @@ export function ApiKeys() {
     setConfirmAction(null);
   };
 
-  const toggleKeyVisibility = (id: string) => {
-    setVisibleKeys(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
   const handleCopy = async (text: string, id: string) => {
     if (await copyToClipboard(text)) {
       setCopied(id);
@@ -192,21 +180,12 @@ export function ApiKeys() {
         columnHelper.accessor('keyPrefix', {
           id: 'key',
           header: () => t('apiKeys.columns.key'),
-          cell: info => {
-            const apiKey = info.row.original;
-            return (
-              <span className="key-cell">
-                <code>{visibleKeys.has(apiKey.id) ? apiKey.keyPrefix + '...' : apiKey.keyPrefix + '****'}</code>
-                <button
-                  className="icon-btn-sm"
-                  onClick={() => toggleKeyVisibility(apiKey.id)}
-                  aria-label={visibleKeys.has(apiKey.id) ? t('common.hideApiKey') : t('common.showApiKey')}
-                >
-                  {visibleKeys.has(apiKey.id) ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
-              </span>
-            );
-          },
+          // The list carries only the prefix: the full key exists once, in the post-creation modal.
+          cell: info => (
+            <span className="key-cell">
+              <code>{info.getValue()}****</code>
+            </span>
+          ),
         }),
         columnHelper.accessor('role', {
           header: () => t('apiKeys.columns.role'),
@@ -282,7 +261,7 @@ export function ApiKeys() {
           },
         }),
       ]),
-    [visibleKeys, t, sessions],
+    [t, sessions],
   );
 
   const table = useTable({
@@ -317,7 +296,7 @@ export function ApiKeys() {
         }
       />
 
-      {apiKeysError && (
+      {apiKeysError && apiKeys.length > 0 && (
         <div className="error-banner" role="alert">
           <AlertCircle size={20} />
           <span className="error-banner-text">{t('dashboard.loadError')}</span>
@@ -443,7 +422,25 @@ export function ApiKeys() {
 
       <div className="api-keys-content">
         <div className="keys-table-container">
-          {apiKeys.length === 0 ? (
+          {apiKeysError && apiKeys.length === 0 ? (
+            // A failed read is not an empty list: an admin key restricted to sessions always gets 403
+            // here (the route needs an unscoped key), and "No API keys created" would read as a gateway
+            // with no keys at all.
+            <div className="empty-table-state" role="alert">
+              <AlertCircle size={48} strokeWidth={1} />
+              {(apiKeysError as { status?: number }).status === 403 ? (
+                <>
+                  <h3>{t('apiKeys.empty.forbiddenTitle')}</h3>
+                  <p>{t('apiKeys.empty.forbiddenDesc')}</p>
+                </>
+              ) : (
+                <>
+                  <h3>{t('apiKeys.empty.loadErrorTitle')}</h3>
+                  <p>{apiKeysError.message}</p>
+                </>
+              )}
+            </div>
+          ) : apiKeys.length === 0 ? (
             <div className="empty-table-state">
               <KeyRound size={48} strokeWidth={1} />
               <h3>{t('apiKeys.empty.title')}</h3>

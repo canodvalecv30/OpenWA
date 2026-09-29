@@ -7,11 +7,12 @@
   },
   "common": {
     "appName": "OpenWA",
+    "updateAvailable": "الإصدار v{{version}} متاح",
     "loading": "جارٍ التحميل...",
     "cancel": "إلغاء",
     "delete": "حذف",
     "create": "إنشاء",
-    "save": "Save",
+    "save": "حفظ",
     "close": "إغلاق",
     "showApiKey": "إظهار مفتاح API",
     "hideApiKey": "إخفاء مفتاح API",
@@ -31,7 +32,17 @@
     "never": "أبداً",
     "justNow": "الآن",
     "minAgo": "منذ {{count}} دقيقة",
+    "minAgo_other": "منذ {{count}} دقيقة",
+    "minAgo_two": "منذ دقيقتين",
+    "minAgo_few": "منذ {{count}} دقائق",
+    "minAgo_many": "منذ {{count}} دقيقة",
+    "minAgo_zero": "منذ {{count}} دقيقة",
     "hoursAgo": "منذ {{count}} ساعة",
+    "hoursAgo_other": "منذ {{count}} ساعة",
+    "hoursAgo_two": "منذ ساعتين",
+    "hoursAgo_few": "منذ {{count}} ساعات",
+    "hoursAgo_many": "منذ {{count}} ساعة",
+    "hoursAgo_zero": "منذ {{count}} ساعة",
     "optional": "اختياري",
     "language": "اللغة",
     "back": "رجوع",
@@ -59,7 +70,7 @@
     "sessions": "الجلسات",
     "chats": "المحادثات",
     "webhooks": "الويب هوك",
-    "templates": "Templates",
+    "templates": "القوالب",
     "apiKeys": "مفاتيح API",
     "messageTester": "اختبار الرسائل",
     "infrastructure": "البنية التحتية",
@@ -90,6 +101,7 @@
     "unreadBadge_two": "{{count}} رسالتان غير مقروءتان",
     "unreadBadge_few": "{{count}} رسائل غير مقروءة",
     "unreadBadge_many": "{{count}} رسالة غير مقروءة",
+    "unreadBadge_zero": "{{count}} رسالة غير مقروءة",
     "loadingMessages": "جارٍ تحميل الرسائل...",
     "loadingOlderMessages": "جارٍ تحميل الرسائل الأقدم...",
     "loadOlderMessagesError": "تعذر تحميل الرسائل الأقدم. مرر لأعلى للمحاولة مرة أخرى.",
@@ -101,6 +113,25 @@
       "delete": "حذف الرسالة"
     },
     "replyingTo": "الرد على {{name}}",
+    "messageType": {
+      "text": "نص",
+      "image": "صورة",
+      "video": "فيديو",
+      "audio": "صوت",
+      "voice": "رسالة صوتية",
+      "document": "مستند",
+      "sticker": "ملصق",
+      "location": "موقع",
+      "contact": "جهة اتصال",
+      "poll": "استطلاع",
+      "call": "مكالمة",
+      "revoked": "رسالة محذوفة",
+      "order": "طلب",
+      "product": "منتج",
+      "masked": "رسالة مخفية",
+      "unknown": "رسالة",
+      "unknownType": "نوع غير معروف"
+    },
     "you": "أنت",
     "youPrefix": "أنت: ",
     "yesterday": "أمس",
@@ -116,13 +147,16 @@
     "groupSubtitle": "مجموعة",
     "privateContactSubtitle": "جهة اتصال خاصة",
     "deleteConfirm": "حذف هذه الرسالة للجميع؟",
+    "promptButtons": "خيارات الرسالة",
     "messageDeleted": "🚫 تم حذف هذه الرسالة",
     "messageMasked": "🔒 أخفته واتساب على الأجهزة المرتبطة — تحقق منه على هاتفك الأساسي",
     "kind": {
       "group": "مجموعة",
       "channel": "قناة",
       "status": "الحالة",
-      "broadcast": "بث"
+      "broadcast": "بث",
+      "individual": "فردي",
+      "unknown": "غير معروف"
     },
     "tab": {
       "chats": "المحادثات",
@@ -136,7 +170,7 @@
       "itemCount_two": "تحديثان",
       "itemCount_few": "{{count}} تحديثات",
       "itemCount_many": "{{count}} تحديثًا",
-      "itemCount_other": "{{count}} تحديثات",
+      "itemCount_other": "{{count}} تحديث",
       "empty": "لا توجد جهات اتصال لديها حالة نشطة.",
       "loadError": "تعذر تحميل الحالات.",
       "mediaUnavailable": "الوسائط غير متوفرة",
@@ -164,7 +198,8 @@
       "subscribers_other": "{{count}} مشترك",
       "subscribers_two": "{{count}} مشتركان",
       "subscribers_few": "{{count}} مشتركين",
-      "subscribers_many": "{{count}} مشترك"
+      "subscribers_many": "{{count}} مشترك",
+      "subscribers_zero": "{{count}} مشترك"
     },
     "errors": {
       "loadSessions": "فشل تحميل الجلسات",
@@ -173,7 +208,9 @@
       "send": "فشل إرسال الرسالة",
       "react": "فشل التفاعل مع الرسالة",
       "delete": "فشل حذف الرسالة",
-      "fileTooLarge": "الملف كبير جدًا (الحد الأقصى 18 ميغابايت)"
+      "clickButton": "فشل النقر على الزر",
+      "fileTooLarge": "الملف كبير جدًا (الحد الأقصى 18 ميغابايت)",
+      "searchHitSessionNotReady": "جلسة هذه الرسالة غير متصلة"
     },
     "loadMessagesError": "تعذّر تحميل الرسائل. تحقّق من سجلّات الخادم.",
     "messageStatus": {
@@ -224,6 +261,7 @@
     "noSessions": "لم يتم العثور على جلسات. أنشئ جلسة للبدء.",
     "view": "عرض",
     "disconnect": "قطع الاتصال",
+    "disconnectFailed": "تعذر قطع اتصال الجلسة",
     "errorPrefix": "خطأ: {{message}}",
     "loadError": "فشل تحميل البيانات",
     "charts": {
@@ -234,6 +272,7 @@
         "30d": "30 يومًا"
       },
       "overTime": "الرسائل عبر الزمن",
+      "overTimeUtcDays": "الرسائل عبر الزمن (الأيام بتوقيت UTC)",
       "byType": "الرسائل حسب النوع",
       "topChats": "أبرز المحادثات",
       "sent": "المُرسَلة",
@@ -282,7 +321,8 @@
       "successTitle": "تم إنشاء الجلسة",
       "successDesc": "تم إنشاء الجلسة \"{{name}}\" بنجاح",
       "errorTitle": "فشل الإنشاء",
-      "errorDefault": "فشل إنشاء الجلسة"
+      "errorDefault": "فشل إنشاء الجلسة",
+      "tooShort": "يجب أن يتكون الاسم من 3 أحرف على الأقل."
     },
     "delete": {
       "title": "تأكيد الحذف",
@@ -316,28 +356,28 @@
       "created": "تاريخ الإنشاء",
       "lastActive": "آخر نشاط",
       "autoRejectCalls": "الرفض التلقائي للمكالمات",
-      "autoRejectCallsHint": "يتم رفض المكالمات الواردة فور رنينها. ولا يزال الويب هوك call.received يُرسل قبل ذلك. يسري على المكالمة التالية — دون الحاجة إلى إعادة التشغيل. مع محرك Baileys فقط: لا يستطيع whatsapp-web.js رفض المكالمات."
+      "autoRejectCallsHint": "يتم رفض المكالمات الواردة فور رنينها. ولا يزال الويب هوك call.received يُرسل قبل ذلك. يسري على المكالمة التالية, دون الحاجة إلى إعادة التشغيل. مع محرك Baileys فقط: لا يستطيع whatsapp-web.js رفض المكالمات."
     },
     "proxy": {
-      "title": "Proxy Configuration",
-      "status": "Current",
-      "enabled": "Use proxy",
-      "url": "Proxy URL",
+      "title": "تهيئة الوكيل",
+      "status": "الحالي",
+      "enabled": "استخدام وكيل",
+      "url": "عنوان URL للوكيل",
       "urlPlaceholder": "http://user:pass@proxy.example.com:8080",
-      "urlKeepPlaceholder": "Enter new URL to replace {{host}} (credentials not shown)",
+      "urlKeepPlaceholder": "أدخل عنوان URL جديدًا ليحل محل {{host}} (لا تُعرض بيانات الاعتماد)",
       "configured": "{{host}} ({{type}})",
-      "noProxy": "No proxy configured",
-      "hasCredentials": "Credentials are stored but not shown. Enter a full URL to change them.",
-      "hint": "Changes apply on the next session start, not to a running connection. The proxy must be real and reachable — an unreachable value blocks QR delivery and start returns 504.",
-      "createHint": "Only needed when your network cannot reach WhatsApp directly. Must be a real, reachable proxy.",
-      "invalidUrl": "Enter a valid http, https, socks4, or socks5 proxy URL.",
-      "saveSuccessTitle": "Proxy Saved",
-      "saveSuccess": "Proxy settings saved. They apply on the next session start.",
-      "saveError": "Failed to save proxy settings"
+      "noProxy": "لم تتم تهيئة أي وكيل",
+      "hasCredentials": "بيانات الاعتماد محفوظة لكنها لا تُعرض. أدخل عنوان URL كاملًا لتغييرها.",
+      "hint": "تُطبَّق التغييرات عند البدء التالي للجلسة، لا على اتصال قيد التشغيل. يجب أن يكون الوكيل حقيقيًا ويمكن الوصول إليه: القيمة التي يتعذر الوصول إليها تمنع وصول رمز QR ويُرجع البدء الخطأ 504.",
+      "createHint": "مطلوب فقط عندما لا تستطيع شبكتك الوصول إلى WhatsApp مباشرةً. يجب أن يكون وكيلًا حقيقيًا يمكن الوصول إليه.",
+      "invalidUrl": "أدخل عنوان URL صالحًا لوكيل http أو https أو socks4 أو socks5.",
+      "saveSuccessTitle": "تم حفظ الوكيل",
+      "saveSuccess": "تم حفظ إعدادات الوكيل. تُطبَّق عند البدء التالي للجلسة.",
+      "saveError": "فشل حفظ إعدادات الوكيل"
     },
     "actions": {
       "view": "عرض",
-      "proxy": "Proxy",
+      "proxy": "الوكيل",
       "start": "بدء",
       "stop": "إيقاف",
       "reconnect": "إعادة الاتصال",
@@ -353,7 +393,8 @@
       "actionRequiredTitle": "إجراء مطلوب",
       "actionRequiredDesc": "تتطلب هذه الجلسة انتباهك. افتح الجلسة لمعرفة ما يجب فعله.",
       "failedTitle": "فشلت الجلسة",
-      "failedDesc": "فشل بدء جلسة واتساب. افتح الجلسة لمعرفة السبب."
+      "failedDesc": "فشل بدء جلسة واتساب. افتح الجلسة لمعرفة السبب.",
+      "stopFailedTitle": "فشل الإيقاف"
     },
     "card": {
       "phone": "الهاتف",
@@ -452,7 +493,7 @@
         "body": "نص الرسالة",
         "type": "نوع الرسالة",
         "isGroup": "محادثة جماعية",
-        "kind": "Chat kind",
+        "kind": "نوع المحادثة",
         "fromMe": "مُرسَلة مني",
         "hasMedia": "تحتوي على وسائط",
         "mentions": "الإشارات"
@@ -476,7 +517,10 @@
     },
     "empty": {
       "title": "لا توجد ويب هوك مُهيّأة",
-      "description": "أضف ويب هوك لتلقي إشعارات فورية بالأحداث"
+      "description": "أضف ويب هوك لتلقي إشعارات فورية بالأحداث",
+      "loadErrorTitle": "تعذر تحميل الويب هوك",
+      "forbiddenTitle": "لا يوجد وصول إلى الويب هوك",
+      "forbiddenDesc": "يتطلب الويب هوك مفتاح API بدور المشغل أو المسؤول."
     },
     "toasts": {
       "created": "تم إنشاء الويب هوك بنجاح",
@@ -497,9 +541,27 @@
     "eventDescriptions": {
       "message.received": "عند استقبال رسالة",
       "message.sent": "عند إرسال رسالة",
-      "session.connected": "عند اتصال جلسة",
-      "session.disconnected": "عند انقطاع جلسة",
+      "message.ack": "عند تغيّر حالة تسليم رسالة أو قراءتها",
+      "message.failed": "عند فشل تسليم رسالة صادرة",
+      "message.revoked": "عند حذف رسالة لدى الجميع",
+      "message.reaction": "عند إضافة تفاعل أو تغييره أو إزالته",
+      "message.edited": "عند تعديل رسالة",
+      "session.status": "عند تغيّر حالة جلسة",
       "session.qr": "عند إنشاء رمز QR",
+      "session.authenticated": "عند اقتران جلسة وجاهزيتها",
+      "session.disconnected": "عند انقطاع جلسة",
+      "session.reconnect_loop": "عند استمرار فشل إعادة اتصال جلسة",
+      "session.restriction": "عندما يقيّد WhatsApp الحساب أو يرفع قيدًا عنه",
+      "presence.update": "عندما تصبح محادثة مشترك فيها متصلة أو تكتب أو تغادر",
+      "group.join": "عند انضمام مشاركين إلى مجموعة أو إضافتهم إليها",
+      "group.leave": "عند مغادرة مشاركين مجموعة أو إزالتهم منها",
+      "group.update": "عند تغيّر اسم مجموعة أو وصفها أو إعداداتها",
+      "group.join_request": "عندما يطلب شخص الانضمام إلى مجموعة تديرها هذه الجلسة",
+      "call.received": "عندما يبدأ رنين مكالمة واردة",
+      "call.accepted": "عند الرد على مكالمة",
+      "call.rejected": "عند رفض مكالمة",
+      "call.missed": "عندما لا يتم الرد على مكالمة",
+      "status.received": "عندما تنشر جهة اتصال حالة",
       "all": "كل الأحداث"
     }
   },
@@ -586,7 +648,10 @@
     },
     "empty": {
       "title": "لا توجد مفاتيح API",
-      "description": "أنشئ مفتاح API للمصادقة على طلباتك"
+      "description": "أنشئ مفتاح API للمصادقة على طلباتك",
+      "loadErrorTitle": "تعذر تحميل مفاتيح API",
+      "forbiddenTitle": "لا يوجد وصول إلى مفاتيح API",
+      "forbiddenDesc": "تتطلب إدارة مفاتيح API مفتاح مسؤول غير مقيد بجلسات محددة."
     },
     "confirm": {
       "deleteTitle": "حذف مفتاح API",
@@ -639,7 +704,12 @@
       "filteredTitle": "لا نتائج مطابقة في هذه الصفحة",
       "filteredDescription": "يبحث حقل البحث في الصفحة الحالية فقط. امسحه أو تنقّل بين الصفحات أو استخدم مرشح الخطورة للتصفية من الخادم.",
       "filteredServerDescription": "لا سجلات تطابق هذه المرشحات. عدّل مرشح الخطورة لتوسيع البحث."
-    }
+    },
+    "exportFailed": "تعذّر تصدير سجل التدقيق",
+    "exportTruncated": "يغطي التصدير أحدث {{rows}} إدخال فقط. ضيّق مرشح الخطورة لتصدير الإدخالات الأقدم.",
+    "exportThrottled": "يغطي التصدير أحدث {{rows}} إدخال فقط لأن البوابة تحدّ من قراءات سجل التدقيق. انتظر دقيقة ثم أعد التصدير.",
+    "exportNoMatches": "لا توجد إدخالات في سجل التدقيق تطابق البحث، لذا لم يُصدَّر شيء.",
+    "exportNoMatchesTruncated": "لا يطابق البحث أيًّا من أحدث {{rows}} إدخال تم فحصها، لذا لم يُصدَّر شيء. لم يشمل البحث الإدخالات الأقدم."
   },
   "messageTester": {
     "title": "اختبار الرسائل",
@@ -657,6 +727,12 @@
     "loadingGroups": "جارٍ تحميل المجموعات...",
     "noGroupsFound": "لم يتم العثور على مجموعات",
     "selectGroupHint": "اختر مجموعة من واتساب الخاص بك",
+    "selectAllGroups": "تحديد الكل",
+    "selectMatchingGroups": "تحديد النتائج",
+    "clearGroupSelection": "مسح",
+    "groupsSelectedCount": "المحدد: {{count}}/{{max}}",
+    "noGroupsMatch": "لا توجد مجموعات تطابق بحثك",
+    "forwardUsesFirstGroup": "تستخدم إعادة التوجيه أول مجموعة محددة فقط، كمحادثة يُعاد التوجيه منها.",
     "phoneHint": "استخدم الصيغة الدولية بدون مسافات",
     "messageType": "نوع الرسالة",
     "types": {
@@ -714,17 +790,29 @@
     "bulkRecipientsCount": "المستلمون: {{count}}",
     "bulkDelay": "التأخير بين الرسائل (مللي ثانية)",
     "bulkDelayHint": "1000–60000 مللي ثانية (الافتراضي 3000)",
+    "bulkMediaKind": "إرسال كـ",
+    "bulkMediaHint": "عند إرفاق ملف تصبح الرسالة تعليقًا عليه. يُرسل الملف المختار داخل الطلب نفسه، لذا تحتاج الملفات الكبيرة لعدد كبير من المستلمين إلى رابط وسائط عام بدلًا منه.",
+    "bulkMediaTooLarge": "هذا الملف كبير جدًا لإرساله مضمَّنًا إلى {{count}} مستلمين: بهذا العدد يمكن أن يصل حجم الملف إلى {{size}} كحد أقصى. استخدم رابط وسائط عامًا بدلًا منه، أو أرسل إلى عدد أقل من المستلمين.",
+    "bulkMediaUrlInvalid": "استخدم عنوانًا كاملًا يبدأ بـ http:// أو https://، مثل https://example.com/file.pdf.",
+    "bulkCaptionTooLong": "عند إرفاق ملف تُرسل الرسالة كتعليق عليه، والحد الأقصى للتعليق {{max}} حرفًا (الآن {{count}}).",
+    "bulkAudioNoCaption": "يُرسَل الصوت بدون تعليق، لذا لن يُرسَل هذا النص. امسح الرسالة أو اختر نوعًا آخر.",
     "send": "إرسال الرسالة",
     "sending": "جارٍ الإرسال...",
+    "sendingProgress": "جارٍ الإرسال {{current}}/{{total}}...",
     "viewOnly": "للعرض فقط",
     "responseEmpty": "أرسل رسالة لرؤية استجابة API",
     "successLabel": "نجاح",
     "failedLabel": "فشل",
+    "groupsSentSummary": "تم إرسال {{sent}}/{{total}}",
+    "groupSendCancelled": "{{count}}، أُلغيت",
+    "groupSendStopped": "{{count}}، توقف بعد HTTP {{status}}",
     "response": {
       "timestamp": "الوقت",
       "messageId": "معرّف الرسالة",
       "batchId": "معرّف الدفعة",
-      "error": "خطأ"
+      "error": "خطأ",
+      "groups": "المجموعات",
+      "notSent": "لم تُرسل"
     },
     "sendFailed": "فشل إرسال الرسالة",
     "notOnWhatsApp": "هذا الرقم غير مسجَّل على واتساب",
@@ -839,6 +927,7 @@
       "dontClose": "يرجى عدم إغلاق هذه النافذة",
       "successMsg": "الخادم يعمل مرة أخرى! ستُحدَّث الصفحة تلقائياً.",
       "errorMsg": "لم يستجب الخادم بعد 30 ثانية. يرجى مراجعة سجلات Docker وإعادة التشغيل يدوياً.",
+      "outcomeUnknown": "انتهت مهلة الوكيل قبل أن يستجيب الخادم. قد تكون إعادة التشغيل لا تزال جارية؛ أعد تحميل الصفحة بعد دقيقة للتحقق.",
       "reload": "إعادة تحميل الصفحة"
     },
     "toasts": {
@@ -856,15 +945,16 @@
       "export": "تصدير البيانات",
       "import": "استيراد البيانات",
       "exportFailed": "تعذّر تصدير البيانات",
-      "exportPartialTitle": "Backup is missing some media",
-      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
+      "exportPartialTitle": "تنقص النسخة الاحتياطية بعض الوسائط",
+      "exportPartial": "مرفقات تجاوزت حد وسائط التصدير: {{count}}. حُفظت كعناصر نائبة. تُستعاد الرسائل، أما وسائطها فلا.",
       "importFailed": "تعذّر استيراد البيانات",
       "importOk": "تمّ استيراد البيانات",
       "importConfirm": "سيؤدّي الاستيراد إلى استبدال جميع البيانات الحالية بالنسخة الاحتياطية ({{rows}} صفًّا). لا يمكن التراجع عن هذا الإجراء. هل تريد المتابعة؟",
       "invalidFile": "هذا الملفّ ليس نسخة احتياطية صالحة لبيانات OpenWA.",
       "importTooLarge": "النسخة الاحتياطية أكبر من حدّ الطلب. زِد قيمة BODY_SIZE_LIMIT على الخادم ثم أعد المحاولة."
     },
-    "statusLoadError": "تعذّر تحميل حالة البنية التحتية الحالية. حدّث الصفحة لإعادة المحاولة."
+    "statusLoadError": "تعذّر تحميل حالة البنية التحتية الحالية. حدّث الصفحة لإعادة المحاولة.",
+    "configLoadError": "تعذّر تحميل الإعدادات المحفوظة، لذا لا يمكن تعديلها هنا. حدّث الصفحة لإعادة المحاولة."
   },
   "plugins": {
     "title": "الإضافات",
@@ -872,6 +962,19 @@
     "refresh": "تحديث",
     "builtIn": "مدمج",
     "noDescription": "لا يوجد وصف متاح",
+    "statuses": {
+      "installed": "مُثبَّتة",
+      "enabled": "مُمكَّنة",
+      "disabled": "مُعطَّلة",
+      "error": "خطأ"
+    },
+    "types": {
+      "engine": "محرك",
+      "storage": "تخزين",
+      "queue": "قائمة",
+      "auth": "مصادقة",
+      "extension": "امتداد"
+    },
     "enable": "تمكين",
     "disable": "تعطيل",
     "healthCheck": "فحص الصحة",
@@ -946,7 +1049,6 @@
       "title": "المثيلات",
       "description": "أنشئ مثيلات لكل حساب لهذا التكامل. كل مثيل له مفتاح توقيع سري وعنوان دخول خاص به.",
       "create": "إنشاء مثيل",
-      "save": "Save",
       "empty": "لا توجد مثيلات بعد. أنشئ مثيلًا للحصول على عنوان دخول ومفتاح سري.",
       "loadError": "فشل تحميل المثيلات.",
       "allSessions": "جميع الجلسات",
@@ -970,7 +1072,8 @@
         "title": "تم إنشاء المثيل",
         "hint": "انسخ المفتاح السري الآن — لن يُعرض مرة أخرى.",
         "secret": "مفتاح التوقيع السري",
-        "ingressUrls": "عنوان (عناوين) الدخول"
+        "ingressUrls": "عنوان (عناوين) الدخول",
+        "verifyToken": "رمز التحقق"
       },
       "regenerate": {
         "title": "إعادة إنشاء المفتاح السري",

@@ -67,10 +67,14 @@ export class GroupService {
    */
   async createGroup(sessionId: string, name: string, participants: string[]) {
     this.assertAddressableParticipants(participants);
-    const coldCount = await this.pacing.assertReachoutAllowed(sessionId, participants);
-    const group = await this.getEngine(sessionId).createGroup(name, participants);
-    this.pacing.chargeGroupReachouts(sessionId, coldCount);
-    return group;
+    const reservation = await this.pacing.assertReachoutAllowed(sessionId, participants);
+    try {
+      return await this.getEngine(sessionId).createGroup(name, participants);
+    } catch (error) {
+      // Nobody was invited, so the reserved budget goes back (whatsapp-web.js always 501s here).
+      this.pacing.refundGroupReachouts(sessionId, reservation);
+      throw error;
+    }
   }
 
   /**
@@ -80,10 +84,15 @@ export class GroupService {
    */
   async addParticipants(sessionId: string, groupId: string, participants: string[]) {
     this.assertAddressableParticipants(participants);
-    const coldCount = await this.pacing.assertReachoutAllowed(sessionId, participants);
-    const result = await this.getEngine(sessionId).addParticipants(groupId, participants);
-    this.pacing.chargeGroupReachouts(sessionId, coldCount);
-    return result;
+    const reservation = await this.pacing.assertReachoutAllowed(sessionId, participants);
+    try {
+      return await this.getEngine(sessionId).addParticipants(groupId, participants);
+    } catch (error) {
+      // A refused add contacted nobody. Per-participant failures an engine reports without throwing
+      // stay charged: the batch was attempted.
+      this.pacing.refundGroupReachouts(sessionId, reservation);
+      throw error;
+    }
   }
 
   removeParticipants(sessionId: string, groupId: string, participants: string[]) {

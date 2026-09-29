@@ -5,7 +5,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
 import { EngineFactory } from '../../engine/engine.factory';
 import { EngineRegistry } from '../../engine/engine-registry.service';
-import { decideReconnect, clampNumber, type ReconnectAttemptState } from './reconnect-policy';
+import { decideReconnect, clampNumber, STABLE_READY_MS, type ReconnectAttemptState } from './reconnect-policy';
 import { SessionLivenessWatchdog } from './session-liveness-watchdog.service';
 import { MessageProjector } from './message-projector.service';
 import { SessionErrorStore } from './session-error-store.service';
@@ -56,6 +56,8 @@ export interface ReconnectState extends ReconnectAttemptState {
   initInFlight?: boolean;
   /** The failure parked during that window, applied or dropped by executeReconnect once init settles. */
   parkedFailure?: { run: () => void; terminal: boolean };
+  /** When the session last reached READY; consumed by the next scheduleReconnect (see STABLE_READY_MS). */
+  readyAt?: number;
 }
 
 // Reconnect-backoff bounds. An OPERATOR-supplied session.config feeds this math, so the values
@@ -68,17 +70,20 @@ const RECONNECT_MAX_ATTEMPTS_CAP = 20;
 /** Coerce + clamp the untyped session.config reconnect knobs to finite, bounded values. Defaults are
  *  a 5000ms base delay and UNLIMITED attempts (`Infinity`): a long-lived session must keep retrying
  *  (the backoff parks at the 5-minute cap) instead of dying permanently after ~2.5 minutes. An EXPLICIT
- *  `maxReconnectAttempts: 0` (disable) is preserved, and 1..20 clamps as before. */
+ *  `maxReconnectAttempts: 0` (disable) is preserved, and 1..20 clamps as before; null means unset. */
 export function resolveReconnectConfig(
   config: { maxReconnectAttempts?: unknown; reconnectBaseDelay?: unknown } | null,
 ): { maxAttempts: number; baseDelay: number } {
-  const baseRaw = Number(config?.reconnectBaseDelay);
+  // null, undefined and a blank string mean "unset" (GET /config reports the unlimited default as null), not
+  // the 0 that Number() makes of them; a numeric string a create body stored still coerces.
+  const toNumber = (v: unknown): number => (v == null || (typeof v === 'string' && v.trim() === '') ? NaN : Number(v));
+  const baseRaw = toNumber(config?.reconnectBaseDelay);
   const baseDelay = clampNumber(
     Number.isFinite(baseRaw) ? baseRaw : 5000,
     RECONNECT_BASE_DELAY_MIN_MS,
     RECONNECT_BASE_DELAY_MAX_MS,
   );
-  const attemptsRaw = Number(config?.maxReconnectAttempts);
+  const attemptsRaw = toNumber(config?.maxReconnectAttempts);
   const maxAttempts = Number.isFinite(attemptsRaw)
     ? Math.floor(clampNumber(attemptsRaw, 0, RECONNECT_MAX_ATTEMPTS_CAP))
     : Number.POSITIVE_INFINITY;
@@ -514,13 +519,16 @@ export class SessionEngineLifecycle {
   isEngineActive(id: string): boolean {
     if (this.engines.has(id) || this.initializingSessions.has(id)) return true;
     // Reconnect state counts only while an attempt is actually pending: a timer armed by
-    // scheduleReconnect, or one that has fired and is running executeReconnect (which leaves the
-    // spent handle in place and has already counted its attempt). The entry start() creates up
+    // scheduleReconnect, or one that has fired and is running executeReconnect (which has already
+    // counted its attempt). The entry start() creates up
     // front — {attempts: 0, timer: null} — is dormant: a start that then failed leaves nothing
     // that will ever re-register an engine, and treating it as liveness would pin the claim to
-    // this node forever.
+    // this node forever. So is a state whose last event was READY: its streak survives for the
+    // stability window, but nothing is pending until the next drop arms a timer.
     const reconnect = this.reconnectStates.get(id);
-    return reconnect != null && (reconnect.timer !== null || reconnect.attempts > 0);
+    return (
+      reconnect != null && (reconnect.timer !== null || (reconnect.attempts > 0 && reconnect.readyAt === undefined))
+    );
   }
 
   // --- Leaf-event delegates (SessionEngineLeafEvents) ------------------------------------------
@@ -815,10 +823,23 @@ export class SessionEngineLifecycle {
       },
     );
 
-    // Reset reconnect attempts and clear any stale failure reason on success
+    // Clear any stale failure reason on success. READY also ends the pending attempt: a reconnect
+    // still armed (the watchdog reported this engine, then it recovered on its own) would tear the
+    // recovered engine down. Only the timer goes; the state keeps the session's reconnect settings
+    // for its next drop. This READY does not reset the attempt streak: the next scheduleReconnect resets it
+    // only if this READY held for STABLE_READY_MS, so a session that flaps keeps backing off.
+    // Baileys fires READY again on every internal socket reopen, with no drop reported in between:
+    // a previous READY that already held the window ends the streak here, before it is overwritten.
     const reconnectState = this.reconnectStates.get(id);
     if (reconnectState) {
-      reconnectState.attempts = 0;
+      if (reconnectState.readyAt !== undefined && Date.now() - reconnectState.readyAt >= STABLE_READY_MS) {
+        reconnectState.attempts = 0;
+      }
+      reconnectState.readyAt = Date.now();
+      if (reconnectState.timer) {
+        clearTimeout(reconnectState.timer);
+        reconnectState.timer = null;
+      }
     }
     // A fresh READY stretch starts the watchdog's failure budget clean too.
     this.watchdog.clear(id);
@@ -840,6 +861,13 @@ export class SessionEngineLifecycle {
       }),
     );
 
+    // Re-apply a prior PUT /presence once per open. Baileys' markOnlineOnConnect has already
+    // broadcast `available` during this handshake; without this, an `available: false` the caller
+    // published would not survive a transient reconnect inside the same engine. A replaced engine
+    // cleared the preference in initializeEngine, so this is a no-op there. Not awaited — on
+    // whatsapp-web.js the call is a page evaluate, and READY must not wait on it.
+    this.reapplyOwnPresence(id);
+
     // Best-effort snapshot of the account's own contacts' currently-active statuses. Live status
     // posts arrive through onMessage below; this just backfills what was already up before we
     // connected. Not awaited — onReady must not block on it.
@@ -851,6 +879,25 @@ export class SessionEngineLifecycle {
         action: 'status_seed_on_ready_disabled',
       });
     }
+  }
+
+  /**
+   * Re-publish the last successful PUT /presence for this engine. No-op when the caller never set
+   * one, or the engine is already gone. A failure is logged and swallowed: presence must not turn
+   * a successful connect into an error, and the stored preference stays for the next open.
+   */
+  private reapplyOwnPresence(id: string): void {
+    const desired = this.presence.getOwnIntent(id);
+    if (desired === undefined) return;
+    const engine = this.engines.get(id);
+    if (!engine) return;
+    void engine.setOnlinePresence(desired).catch(error => {
+      this.logger.warn(`Could not re-apply own presence for session ${id} (best-effort)`, {
+        sessionId: id,
+        error: error instanceof Error ? error.message : String(error),
+        action: 'own_presence_reapply_failed',
+      });
+    });
   }
 
   /**
@@ -1006,6 +1053,19 @@ export class SessionEngineLifecycle {
 
     const state = this.reconnectStates.get(id);
     if (!state) return;
+    // A reconnect is already armed for this episode. Another disconnect report (the liveness watchdog
+    // re-probes a wedged engine that still says READY) must neither consume an attempt nor push the
+    // pending one back: re-arming each time kept a long base delay from ever firing. Also keeps two
+    // back-to-back disconnects from stacking two timers and double-initializing the engine.
+    if (state.timer) return;
+
+    // Consume the last READY once. A READY that held for the stability window ended the episode, so
+    // this drop starts a fresh streak; a shorter one is the same flap and keeps the streak growing.
+    // Cleared either way, so a later re-init failure inside this episode never resets it.
+    if (state.readyAt !== undefined) {
+      if (Date.now() - state.readyAt >= STABLE_READY_MS) state.attempts = 0;
+      state.readyAt = undefined;
+    }
 
     // All the backoff rules (budget, exponential delay, loop cadence) live in the
     // pure policy; this method only applies the effects the decision calls for.
@@ -1080,10 +1140,9 @@ export class SessionEngineLifecycle {
       });
     }
 
-    // Clear any timer a prior scheduleReconnect left pending so two back-to-back disconnects
-    // don't stack two timers (which would run executeReconnect twice and double-init the engine).
-    if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
+      // Spent: the attempt's own failure path schedules the next one through the guard above.
+      state.timer = null;
       void this.executeReconnect(id, session, state);
     }, delay);
   }
@@ -1130,7 +1189,7 @@ export class SessionEngineLifecycle {
   private async executeReconnect(id: string, session: Session, state: ReconnectState): Promise<void> {
     // The session may have been stopped/deleted before this fired — don't resurrect it.
     if (this.stoppingSessions.has(id)) {
-      // Drop the spent state too: its non-null timer would otherwise keep isEngineActive() pinning the lease.
+      // Drop the spent state too: its attempt count would otherwise keep isEngineActive() pinning the lease.
       if (this.reconnectStates.get(id) === state) this.cancelReconnect(id);
       return;
     }

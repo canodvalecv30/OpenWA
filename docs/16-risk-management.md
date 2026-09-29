@@ -126,8 +126,8 @@ Opt-in: `SEND_PACING_ENABLED=true` adds a per-UTC-day send cap whose allowance g
 session's age (`SEND_PACING_WARMUP_SCHEDULE`), a separate cap on new conversations
 (`SEND_PACING_COLD_DAILY_CAP`) and a consecutive-failure breaker — see
 [06 §Send pacing](./06-api-specification.md). It is **off by default**, and it counts only sends that
-write a `messages` row, so status posts, catalog sends and message edits are checked against the cap
-without counting into it.
+write a `messages` row, so status posts and message edits are checked against the cap without
+counting into it.
 
 Still not implemented: there are no per-minute or per-hour caps and no media-specific delay. With
 pacing off — the default — the guidelines below are operator discipline, not something the gateway

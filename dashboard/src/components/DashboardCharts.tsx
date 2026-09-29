@@ -17,14 +17,18 @@ import {
 } from 'recharts';
 import { BarChart3 } from 'lucide-react';
 import { useStatsMessagesQuery } from '../hooks/queries';
-import type { StatsPeriod } from '../services/api';
+import type { MessageType, StatsPeriod } from '../services/api';
+import { formatTick } from '../utils/chartTicks';
+import { messageTypeLabelKey } from '../utils/enumLabels';
 import './DashboardCharts.css';
 
 const PERIODS: StatsPeriod[] = ['24h', '7d', '30d'];
 
-// Stable, distinct color per message type (recharts needs literal colors). Keyed by type name —
-// not array index — so two types can never share a color, and a slice keeps its color even when the
-// set of present types changes between requests. Covers every type mapMessageType() can emit.
+// Stable, distinct color per message type (recharts needs literal colors). Keyed by type name, not
+// array index, so a slice keeps its color even when the set of present types changes between requests.
+// Covers every MESSAGE_TYPES value (the `satisfies` fails the build when one is missing). No color
+// repeats here or in the fallback palette, so no known type shares its color, not even with a type
+// that falls back.
 const TYPE_COLORS: Record<string, string> = {
   text: '#25d366',
   image: '#3b82f6',
@@ -36,23 +40,21 @@ const TYPE_COLORS: Record<string, string> = {
   sticker: '#ef4444',
   location: '#84cc16',
   poll: '#6366f1',
+  call: '#0ea5e9',
   revoked: '#f43f5e',
+  order: '#f97316',
+  product: '#d946ef',
   masked: '#8b5cf6',
   unknown: '#64748b',
-};
+} satisfies Record<MessageType, string>;
 
-// Deterministic fallback for any unmapped type, so its color is stable across renders.
-const FALLBACK_COLORS = ['#0ea5e9', '#d946ef', '#f97316', '#10b981', '#6366f1', '#eab308'];
+// Deterministic fallback for a type this build does not know yet, so its color is stable across renders.
+const FALLBACK_COLORS = ['#10b981', '#eab308'];
 function colorForType(name: string): string {
   if (TYPE_COLORS[name]) return TYPE_COLORS[name];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
   return FALLBACK_COLORS[Math.abs(hash) % FALLBACK_COLORS.length];
-}
-
-// '2026-06-24 14:00:00' (hour buckets) → '14:00'; '2026-06-24' (day buckets) → '06-24'.
-function formatTick(ts: string, period: StatsPeriod): string {
-  return period === '24h' ? ts.slice(11, 16) : ts.slice(5);
 }
 
 // WhatsApp ids look like '62812...@c.us' / '...@g.us' / '...@lid' — show just the local part.
@@ -72,8 +74,9 @@ export function DashboardCharts() {
   if (isError && forbidden) return null;
 
   const timeSeries = (data?.timeSeries ?? []).map(p => ({ ...p, label: formatTick(p.timestamp, period) }));
+  // `name` keys the slice color; `label` is what the legend and tooltip show.
   const byType = Object.entries(data?.byType ?? {})
-    .map(([name, value]) => ({ name, value }))
+    .map(([name, value]) => ({ name, label: t(messageTypeLabelKey(name), { defaultValue: name }), value }))
     .sort((a, b) => b.value - a.value);
   const topChats = (data?.topChats ?? [])
     .slice(0, 8)
@@ -111,7 +114,7 @@ export function DashboardCharts() {
       ) : (
         <div className="charts-grid">
           <div className="chart-card chart-wide">
-            <h3>{t('dashboard.charts.overTime')}</h3>
+            <h3>{period === '24h' ? t('dashboard.charts.overTime') : t('dashboard.charts.overTimeUtcDays')}</h3>
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={timeSeries} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
                 <defs>
@@ -156,7 +159,7 @@ export function DashboardCharts() {
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
-                  <Pie data={byType} dataKey="value" nameKey="name" innerRadius={55} outerRadius={90} paddingAngle={2}>
+                  <Pie data={byType} dataKey="value" nameKey="label" innerRadius={55} outerRadius={90} paddingAngle={2}>
                     {byType.map(entry => (
                       <Cell key={entry.name} fill={colorForType(entry.name)} />
                     ))}

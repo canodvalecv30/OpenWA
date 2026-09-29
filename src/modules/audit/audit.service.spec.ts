@@ -32,6 +32,30 @@ describe('AuditService', () => {
     expect(repo.save).toHaveBeenCalledTimes(1);
   });
 
+  it('log() clamps caller-supplied text to the column bounds before storing it', async () => {
+    await service.log(AuditAction.API_KEY_AUTH_FAILED, {
+      path: `/api/sessions/${'a'.repeat(16 * 1024)}`,
+      userAgent: 'u'.repeat(2000),
+      method: 'M'.repeat(50),
+      errorMessage: 'e'.repeat(5000),
+    });
+
+    const row = (repo.create.mock.calls as unknown[][])[0][0] as Partial<AuditLog>;
+    expect(row.path).toHaveLength(500);
+    expect(row.path?.startsWith('/api/sessions/aaa')).toBe(true);
+    expect(row.userAgent).toHaveLength(500);
+    expect(row.method).toHaveLength(10);
+    expect(row.errorMessage).toHaveLength(1000);
+  });
+
+  it('log() stores short text unchanged', async () => {
+    await service.log(AuditAction.API_KEY_AUTH_FAILED, { path: '/api/sessions', method: 'GET', userAgent: 'curl/8' });
+    const row = (repo.create.mock.calls as unknown[][])[0][0] as Partial<AuditLog>;
+    expect(row).toEqual(
+      expect.objectContaining({ path: '/api/sessions', method: 'GET', userAgent: 'curl/8', errorMessage: null }),
+    );
+  });
+
   it('logInfo/logWarn/logError map to the right severity', async () => {
     await service.logInfo(AuditAction.API_KEY_USED);
     await service.logWarn(AuditAction.API_KEY_AUTH_FAILED);
@@ -45,11 +69,17 @@ describe('AuditService', () => {
     expect(repo.findAndCount).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { action: AuditAction.SESSION_STARTED, severity: AuditSeverity.INFO },
-        order: { createdAt: 'DESC' },
+        order: { createdAt: 'DESC', id: 'DESC' },
         take: 50,
         skip: 0,
       }),
     );
+  });
+
+  it('findAll breaks createdAt ties by id, so offset pages over rows written in one second cannot overlap', async () => {
+    await service.findAll({ limit: 200, offset: 200 });
+    const arg = (repo.findAndCount.mock.calls as unknown[][])[0][0] as { order: Record<string, string> };
+    expect(arg.order).toEqual({ createdAt: 'DESC', id: 'DESC' });
   });
 
   it('findAll clamps an oversized limit to the max page size (prevents whole-table loads)', async () => {

@@ -191,9 +191,9 @@ docker compose exec openwa-api printenv NODE_ENV CSP_UPGRADE_INSECURE_REQUESTS
 A production boot that serves the dashboard with the opt-out unset prints a warning naming this
 setting. If you are behind a TLS proxy, ignore that warning — the directive is doing its job.
 
-> The alternative is to front OpenWA with a TLS-terminating reverse proxy (the shipped
-> `docker-compose.yml` topology), which serves the dashboard over HTTPS and makes the upgrade a
-> no-op.
+> The alternative is to front OpenWA with your own TLS-terminating reverse proxy (the shipped
+> `docker-compose.yml` has none; see the nginx example in 12.8), which serves the dashboard over
+> HTTPS and makes the upgrade a no-op.
 
 ### Issue: Session Won't Connect
 
@@ -249,6 +249,41 @@ Proxy egress (if WhatsApp is blocked on your network) is configured **per sessio
 `proxyUrl`/`proxyType` fields on `POST /api/sessions` — it is **not** an environment variable, and an
 unreachable proxy silently blocks the WhatsApp WebSocket (see the _No QR code appears, or `/start`
 returns `504`_ entry below).
+
+### Issue: Linking asks for a passkey and never completes (both engines)
+
+**Symptoms:**
+
+- The phone shows "Create a passkey to log in" or "Continue on your other device" during linking, by QR or by pairing code
+- The session stays `qr_ready` on both engines; on Baileys the log shows `408` or `428` close loops, and a pairing code never appears
+- On whatsapp-web.js the page shows a "Quick security check with Passkey" modal that never succeeds
+
+**Cause:** WhatsApp added a passkey (WebAuthn) step to its companion linking handshake for some
+accounts. That step is enforced server-side inside the linking frames, which live in the engine
+libraries; neither whatsapp-web.js 1.34.7 nor Baileys 7.0.0-rc14 implements it, and OpenWA passes the
+QR string and the pairing-code request straight through to those libraries. There is no OpenWA-side
+fix, and nothing on the client side changes the outcome: switching engine, using a pairing code instead
+of a QR, or presenting a different client identity (`BAILEYS_BROWSER_NAME` or otherwise) all end at the
+same gate. Re-registering the number as a different account type has also been tried by the community
+and did not hold; the block returned on its own within days. Tracked in
+[#560](https://github.com/rmyndharis/OpenWA/issues/560) and upstream in
+[WhiskeySockets/Baileys#2672](https://github.com/WhiskeySockets/Baileys/issues/2672); the only durable
+change will come from the engine libraries implementing the step.
+
+### Issue: Phone-number pairing fails with "Couldn't link device" (Baileys)
+
+**Symptoms:**
+
+- `POST /api/sessions/:sessionId/pairing-code` returns a code, but the phone answers "Couldn't link device" after it is entered
+- The engine log then shows a `401` close with `Session disconnected: logged out`, the auth directory is cleared, and the session comes back at `qr_ready` with no phone
+- Linking the same account by QR works
+
+**Cause:** the pairing request carries the linked-device identity, and some accounts reject a
+non-standard one. The default device name is `OpenWA`; set `BAILEYS_BROWSER_NAME=Ubuntu` (or another
+standard OS name), restart OpenWA itself (the name is read at boot, so stopping and starting the session
+is not enough), and request a fresh code. The name applies to new pairings only;
+a session that is already linked keeps the name it was paired with until it is re-linked. See the
+phone-number pairing example in `docs/examples/session-phone-number-pairing.md`.
 
 ### Issue: No QR code appears, or `POST /api/sessions/:sessionId/start` returns `504`
 
@@ -308,12 +343,30 @@ WWEBJS_WEB_VERSION=<a build from that registry's html/ folder>
 
 Restart the container after changing it. Pick the build from
 [wppconnect-team/wa-version](https://github.com/wppconnect-team/wa-version) (the `html/` folder) — a
-build the registry no longer serves is fetched, missed, and silently ignored, leaving you on the
-default behaviour rather than the pin you asked for. With
+build the registry no longer serves is fetched, missed, and ignored, leaving you on the default
+behaviour rather than the pin you asked for (the `ready`-time warning below names both builds). With
 `WWEBJS_WEB_VERSION` unset, `latest`, or `auto` (the default), OpenWA auto-resolves a settled build
 from that registry and pins its HTML — note this HTML is fetched from a third-party repository and
 executed inside the `web.whatsapp.com` origin without an integrity check. Set
-`WWEBJS_WEB_VERSION=off` to disable pinning and use the first-party build served by WhatsApp.
+`WWEBJS_WEB_VERSION=off` to disable pinning and use the first-party build served by WhatsApp. An
+unpinned session (this setting, or an auto-resolve that could not reach the registry) caches nothing to
+disk, so it also works on the image's read-only root filesystem.
+
+A pin is not guaranteed to hold. whatsapp-web.js applies it by answering the page's document request
+with the pinned HTML, and that can miss in two ways: a pin whose HTML could not be fetched is dropped
+and the live build loads, and WhatsApp Web's service worker can serve its own cached build without the
+request reaching whatsapp-web.js. Either way the page can run a different build than the one
+requested, while the startup line `Pinning WhatsApp Web version …` still names the requested build.
+When a session reaches `ready`, OpenWA reads the build the page reports and logs it (action
+`web_version_running`); when a pin was requested and the page runs a different build, it logs a
+warning naming both (action `web_version_pin_not_applied`). The comparison ignores the registry's
+suffix such as `-alpha`, so a pin and the same bare build count as a match.
+
+The warning changes nothing about the session. It reached `ready` on the build the warning names, so
+the pin did not cover that page load, and a session that works on that build needs no action.
+If the pin is one you set yourself, check that the registry still serves it. Whether the service worker
+answers can differ from one page load to the next, so a later restart may load the pin. When you report
+a problem with the session, include both builds.
 
 ### Issue: QR generation times out on slow first boot (WSL2 / low-resource)
 
@@ -519,20 +572,20 @@ acknowledged before the companion device is allowed to stay linked. The adapter 
 and only gives up after five clicks that fail to land — at that point a human must click through it
 once, so the session stops instead of being silently unlinked by WhatsApp about five minutes later.
 
-> **If the modal is not in English:** the detector matches the English button label (`Continue`) and
-> heading ("What's new"). The language WhatsApp Web renders in follows the browser locale, which OpenWA
-> does not set, so it is whatever the browser the container launches defaults to
-> (`PUPPETEER_EXECUTABLE_PATH` — Chrome for Testing on amd64, Debian's `chromium` on arm64). You can
-> pin it yourself by appending `--lang=en-US` to `PUPPETEER_ARGS` — that variable **replaces** the
-> default list rather than adding to it, so repeat the existing flags too (dropping `--no-sandbox` in
-> a container stops Chromium launching at all). If your deployment does get a
-> localised modal, it is **not** auto-dismissed and the session never reaches `action_required` —
-> instead it links normally, then drops to `disconnected` with reason `LOGOUT` a few minutes later and
-> the device disappears from the phone's Linked devices list. That miss is no longer silent: when the
-> watcher finds a visible dialog it cannot match, it logs a warning (`action:
-onboarding_dialog_unrecognized`) carrying the dialog's heading and button labels — the label to add
-> via `WWEBJS_ONBOARDING_CONTINUE_LABELS`, and the heading worth reporting — minutes before the unlink
-> would happen. Because that path wipes the stored
+> **If the modal is not in English:** by default the detector matches only the English button label
+> (`Continue`) under the English heading ("What's new"). OpenWA appends `--lang=en-US` to the browser
+> flags unless `PUPPETEER_ARGS` already carries a `--lang`, but that sets the browser's language, and
+> WhatsApp Web may still render in the account's own language. For another language, add the modal's
+> confirm-button label to `WWEBJS_ONBOARDING_CONTINUE_LABELS` (for example `Continuar`) and restart
+> OpenWA itself: the value is read at boot, so stopping and starting the session is not enough. A
+> configured label is clicked
+> without the English heading check, but only on a button inside a visible dialog. If your deployment gets a
+> localised modal without a matching label, it is **not** auto-dismissed and the session never reaches
+> `action_required`; instead it links normally, then drops to `disconnected` with reason `LOGOUT` a few
+> minutes later and the device disappears from the phone's Linked devices list. That miss is not
+> silent: when the watcher finds a visible dialog it cannot match, it logs a warning
+> (`action: onboarding_dialog_unrecognized`) carrying the dialog's heading and button labels, including
+> the label to add, minutes before the unlink would happen. Because that path wipes the stored
 > credentials, the automatic reconnect comes back with a fresh QR on its own, so the session is
 > usually already sitting at `qr_ready` rather than needing a manual start. Acknowledge the modal once
 > in a browser signed in as that account, then scan the QR. It does not recur — the modal is shown
@@ -593,10 +646,12 @@ The reconnect backoff is configured **per session**, not by environment variable
 `reconnectBaseDelay` is the exponential-backoff base in milliseconds (clamped to 1000–300000,
 default 5000). `maxReconnectAttempts` is clamped to 0–20 — `0` disables auto-reconnect entirely, and
 leaving it unset means unlimited retries with the delay parking at a 5-minute cap. Both keys bound
-the gateway's own reconnect. On Baileys that is only the reconnect after a logged-out close: every
-other drop is retried inside the engine, with a fixed 1s to 60s backoff and no attempt cap, so a
-session behind an unreachable network keeps retrying there whatever these keys say. Subscribe to the
-`session.reconnect_loop` webhook to be alerted on every 5th consecutive attempt.
+the gateway's own reconnect, whose attempt count restarts only once the session has stayed READY for
+5 minutes, so a session that keeps dropping sooner than that spends a finite cap and ends FAILED. On
+Baileys that is only the reconnect after a logged-out close: every other drop is retried inside the
+engine, with a fixed 1s to 60s backoff and no attempt cap, so a session behind an unreachable network
+keeps retrying there whatever these keys say. Subscribe to the `session.reconnect_loop` webhook to be
+alerted on every 5th consecutive attempt.
 
 On a slow host, raise the first-boot init wait with `WWEBJS_AUTH_TIMEOUT_MS` (see _QR generation
 times out on slow first boot_ above).
@@ -622,18 +677,18 @@ curl -H "X-API-Key: $API_KEY" \
 curl -H "X-API-Key: $API_KEY" \
   http://localhost:2785/api/infra/status
 
-# Rate limiting is global (throttler, env-configured) — there is no per-session rate-limit endpoint
+# Rate limiting is env-configured, per route and client IP; there is no per-session rate-limit endpoint
 ```
 
 **Common Causes:**
 
-| Cause                  | Symptom                | Solution                    |
-| ---------------------- | ---------------------- | --------------------------- |
-| Invalid phone number   | 400 error              | Format: `628123456789@c.us` |
-| Rate limited           | 429 error              | Reduce sending rate         |
-| Session disconnected   | 503 error              | Reconnect session           |
-| Media too large        | 413 error              | Compress or reduce size     |
-| Number not on WhatsApp | Message fails silently | Verify number first         |
+| Cause                            | Symptom                      | Solution                       |
+| -------------------------------- | ---------------------------- | ------------------------------ |
+| Invalid phone number             | 400 error                    | Format: `628123456789@c.us`    |
+| Rate limited                     | 429 error                    | Reduce sending rate            |
+| Session not started or not ready | 400 (`is not active`) or 409 | Start or reconnect the session |
+| Media too large                  | 413 error                    | Compress or reduce size        |
+| Number not on WhatsApp           | Message fails silently       | Verify number first            |
 
 **Phone Number Validation:**
 
@@ -695,7 +750,7 @@ rm -rf node_modules/whatsapp-web.js && npm ci
   block/unblock refusing every id, a status media send that never arrives, a group description that
   cannot be set, an app-state resync that never settles
 
-**Cause:** OpenWA applies nine exact source transforms to its engine libraries at install time
+**Cause:** OpenWA applies eleven exact source transforms to its engine libraries at install time
 (docs/29 §29.3). The Docker image runs them without `--best-effort`, so a source shape a patcher
 cannot recognise fails the image build. A source install runs them through `scripts/postinstall.js`
 with `--best-effort`, where a patcher that cannot apply prints one line into a long `npm install`
@@ -724,7 +779,7 @@ quoting the message it printed.
 > A patch that never applied is not fatal on its own: only the capability it repairs is affected and
 > the rest of the gateway runs normally, which is why this is easy to misread as a bug in one route.
 
-### Issue: Reads on a large account fail with `Runtime.callFunctionOn timed out`
+### Issue: Reads on a large account fail with `did not answer ... in time` or `Runtime.callFunctionOn timed out`
 
 > **Engine:** This issue applies to the `whatsapp-web.js` engine only (Chromium/Puppeteer-based). It does not affect `ENGINE_TYPE=baileys`.
 
@@ -732,13 +787,16 @@ quoting the message it printed.
 
 - `GET /api/sessions/{id}/chats` (or another read that walks the whole store) fails on an account
   with thousands of chats, while smaller accounts on the same deployment are fine
-- The error names a CDP method and the setting: `Runtime.callFunctionOn timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed.`
+- The chat and contact lists answer `503` with `WhatsApp Web did not answer the chat list read in time`
+  (or `the contact list read`); another read may answer `500` with the raw error, which names a CDP
+  method and the setting: `Runtime.callFunctionOn timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed.`
 - The session stays `ready` and the next request works, so the page did not die
 
 **Cause:** Puppeteer gives every browser command a time budget, 180 000 ms by default, and one
 `getChats()` over a very large store can run past it. The renderer is still working; only the
 command is dropped. That is also why this is **not** treated as a dead page — a transport death
-answers `503` and takes the session down with it, and this is just a slow command on a live page.
+takes the session down with it, while this is just a slow command on a live page. The chat and contact
+lists answer it with a `503` as well, but the session stays `ready`.
 
 **Solution:** raise the budget for that deployment.
 
@@ -866,8 +924,8 @@ curl -X POST http://localhost:2785/api/sessions/{sessionId}/webhooks \
   }'
 ```
 
-`retryCount` (0–5, default 3) is per webhook. The delivery timings are process-wide environment
-variables:
+`retryCount` (0–5, default 3) is per webhook and counts total delivery attempts, including the first, so `1`
+retries nothing. The delivery timings are process-wide environment variables:
 
 ```bash
 WEBHOOK_TIMEOUT=10000      # per-attempt HTTP timeout in ms (default 10000)
@@ -1076,18 +1134,21 @@ npm run migration:run:main
 
 **Solutions:**
 
+The entrypoint starts as root, re-owns `/app/data` to the `openwa` user on every start, and then
+drops privileges with `gosu`. Keep that path intact:
+
+- Do not set `user:` on `openwa-api` (or `--user` on `docker run`). The entrypoint then cannot
+  `chown` or drop privileges, exits, and the container restarts in a loop.
+- Keep the `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID` and `SETUID` entries under `cap_add` in
+  `docker-compose.yml`; the `chown` and the `gosu` drop need them.
+- A `chown` of the host directory is not a fix: the entrypoint re-owns `/app/data` at the next start.
+- If the error persists on a bind mount, the host filesystem is refusing the `chown` (NFS with
+  `root_squash`, some rootless or SMB setups) or SELinux is denying access (add `:z` to the mount).
+  Use the named volume from the shipped `docker-compose.yml` instead.
+
 ```bash
-# Check current permissions
-ls -la ./data/
-
-# Fix ownership (use your user ID)
-sudo chown -R $(id -u):$(id -g) ./data/
-
-# Or use Docker's user mapping
-# docker-compose.yml
-services:
-  openwa-api:
-    user: "1000:1000"  # Your UID:GID
+# Look for the failing chown in the startup output
+docker compose logs openwa-api | head -20
 ```
 
 ### Issue: Container Networking
@@ -1291,9 +1352,17 @@ Remember OpenWA is **single-port**: the Dashboard, REST API, and Socket.IO all s
 **Q: How to backup sessions automatically?**
 
 ```bash
-# Add to crontab, for example: 0 */6 * * * cd /path/to/openwa && ./scripts/backup.sh
-BACKUP_DIR=/backups/openwa ./scripts/backup.sh
+# Production compose, whose data is the openwa-data volume: back up inside the container, then copy
+# the archive off the volume. In crontab, for example every six hours:
+# 0 */6 * * * docker exec -e BACKUP_DIR=/app/data/backups -e TMPDIR=/app/data/backups openwa-api ./scripts/backup.sh && docker cp openwa-api:/app/data/backups/. /backups/openwa/
+docker exec -e BACKUP_DIR=/app/data/backups -e TMPDIR=/app/data/backups openwa-api ./scripts/backup.sh
+docker cp openwa-api:/app/data/backups/. /backups/openwa/
+
+# Bare metal or docker-compose.dev.yml, whose data is ./data in the checkout:
+# 0 */6 * * * cd /path/to/openwa && BACKUP_DIR=/backups/openwa ./scripts/backup.sh
 ```
+
+The archives stay in `/app/data/backups` on the volume as well, so prune them there too.
 
 The shipped script also covers `main.sqlite`, the selected data store, whatsapp-web.js state,
 `BAILEYS_AUTH_DIR` (default `./data/baileys`), media, plugin packages/state, and generated secrets. Apply
@@ -1367,17 +1436,17 @@ available_events:
 
 ### HTTP Error Codes
 
-| Code | Meaning             | Common Cause             | Solution                  |
-| ---- | ------------------- | ------------------------ | ------------------------- |
-| 400  | Bad Request         | Invalid parameters       | Check request body/params |
-| 401  | Unauthorized        | Missing/invalid API key  | Add X-API-Key header      |
-| 403  | Forbidden           | Insufficient permissions | Check API key permissions |
-| 404  | Not Found           | Invalid session/endpoint | Verify session exists     |
-| 409  | Conflict            | Session already exists   | Use different session ID  |
-| 413  | Payload Too Large   | File too large           | Reduce file size          |
-| 429  | Too Many Requests   | Rate limited             | Reduce request rate       |
-| 500  | Internal Error      | Server error             | Check logs                |
-| 503  | Service Unavailable | Session disconnected     | Reconnect session         |
+| Code | Meaning             | Common Cause                                                                               | Solution                                        |
+| ---- | ------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| 400  | Bad Request         | Invalid parameters, or the session is not started                                          | Check request body/params; start the session    |
+| 401  | Unauthorized        | Missing/invalid API key                                                                    | Add X-API-Key header                            |
+| 403  | Forbidden           | Insufficient permissions                                                                   | Check API key permissions                       |
+| 404  | Not Found           | Invalid session/endpoint                                                                   | Verify session exists                           |
+| 409  | Conflict            | Session already exists, or the session is not ready (retryable)                            | Use a different session ID, or wait for `ready` |
+| 413  | Payload Too Large   | File too large                                                                             | Reduce file size                                |
+| 429  | Too Many Requests   | Rate limited                                                                               | Reduce request rate                             |
+| 500  | Internal Error      | Server error                                                                               | Check logs                                      |
+| 503  | Service Unavailable | The engine transport died during a read, or a media fetch through the session proxy failed | Retry; restart the session if it persists       |
 
 ### Error Body Shape
 

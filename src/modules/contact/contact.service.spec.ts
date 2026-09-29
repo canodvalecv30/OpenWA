@@ -2,6 +2,8 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import { ContactService } from './contact.service';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
 
 describe('ContactService', () => {
   const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
@@ -73,6 +75,26 @@ describe('ContactService', () => {
     expect(out).toEqual({ 'a@c.us': 'https://pps/1.jpg', 'b@c.us': null, 'c@c.us': 'https://pps/3.jpg' });
   });
 
+  // Not ready is a fact about the session, not about one avatar: a 200 with every picture null would
+  // be cached by the dashboard as "nobody has a picture" for the whole stale window.
+  it('fails the whole batch with 409 when the engine is not ready, without starting further chunks', async () => {
+    const getProfilePicture = jest.fn().mockRejectedValue(new EngineNotReadyError());
+    const ids = Array.from({ length: 12 }, (_, i) => `${i}@c.us`);
+    const batch = makeService({ getProfilePicture }).getProfilePictures('s1', ids);
+    await expect(batch).rejects.toBeInstanceOf(EngineNotReadyError);
+    await expect(batch).rejects.toMatchObject({ status: 409 });
+    expect(getProfilePicture).toHaveBeenCalledTimes(5);
+  });
+
+  it('still nulls a single id whose lookup fails with a transport error', async () => {
+    const getProfilePicture = jest
+      .fn()
+      .mockRejectedValueOnce(new EngineTransportError('query stalled'))
+      .mockResolvedValueOnce('https://pps/2.jpg');
+    const out = await makeService({ getProfilePicture }).getProfilePictures('s1', ['a@c.us', 'b@c.us']);
+    expect(out).toEqual({ 'a@c.us': null, 'b@c.us': 'https://pps/2.jpg' });
+  });
+
   it('ignores ids beyond the 50-id batch cap', async () => {
     const getProfilePicture = jest.fn().mockResolvedValue(null);
     const ids = Array.from({ length: 60 }, (_, i) => `${i}@c.us`);
@@ -132,13 +154,13 @@ describe('ContactService', () => {
      * rather than be refused. It is neutralized on the way there: whatsapp-web.js knows no `@hosted`
      * domain, so forwarding the suffix verbatim would fail inside the page instead of blocking anyone.
      */
-    it('accepts a Meta-hosted id and hands the engine the neutral dialect', () => {
-      const blockContact = jest.fn();
-      const unblockContact = jest.fn();
+    it('accepts a Meta-hosted id and hands the engine the neutral dialect', async () => {
+      const blockContact = jest.fn().mockResolvedValue(undefined);
+      const unblockContact = jest.fn().mockResolvedValue(undefined);
       const svc = makeService({ blockContact, unblockContact });
 
-      svc.blockContact('s1', '628123456789@hosted');
-      svc.unblockContact('s1', '12345678901234567890@hosted.lid');
+      await svc.blockContact('s1', '628123456789@hosted');
+      await svc.unblockContact('s1', '12345678901234567890@hosted.lid');
 
       expect(blockContact).toHaveBeenCalledWith('628123456789@c.us');
       expect(unblockContact).toHaveBeenCalledWith('12345678901234567890@lid');
@@ -150,11 +172,11 @@ describe('ContactService', () => {
      * which starts with `jidNormalizedUser` and turns `@c.us` straight back into `@s.whatsapp.net`.
      * whatsapp-web.js, which has no such dialect, gets the form it actually understands.
      */
-    it('hands the engine the neutral dialect for a raw-protocol id', () => {
-      const blockContact = jest.fn();
+    it('hands the engine the neutral dialect for a raw-protocol id', async () => {
+      const blockContact = jest.fn().mockResolvedValue(undefined);
       const svc = makeService({ blockContact });
 
-      svc.blockContact('s1', '628123456789@s.whatsapp.net');
+      await svc.blockContact('s1', '628123456789@s.whatsapp.net');
 
       expect(blockContact).toHaveBeenCalledWith('628123456789@c.us');
     });

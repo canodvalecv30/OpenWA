@@ -25,3 +25,19 @@ export function warnIfInsecureHttpUrl(url: string, label: string): string {
   }
   return url;
 }
+
+/**
+ * The origin the realtime socket dials: VITE_WS_URL when set, else the origin of VITE_API_URL (a
+ * split-origin build serves the socket from the API, not from the dashboard's host), else the page's
+ * own origin. Only the origin is taken from VITE_API_URL: socket.io reads a URL path as the namespace,
+ * so a path there would turn '/events' into an unknown namespace the gateway rejects.
+ */
+export function resolveSocketUrl(wsUrl: string | undefined, apiUrl: string, pageOrigin: string): string {
+  if (wsUrl) return wsUrl;
+  if (!apiUrl) return pageOrigin;
+  try {
+    return new URL(apiUrl, pageOrigin).origin;
+  } catch {
+    return pageOrigin;
+  }
+}
