@@ -49,4 +49,11 @@ describe('label write tools', () => {
 
     expect(upsertLabel).toHaveBeenCalledWith('s1', '7', { name: 'VIP', color: 3 });
   });
+
+  // An upsert on an existing id replaces the whole label (an omitted name is not kept), so MCP
+  // clients must see it as destructive, like LabelDelete.
+  it.each(['LabelUpsert', 'LabelDelete'])('%s is flagged destructive', toolName => {
+    const tool = labelTools({} as LabelService).find(t => t.name === toolName)!;
+    expect(tool.destructive).toBe(true);
+  });
 });

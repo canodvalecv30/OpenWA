@@ -196,15 +196,14 @@ export class ScopeBindingService implements OnApplicationBootstrap {
           this.loader.setPluginSessions(pluginId, ['*']);
           return;
         }
-        const anyWildcardLeft = (await this.instances.list(pluginId)).some(
-          i => i.enabled && (!i.sessionScope || i.sessionScope === '*'),
-        );
+        const rows = await this.instances.list(pluginId);
+        const anyWildcardLeft = rows.some(i => i.enabled && (!i.sessionScope || i.sessionScope === '*'));
         if (!anyWildcardLeft) {
+          // Activating a wildcard replaced activeSessions with ['*'], dropping the scopes enabled
+          // concrete siblings bind, so put those back rather than leave them silenced until a restart.
           const current = this.loader.getPlugin(pluginId)?.activeSessions ?? [];
-          this.loader.setPluginSessions(
-            pluginId,
-            current.filter(s => s !== '*'),
-          );
+          const concrete = rows.filter(i => i.enabled && i.sessionScope).map(i => i.sessionScope as string);
+          this.loader.setPluginSessions(pluginId, [...new Set([...current.filter(s => s !== '*'), ...concrete])]);
         }
         return;
       }

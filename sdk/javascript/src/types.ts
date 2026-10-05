@@ -65,7 +65,11 @@ export interface SessionResponse {
   lastActive?: string | null;
   createdAt: string;
   updatedAt: string;
-  /** Only present when `status === 'failed'` (terminal failure) or `status === 'action_required'` (operator must intervene). */
+  /**
+   * Human-readable reason while `status` is `'failed'` or `'action_required'`, or `'initializing'` from the
+   * fifth attempt of a reconnect the engine runs itself (Baileys), or while a reconnect waits to retry after a
+   * failed relaunch (either engine); `null` otherwise.
+   */
   lastError?: string | null;
   /**
    * A limit WhatsApp itself has placed on the account, or `null` when there is none. Distinct from
@@ -201,6 +205,7 @@ export interface CreateSessionRequest {
   name: string;
   config?: Record<string, unknown>;
   proxyUrl?: string;
+  /** @deprecated Ignored by the gateway; the `proxyUrl` scheme selects the protocol. */
   proxyType?: 'http' | 'https' | 'socks4' | 'socks5';
 }
 
@@ -272,7 +277,10 @@ export interface SendMediaRequest {
   /** Requires `mimetype`. */
   base64?: string;
   mimetype?: string;
-  /** Required for documents; max 255 chars. */
+  /**
+   * Shown only on document sends; defaults to `file` when omitted (whatsapp-web.js first tries the URL basename).
+   * Max 255 chars.
+   */
   filename?: string;
   /** Max 1024 chars. */
   caption?: string;
@@ -512,9 +520,16 @@ export interface MessageRecord {
   body?: string | null;
   type: string;
   direction: MessageDirection;
-  /** Chat display name, when the session resolves one for the chat. */
+  /**
+   * Push name of the sender as the engine reported it (their saved contact name when it reported no push
+   * name); in a group this is the member who posted, not the group subject. Null when no name was known.
+   */
   chatName?: string | null;
-  /** Author display name for an inbound group message. */
+  /**
+   * JID of the sender of a group, status or broadcast-list message (`from` is the group, `status@broadcast`
+   * or the list id there; on Baileys a received list message is filed under the sender, so `from` is the
+   * sender too). Null on 1:1 messages and outgoing echoes.
+   */
   author?: string | null;
   /** Storage key of the archived media copy, when chat-media archiving wrote one. */
   mediaPath?: string | null;
@@ -527,10 +542,6 @@ export interface MessageRecord {
   createdAt: string;
 }
 
-/**
- * A message read live from WhatsApp by `messages.history()`. This is the engine
- * payload (richer and differently shaped than the persisted {@link MessageRecord}).
- */
 /**
  * The engine-normalized message kinds — persisted rows, `message.received`/`message.sent`
  * payloads and the websocket all use these values (raw engine tokens are normalized at the
@@ -554,6 +565,10 @@ export type MessageType =
   | 'masked'
   | 'unknown';
 
+/**
+ * A message read live from WhatsApp by `messages.history()`. This is the engine
+ * payload (richer and differently shaped than the persisted {@link MessageRecord}).
+ */
 export interface ChatHistoryMessage {
   id: string;
   from: Jid;
@@ -699,9 +714,8 @@ export interface BatchMessageResult {
 export type BatchMessageStatus = 'pending' | 'sent' | 'failed' | 'cancelled';
 
 /**
- * Response from `GET /messages/batch/:batchId` (batch status polling) and
- * `POST /messages/batch/:batchId/cancel`. Distinct from
- * {@link BulkMessageResponse} (the send-bulk acknowledgement).
+ * Response from `GET /messages/batch/:batchId` (batch status polling). Distinct from
+ * {@link BulkMessageResponse} (the send-bulk acknowledgement) and {@link BatchCancelResponse}.
  */
 export interface BatchStatusResponse {
   batchId: string;
@@ -710,6 +724,13 @@ export interface BatchStatusResponse {
   results: BatchMessageResult[];
   startedAt?: string | null;
   completedAt?: string | null;
+}
+
+/** Response from `POST /messages/batch/:batchId/cancel`: the batch state without per-recipient `results`. */
+export interface BatchCancelResponse {
+  batchId: string;
+  status: BatchLifecycleStatus;
+  progress: BatchProgress;
 }
 
 /** Lifecycle of a whole batch — the `status` of {@link BatchStatusResponse}. */
@@ -764,11 +785,13 @@ export interface GroupParticipant {
   isSuperAdmin: boolean;
 }
 
-/** Item returned by `GET /sessions/:id/groups` (the slim list shape). */
+/** Item returned by `GET /sessions/:id/groups` (the slim list shape), and the `groups.create` response. */
 export interface GroupSummary {
   id: Jid;
   name: string;
+  /** Only in a `groups.create` response, never in `groups.list`; `groups.get` carries the participants. */
   participantsCount?: number;
+  /** Only in a `groups.create` response, never in `groups.list`; `groups.get` carries each participant's role. */
   isAdmin?: boolean;
   /** JID of the parent community, or null if standalone. */
   linkedParentJID?: string | null;
@@ -917,6 +940,19 @@ export type WebhookEvent =
   | 'status.received'
   | '*';
 
+/**
+ * The JSON body of a webhook delivery (docs/06 section 6.6). `event` is `'test'` for a delivery
+ * sent by the test endpoint. Verify the raw body with `verifyWebhookSignature` before parsing it.
+ */
+export interface WebhookDelivery<TData = Record<string, unknown>> {
+  event: Exclude<WebhookEvent, '*'> | 'test';
+  timestamp: string;
+  sessionId: string;
+  idempotencyKey: string;
+  deliveryId: string;
+  data: TData;
+}
+
 export interface WebhookFilterCondition {
   field: string;
   operator: 'contains' | 'equals' | 'is' | 'isNot';
@@ -943,7 +979,10 @@ export interface CreateWebhookRequest {
   secret?: string;
   headers?: Record<string, string>;
   filters?: WebhookFilters | null;
-  /** 0–5; default 3. Server DTO field is `retryCount`. */
+  /**
+   * Total delivery attempts per event including the first, 0 to 5 (0 and 1 both mean one attempt); default 3 on
+   * create, while an update that omits it keeps the current value. Server DTO field is `retryCount`.
+   */
   retryCount?: number;
 }
 
@@ -974,7 +1013,7 @@ export interface WebhookTestResult {
   error?: string;
 }
 
-/** A webhook delivery abandoned after every retry, as listed by the delivery-failure log. */
+/** A webhook delivery the gateway gave up on or could not dispatch, as listed by the delivery-failure log. */
 export interface WebhookDeliveryFailure {
   id: string;
   webhookId: string;
@@ -984,13 +1023,47 @@ export interface WebhookDeliveryFailure {
   /** The idempotency key the receiver would have deduped on. */
   idempotencyKey?: string | null;
   deliveryId?: string | null;
-  /** Total attempts made before giving up. */
+  /** Attempts made before giving up; 0 when the delivery was not given up after retries (see `deliveryFailures`). */
   attempts: number;
   /** Last HTTP status when the failure was a non-2xx response; null for a network or timeout error. */
   lastStatusCode?: number | null;
   lastError: string;
-  /** ISO timestamp of when the delivery was finally abandoned. */
+  /** ISO timestamp of when the row was recorded. */
   createdAt: string;
+  /**
+   * True when the row still holds the event data and can be replayed with
+   * {@link WebhooksResource.redriveDeliveryFailures}: a terminal row (`attempts > 0`) recorded while the
+   * gateway's `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` is above 0, until that window passes.
+   */
+  replayable: boolean;
+}
+
+/** Body of {@link WebhooksResource.redriveDeliveryFailures}. An empty body takes the least-retried eligible rows. */
+export interface RedriveWebhookDeliveriesRequest {
+  /** Only rows of this session (within the key's allowedSessions). */
+  sessionId?: string;
+  /** Only rows of this webhook. */
+  webhookId?: string;
+  /** Only these failure rows (ids from `deliveryFailures`), at most 500. */
+  ids?: string[];
+  /** Max rows replayed by this call (1-500, default 100). */
+  limit?: number;
+}
+
+/** Outcome of {@link WebhooksResource.redriveDeliveryFailures}. */
+export interface WebhookRedriveResult {
+  /** Rows replayed by this call: delivered plus enqueued. */
+  redriven: number;
+  /** Delivered by a direct POST; their failure rows were removed. */
+  delivered: number;
+  /** Reserved for compatibility; operator redrive always returns zero. */
+  enqueued: number;
+  /** Replays that failed again; their rows stay, with attempts raised by one. */
+  failed: number;
+  /** Rows not replayed: the webhook was removed, disabled or unsubscribed, or a plugin cancelled it. */
+  skipped: number;
+  /** Replayable rows still in scope after this call. */
+  remaining: number;
 }
 
 // ── Chat (session-scoped chat operations) ─────────────────────────
@@ -1136,7 +1209,11 @@ export interface SendTextStatusRequest {
 export interface StatusMediaInput {
   url?: string;
   base64?: string;
-  /** Optional explicit mimetype (inferred from URL/bytes when omitted). */
+  /**
+   * MIME type of the media. When omitted the server uses the route's default (`image/jpeg`, `video/mp4` or
+   * `audio/ogg; codecs=opus`), which also overrides a URL's Content-Type; the bytes are never inspected. Set
+   * it for base64 and for any media of another type.
+   */
   mimetype?: string;
 }
 
@@ -1178,14 +1255,18 @@ export interface HealthResponse {
   version?: string;
 }
 
+export interface HealthDependencyStatus {
+  status: 'up' | 'down';
+}
+
 export interface HealthReadyDetails {
-  mainDatabase?: string;
-  dataDatabase?: string;
+  mainDatabase?: HealthDependencyStatus;
+  dataDatabase?: HealthDependencyStatus;
 }
 
 export interface HealthReadyResponse {
   status: string;
-  details?: HealthReadyDetails;
+  details: HealthReadyDetails;
 }
 
 // ── Auth ──────────────────────────────────────────────────────────
@@ -1194,6 +1275,7 @@ export interface AuthValidateResponse {
   valid: boolean;
   role?: string;
   engineType?: string;
+  scoped?: boolean;
 }
 
 // ── Template ──────────────────────────────────────────────────────

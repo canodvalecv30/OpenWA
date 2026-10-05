@@ -18,6 +18,7 @@ export const supportedLanguages = [
   'pt-BR',
   'ko',
   'hi',
+  'id',
 ] as const;
 export type SupportedLanguage = (typeof supportedLanguages)[number];
 
@@ -38,6 +39,7 @@ export const languageOptions: Array<{ value: SupportedLanguage; label: string; c
   { value: 'pt-BR', label: 'Português (Brasil)', compactLabel: 'PT' },
   { value: 'ko', label: '한국어', compactLabel: 'KO' },
   { value: 'hi', label: 'हिन्दी', compactLabel: 'HI' },
+  { value: 'id', label: 'Bahasa Indonesia', compactLabel: 'ID' },
 ];
 
 export function resolveSupportedLanguage(lang?: string): SupportedLanguage {
@@ -113,7 +115,13 @@ export const i18nReady = i18n
       order: ['localStorage', 'navigator'],
       lookupLocalStorage: 'openwa_language',
       caches: ['localStorage'],
-      convertDetectedLanguage: (lang: string) => resolveSupportedLanguage(lang),
+      // Map a code only when it matches a shipped language. An unmatched one passes through unchanged,
+      // so i18next skips it and tries the visitor's next preference; mapping it to 'en' would end the
+      // search on an English they never asked for. fallbackLng still covers a list with no match.
+      convertDetectedLanguage: (lang: string) => {
+        const resolved = resolveSupportedLanguage(lang);
+        return resolved === 'en' && lang.toLowerCase().split('-')[0] !== 'en' ? lang : resolved;
+      },
     },
     react: { useSuspense: false },
   });

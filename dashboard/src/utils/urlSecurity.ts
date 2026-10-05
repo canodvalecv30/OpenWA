@@ -6,18 +6,19 @@ export function isLocalhostHost(hostname: string): boolean {
 }
 
 /**
- * Warn (NOT throw) when a URL is `http://` and the host is not localhost. Sending API keys over
- * plaintext http to a non-local host exposes credentials on the wire; warning instead of refusing
+ * Warn (NOT throw) when a URL is `http://` or `ws://` and the host is not localhost. Sending API keys
+ * over plaintext to a non-local host exposes credentials on the wire; warning instead of refusing
  * keeps local dev and TLS-terminating-proxy setups working. Returns the original URL unchanged so
  * the caller can chain.
  */
 export function warnIfInsecureHttpUrl(url: string, label: string): string {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol === 'http:' && !isLocalhostHost(parsed.hostname)) {
+    if ((parsed.protocol === 'http:' || parsed.protocol === 'ws:') && !isLocalhostHost(parsed.hostname)) {
+      const scheme = parsed.protocol.slice(0, -1);
       console.warn(
-        `[OpenWA] ${label} uses an insecure http:// URL (host: ${parsed.hostname}). ` +
-          'API keys are sent in cleartext over http. Use https:// in production.',
+        `[OpenWA] ${label} uses an insecure ${scheme}:// URL (host: ${parsed.hostname}). ` +
+          `API keys are sent in cleartext over ${scheme}. Use https:// or wss:// in production.`,
       );
     }
   } catch {
@@ -27,16 +28,20 @@ export function warnIfInsecureHttpUrl(url: string, label: string): string {
 }
 
 /**
- * The origin the realtime socket dials: VITE_WS_URL when set, else the origin of VITE_API_URL (a
+ * The origin the realtime socket dials: that of VITE_WS_URL when set, else of VITE_API_URL (a
  * split-origin build serves the socket from the API, not from the dashboard's host), else the page's
- * own origin. Only the origin is taken from VITE_API_URL: socket.io reads a URL path as the namespace,
- * so a path there would turn '/events' into an unknown namespace the gateway rejects.
+ * own origin. Only the origin is taken from either value: socket.io reads a URL path as the namespace,
+ * so a path (even a trailing slash) would turn '/events' into an unknown namespace the gateway rejects.
  */
 export function resolveSocketUrl(wsUrl: string | undefined, apiUrl: string, pageOrigin: string): string {
-  if (wsUrl) return wsUrl;
-  if (!apiUrl) return pageOrigin;
+  const raw = wsUrl || apiUrl;
+  if (!raw) return pageOrigin;
+  // socket.io dials a value with no scheme ('host:port') on the page's protocol; URL would read
+  // 'host:' as a scheme (opaque 'null' origin) or a bare host as a path on the page's own host.
+  const source = /^[a-z][a-z\d+.-]*:\/\//i.test(raw) || raw.startsWith('/') ? raw : `//${raw}`;
   try {
-    return new URL(apiUrl, pageOrigin).origin;
+    const origin = new URL(source, pageOrigin).origin;
+    return origin === 'null' ? pageOrigin : origin;
   } catch {
     return pageOrigin;
   }

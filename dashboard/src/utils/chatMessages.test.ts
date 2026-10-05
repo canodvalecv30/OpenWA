@@ -358,15 +358,24 @@ import { capMediaPayloads, MEDIA_PAYLOAD_CACHE_LIMIT } from './chatMessages.ts';
 const mediaMsg = (id: string, data?: string): ChatMessageView =>
   msg({ id, type: 'image', metadata: { media: { mimetype: 'image/jpeg', filename: `${id}.jpg`, data } } });
 
+test('capMediaPayloads bounds archived previews together with inline media', () => {
+  const archive = mediaMsg('old-archive');
+  archive.metadata!.media = { mimetype: 'image/jpeg', omitted: true, archived: true };
+  const list = [archive, ...Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT }, (_, i) => mediaMsg(`m-${i}`, 'X'))];
+  const capped = capMediaPayloads(list);
+  assert.equal(capped[0].metadata?.media?.archived, undefined);
+  assert.equal(capped[0].metadata?.media?.omitted, true);
+  assert.equal(list[0].metadata?.media?.archived, true, 'the source marker remains unchanged');
+});
+
 test('capMediaPayloads: under the limit the list is returned untouched (stable reference)', () => {
   const list = [mediaMsg('m-1', 'AAA'), mediaMsg('m-2', 'BBB'), msg({ id: 'm-3' })];
   assert.equal(capMediaPayloads(list), list);
 });
 
-test('the media cap covers the whole fetch window (no dead-end placeholder inside it)', () => {
-  // useChatMessages fetches a 100-message slice WITH media and caches it at staleTime: Infinity.
-  // A cap below the window strips payloads the user can scroll to, with no refetch path — the
-  // stripped rows render the 📎 placeholder forever even though the payload was fetched.
+test('the media cap is at least one fetched page (MESSAGE_PAGE_SIZE 100)', () => {
+  // A cap below one page would strip payloads from the first page a chat opens with; past one page the
+  // cap bounds the rendered set (see the MEDIA_PAYLOAD_CACHE_LIMIT doc).
   assert.ok(MEDIA_PAYLOAD_CACHE_LIMIT >= 100);
 });
 

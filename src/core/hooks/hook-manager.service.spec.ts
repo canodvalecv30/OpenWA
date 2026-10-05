@@ -183,10 +183,12 @@ describe('HookManager re-entrancy guard', () => {
 
   it('short-circuits a handler that re-fires the same event (no infinite recursion)', async () => {
     let calls = 0;
+    // Captured and asserted outside the handler: runHandlers isolates handler errors, so an expect
+    // thrown inside the handler would be logged and swallowed instead of failing the test.
+    let inner: HookResult | undefined;
     manager.register('p1', 'message:sending', async (ctx: HookContext): Promise<HookResult> => {
       calls += 1;
-      const inner = await manager.execute('message:sending', ctx.data, { source: 'test' });
-      expect(inner).toEqual({ continue: true, data: ctx.data });
+      inner = await manager.execute('message:sending', ctx.data, { source: 'test' });
       return { continue: true };
     });
 
@@ -194,6 +196,7 @@ describe('HookManager re-entrancy guard', () => {
 
     expect(calls).toBe(1);
     expect(result.continue).toBe(true);
+    expect(inner).toEqual({ continue: true, data: { n: 1 } });
   });
 
   it('does NOT block a handler that fires a DIFFERENT event', async () => {

@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Not, Repository } from 'typeorm';
+import { In, IsNull, LessThan, Not, Repository } from 'typeorm';
 import { WebhookOutboxEvent, WebhookOutboxState } from './entities/webhook-outbox-event.entity';
 import { createLogger } from '../../common/services/logger.service';
 import { isUniqueViolation } from '../../common/utils/db-errors';
@@ -16,6 +16,8 @@ export interface ReplayableDelivery {
   idempotencyKey: string;
   payload: Record<string, unknown>;
   attempts: number;
+  deliveryId?: string;
+  state?: WebhookOutboxState | null;
 }
 
 /**
@@ -77,7 +79,7 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
   async pruneSettled(olderThanDays: number): Promise<number> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - olderThanDays);
-    const result = await this.outbox.delete({ state: Not('pending'), createdAt: LessThan(cutoff) });
+    const result = await this.outbox.delete({ state: Not(In(['pending', 'queued'])), createdAt: LessThan(cutoff) });
     return result.affected || 0;
   }
 
@@ -110,15 +112,12 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Record the outcome and retire the payload.
-   *
-   * `dispatched` covers both modes: handed to the queue, or completed inline. A failure INSIDE
-   * either owner dead-letters through webhook_delivery_failures, so a dispatched row is never the
-   * reconciler's concern, and retiring on ENQUEUE is what stops the reconciler duplicating work
-   * BullMQ already holds.
-   */
-  async close(webhookId: string, idempotencyKey: string, state: Exclude<WebhookOutboxState, 'pending'>): Promise<void> {
+  /** Retire replay data after successful delivery, cancellation or durable failure handoff. */
+  async close(
+    webhookId: string,
+    idempotencyKey: string,
+    state: Exclude<WebhookOutboxState, 'pending' | 'queued'>,
+  ): Promise<void> {
     try {
       await this.outbox.update({ webhookId, idempotencyKey }, { state, payload: null, lastAttemptAt: new Date() });
     } catch (error) {
@@ -126,10 +125,22 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Pending rows older than the staleness window, oldest first. Only these are replayable. */
+  /** Keep the queue's replay copy until the worker has settled the delivery. */
+  async markQueued(webhookId: string, idempotencyKey: string, deliveryId: string): Promise<void> {
+    try {
+      await this.outbox.update(
+        { webhookId, idempotencyKey, state: In(['pending', 'queued']), payload: Not(IsNull()) },
+        { state: 'queued', deliveryId, lastAttemptAt: new Date() },
+      );
+    } catch (error) {
+      this.logger.warn(`Could not record queued outbound delivery: ${String(error)}`);
+    }
+  }
+
+  /** Unsettled rows older than the staleness window; queued jobs are checked before replay. */
   async findStale(olderThan: Date, limit: number): Promise<ReplayableDelivery[]> {
     const rows = await this.outbox.find({
-      where: { state: 'pending', createdAt: LessThan(olderThan) },
+      where: { state: In(['pending', 'queued']), createdAt: LessThan(olderThan) },
       order: { createdAt: 'ASC' },
       take: limit,
     });
@@ -145,6 +156,8 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
         idempotencyKey: r.idempotencyKey,
         payload: r.payload,
         attempts: r.attempts,
+        deliveryId: r.deliveryId,
+        state: r.state,
       }));
   }
 
@@ -158,7 +171,7 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
   async countAttempt(id: string, attempts: number): Promise<boolean> {
     try {
       const result = await this.outbox.update(
-        { id, state: 'pending' },
+        { id, state: In(['pending', 'queued']) },
         { attempts: attempts + 1, lastAttemptAt: new Date() },
       );
       return (result.affected ?? 0) > 0;

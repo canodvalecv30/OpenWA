@@ -19,7 +19,7 @@
  * Same pattern as dockerfile-patchers.spec.js: a derived check over a surface that is otherwise
  * maintained by hand and forgotten by accident.
  */
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -146,6 +146,6 @@ function main() {
   process.exitCode = 1;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main();
 }

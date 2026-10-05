@@ -16,13 +16,6 @@ import { join } from 'node:path';
  * demonstrably live while dragging in enum members as false positives. The enumerations are exact,
  * so precision is chosen over recall — a key outside all three is simply not yet claimed by this
  * gate, and adding it to `env.validation.ts` brings it in.
- *
- * One knob sits outside that reach today: `MAIN_DATABASE_NAME` is read in `env.validation.ts` as
- * `read('MAIN_DATABASE_NAME')`, a call argument rather than a listed array element, so none of the
- * three enumerations see it. It is a genuine operator knob and is listed in `.env.example` below
- * anyway, but this gate does not — and cannot, by its own design — require it to be. Bringing it
- * into the gate's reach means adding it to one of the three enumerations, not widening the
- * extractor to also recognize call arguments.
  */
 describe('.env.example lists the keys the codebase claims', () => {
   const REPO = join(__dirname, '..', '..');

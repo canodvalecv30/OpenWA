@@ -221,6 +221,8 @@ function ConfigField({
         required={field.required}
         min={field.type === 'number' ? field.min : undefined}
         max={field.type === 'number' ? field.max : undefined}
+        // min/max are value bounds only; without step="any" the default step of 1 rejects 0.7.
+        step={field.type === 'number' ? 'any' : undefined}
         minLength={field.type !== 'number' ? field.min : undefined}
         maxLength={field.type !== 'number' ? field.max : undefined}
         pattern={field.type !== 'number' ? field.pattern : undefined}
@@ -252,8 +254,10 @@ function ConfigField({
  * iframe cannot read the parent's language setting either, and the manifest block covers only top-level
  * field text, so `locale` is what lets an editor translate its own strings. Additive, like `theme`.
  *
- * Sending them once, with the handshake, is sufficient: the theme and language controls sit behind the
- * modal overlay, so neither can change while an editor is open, and reopening re-runs the handshake.
+ * They are sent once, with the handshake. The theme and language controls sit behind the modal overlay,
+ * so neither setting can change while an editor is open, and reopening re-runs the handshake. The OS
+ * appearance can, though: under the 'system' theme the dashboard repaints when it flips, while the
+ * handshake theme stays as sent, so an editor that follows it should also watch `prefers-color-scheme`.
  */
 function PluginConfigUi({ plugin, sessionId }: { plugin: Plugin; sessionId?: string }) {
   const { t, i18n } = useTranslation();
@@ -408,7 +412,8 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
   };
 
   // ── Per-session config override ───────────────────────────────────────────
-  const hasSchema = !!plugin.configSchema && Object.keys(plugin.configSchema.properties).length > 0;
+  // `properties` is optional in practice: the gateway does not validate a manifest's configSchema.
+  const hasSchema = Object.keys(plugin.configSchema?.properties ?? {}).length > 0;
   const hasUi = !!plugin.configUi;
   const lzProps = localizePlugin(plugin, i18n.language).configSchema?.properties;
   const [selSession, setSelSession] = useState<string>('');
@@ -552,10 +557,10 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
           </select>
           {selSession && hasUi ? (
             <PluginConfigUi key={selSession} plugin={plugin} sessionId={selSession} />
-          ) : selSession && plugin.configSchema ? (
+          ) : selSession && hasSchema ? (
             <>
               <form ref={overrideFormRef} className="config-form" onSubmit={e => e.preventDefault()}>
-                {Object.entries(lzProps ?? plugin.configSchema.properties).map(([key, field]) => (
+                {Object.entries(lzProps ?? plugin.configSchema?.properties ?? {}).map(([key, field]) => (
                   <ConfigField
                     key={key}
                     field={field}
@@ -589,7 +594,16 @@ export default function Plugins() {
   const { data: plugins = [], isLoading: loadingPlugins, error: queryError } = usePluginsQuery();
   const loading = loadingPlugins;
   const error = queryError instanceof Error ? queryError.message : null;
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  // Ids of plugins with a lifecycle action in flight. One per plugin, so another plugin's action
+  // settling first does not re-enable this plugin's buttons while its own request is pending.
+  const [actionLoading, setActionLoading] = useState<ReadonlySet<string>>(new Set());
+  const startAction = (id: string) => setActionLoading(s => new Set(s).add(id));
+  const endAction = (id: string) =>
+    setActionLoading(s => {
+      const next = new Set(s);
+      next.delete(id);
+      return next;
+    });
   const schemaFormRef = useRef<HTMLFormElement>(null);
 
   const [showConfigModal, setShowConfigModal] = useState(false);
@@ -633,7 +647,7 @@ export default function Plugins() {
         return;
       }
     }
-    setActionLoading(plugin.id);
+    startAction(plugin.id);
     try {
       // Both endpoints report lifecycle failures as 200 + {success:false} — surface them instead of
       // silently refetching. The card flips to ERROR either way, but without the message the operator
@@ -653,12 +667,12 @@ export default function Plugins() {
         err instanceof Error ? err.message : t('plugins.toasts.errorDefault'),
       );
     } finally {
-      setActionLoading(null);
+      endAction(plugin.id);
     }
   };
 
   const handleHealthCheck = async (pluginId: string) => {
-    setActionLoading(pluginId);
+    startAction(pluginId);
     try {
       const result = await pluginsApi.healthCheck(pluginId);
       if (result.healthy) {
@@ -669,7 +683,7 @@ export default function Plugins() {
     } catch (err) {
       toast.error(t('plugins.toasts.healthError'), err instanceof Error ? err.message : t('common.unknownError'));
     } finally {
-      setActionLoading(null);
+      endAction(pluginId);
     }
   };
 
@@ -723,6 +737,8 @@ export default function Plugins() {
     try {
       const installed = await pluginsApi.install(installFile);
       refetchAll();
+      // The catalog's installed and update flags are computed per request, so they changed too.
+      void loadCatalog();
       toast.success(t('plugins.toasts.installed', 'Plugin installed'), installed.name);
       setShowInstallModal(false);
       setInstallFile(null);
@@ -733,34 +749,35 @@ export default function Plugins() {
     }
   };
 
-  const loadCatalog = async (silent = false) => {
+  const loadCatalog = async () => {
     setCatalogLoading(true);
     setCatalogError(null);
     try {
       setCatalog(await pluginsApi.catalog());
     } catch (err) {
-      // Silent mode is the page-mount prefetch that powers the update chips: a catalog that
-      // cannot be reached just means no chips, so the failure is not surfaced here — the
-      // drawer's own lazy-load effect (which skips while an error is set) retries loudly
-      // when the user actually opens the Catalog tab.
-      if (!silent) setCatalogError(err instanceof Error ? err.message : String(err));
+      // The error renders only inside the Catalog tab, next to a Refresh button, so a failed
+      // page-mount prefetch stays quiet on the page itself (it just means no update chips). It
+      // must still be recorded: a tab opened while that prefetch was in flight would otherwise
+      // settle on "No plugins in the catalog." with no way to retry.
+      setCatalogError(err instanceof Error ? err.message : String(err));
     } finally {
       setCatalogLoading(false);
     }
   };
 
-  // Lazy-load the catalog the first time the Catalog tab is opened.
+  // Load the catalog when the Catalog tab opens with nothing to show: the first time, or again
+  // after an earlier load failed.
   useEffect(() => {
-    if (showInstallModal && installMode === 'catalog' && catalog.length === 0 && !catalogLoading && !catalogError) {
+    if (showInstallModal && installMode === 'catalog' && catalog.length === 0 && !catalogLoading) {
       void loadCatalog();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showInstallModal, installMode]);
 
   // Prefetch once on mount so installed-plugin cards can flag newer catalog versions without the
-  // user having to open the Install drawer first. Silent: an unreachable catalog hides the chips.
+  // user having to open the Install drawer first. An unreachable catalog just hides the chips.
   useEffect(() => {
-    void loadCatalog(true);
+    void loadCatalog();
   }, []);
 
   // Catalog entries with a strictly newer version than the installed one, keyed by plugin id —
@@ -814,15 +831,16 @@ export default function Plugins() {
 
   const handleUninstall = async (plugin: Plugin) => {
     if (!window.confirm(t('plugins.uninstallConfirm', { name: localizePlugin(plugin, i18n.language).name }))) return;
-    setActionLoading(plugin.id);
+    startAction(plugin.id);
     try {
       await pluginsApi.uninstall(plugin.id);
       refetchAll();
+      void loadCatalog();
       toast.success(t('plugins.toasts.uninstalled', 'Plugin uninstalled'), localizePlugin(plugin, i18n.language).name);
     } catch (err) {
       toast.error(t('plugins.toasts.uninstallFailed', 'Uninstall failed'), err instanceof Error ? err.message : '');
     } finally {
-      setActionLoading(null);
+      endAction(plugin.id);
     }
   };
 
@@ -909,7 +927,7 @@ export default function Plugins() {
           <div className="plugins-grid">
             {visiblePlugins.map(plugin => {
               const TypeIcon = pluginTypeIcons[plugin.type as PluginType] || Puzzle;
-              const isLoading = actionLoading === plugin.id;
+              const isLoading = actionLoading.has(plugin.id);
               const lz = localizePlugin(plugin, i18n.language);
 
               return (
@@ -1289,8 +1307,7 @@ export default function Plugins() {
                       only. A plugin with its own editor saves through that editor, so the footer Save is
                       omitted rather than left to save a form the operator cannot see. */}
                   {(showTabs && (configTab === 'sessions' || configTab === 'instances')) ||
-                  configPlugin.configUi ? null : lz.configSchema &&
-                    Object.keys(lz.configSchema.properties).length > 0 ? (
+                  configPlugin.configUi ? null : Object.keys(lz.configSchema?.properties ?? {}).length > 0 ? (
                     <button className="btn-primary" onClick={handleSaveSchemaConfig} disabled={savingConfig}>
                       {savingConfig ? <Loader2 size={16} className="animate-spin" /> : t('plugins.config.save')}
                     </button>
@@ -1307,7 +1324,7 @@ export default function Plugins() {
                      button with different semantics, which is what the Chat Flow modal looked like. */
               configPlugin.configUi ? (
                 <PluginConfigUi plugin={configPlugin} />
-              ) : lz.configSchema && Object.keys(lz.configSchema.properties).length > 0 ? (
+              ) : lz.configSchema && Object.keys(lz.configSchema.properties ?? {}).length > 0 ? (
                 <form ref={schemaFormRef} className="config-form" onSubmit={e => e.preventDefault()}>
                   {Object.entries(lz.configSchema.properties).map(([key, field]) => (
                     <ConfigField

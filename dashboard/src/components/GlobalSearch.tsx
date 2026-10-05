@@ -7,7 +7,7 @@ import './GlobalSearch.css';
 interface GlobalSearchProps {
   /** Called when the user clicks a result — the parent navigates to that chat/message. */
   onHit: (hit: SearchHit) => void;
-  /** When set, the scope toggle defaults to this session (optional). */
+  /** When set, offers a toggle that limits the search to this session (off by default). */
   currentSessionId?: string;
 }
 
@@ -19,6 +19,9 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
   const [q, setQ] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [total, setTotal] = useState(0);
+  // Where the next page starts on the server: hits already listed are dropped from a page, so this can
+  // run ahead of hits.length, and "more" stays up only while the server has rows past it.
+  const [nextOffset, setNextOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scopeCurrent, setScopeCurrent] = useState(false);
@@ -45,6 +48,7 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
       if (!params) {
         setHits([]);
         setTotal(0);
+        setNextOffset(0);
         setError(null);
         setLoading(false);
         return;
@@ -54,8 +58,14 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
       try {
         const res = await searchApi.search(params);
         if (id !== requestId.current) return;
-        setHits(prev => (append ? [...prev, ...res.hits] : res.hits));
+        // A message indexed since the last page shifts the offset, so the next page can repeat a hit.
+        setHits(prev => {
+          if (!append) return res.hits;
+          const seen = new Set(prev.map(h => h.messageId));
+          return [...prev, ...res.hits.filter(h => !seen.has(h.messageId))];
+        });
         setTotal(res.total);
+        setNextOffset(offset + res.hits.length);
       } catch (e: unknown) {
         if (id !== requestId.current) return;
         const status = (e as { status?: number }).status;
@@ -66,6 +76,7 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
         if (!append) {
           setHits([]);
           setTotal(0);
+          setNextOffset(0);
         }
       } finally {
         if (id === requestId.current) setLoading(false);
@@ -81,6 +92,7 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
       requestId.current += 1;
       setHits([]);
       setTotal(0);
+      setNextOffset(0);
       setError(null);
       setLoading(false);
       return;
@@ -119,7 +131,7 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
   // replaced by the loading row, which would otherwise leave focus on nothing.
   const loadMore = () => {
     inputRef.current?.focus();
-    void run(q, hits.length, true);
+    void run(q, nextOffset, true);
   };
 
   return (
@@ -193,11 +205,11 @@ export function GlobalSearch({ onHit, currentSessionId }: GlobalSearchProps) {
                 </div>
               </button>
             ))}
-          {!loading && hits.length < total && (
+          {!loading && nextOffset < total && (
             // preventDefault on mousedown keeps focus in the input, so a mouse click does not start the
             // close timer; click still fires for the mouse and for Enter/Space.
             <button className="global-search-more" onMouseDown={e => e.preventDefault()} onClick={loadMore}>
-              {t('search.results', { count: total })}
+              {t('search.loadMore', { shown: hits.length, total })}
             </button>
           )}
         </div>

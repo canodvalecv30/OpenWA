@@ -63,7 +63,7 @@ describe('BaileysMessaging.createCallLink', () => {
 
     expect(link).toBe('https://call.whatsapp.com/video/TOKEN123');
     // Baileys takes the start time in SECONDS, and its own type is 'audio' | 'video'.
-    expect(createCallLink).toHaveBeenCalledWith('video', { startTime: START_S }, expect.any(Number));
+    expect(createCallLink).toHaveBeenCalledWith('video', { startTime: START_S });
   });
 
   it("uses WhatsApp's /voice/ prefix for an audio link", async () => {
@@ -71,7 +71,7 @@ describe('BaileysMessaging.createCallLink', () => {
     const link = await makeMessaging({ createCallLink }).createCallLink('audio', START_MS);
 
     expect(link).toBe('https://call.whatsapp.com/voice/TOKEN456');
-    expect(createCallLink).toHaveBeenCalledWith('audio', { startTime: START_S }, expect.any(Number));
+    expect(createCallLink).toHaveBeenCalledWith('audio', { startTime: START_S });
   });
 
   // The failure that would otherwise be silent: a prefix with nothing after it is a dead link that
@@ -83,11 +83,14 @@ describe('BaileysMessaging.createCallLink', () => {
     );
   });
 
-  it('reports an unanswered query rather than hanging on a silent socket', async () => {
+  // Minting a link is non-idempotent: the deadline abandons the query without cancelling it, so a
+  // 503, which the Go SDK replays for POST, could mint a second link. An unanswered query must still
+  // fail in time, but as a 500.
+  it('reports an unanswered query in time, as a non-retryable failure', async () => {
     const createCallLink = jest.fn(() => new Promise<never>(() => undefined));
-    await expect(makeMessaging({ createCallLink }, 15).createCallLink('video', START_MS)).rejects.toBeInstanceOf(
-      EngineTransportError,
-    );
+    const failure = makeMessaging({ createCallLink }, 15).createCallLink('video', START_MS);
+    await expect(failure).rejects.toThrow(/did not confirm the call link in time/);
+    await expect(failure).rejects.not.toBeInstanceOf(EngineTransportError);
   });
 });
 

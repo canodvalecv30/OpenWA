@@ -26,6 +26,7 @@ describe('WwebjsChats.setOnlinePresence', () => {
     const host = {
       ensureReady: jest.fn(),
       getClient: () => client as unknown as Client,
+      isPageTransportError: () => false,
       logger,
     } as unknown as WwebjsEngineHost;
     return { chats: new WwebjsChats(host, {} as unknown as WwebjsMessaging), client };

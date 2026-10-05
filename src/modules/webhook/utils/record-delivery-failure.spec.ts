@@ -1,223 +1,131 @@
-import { MoreThan, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { WebhookDeliveryFailure } from '../entities/webhook-delivery-failure.entity';
 import { clearDeliveryFailureRows, recordWebhookDeliveryFailure, statusCodeFromError } from './record-delivery-failure';
 
-describe('statusCodeFromError', () => {
-  it('parses the status from an "HTTP <code>: ..." message', () => {
-    expect(statusCodeFromError('HTTP 503: Service Unavailable')).toBe(503);
-    expect(statusCodeFromError('HTTP 404: Not Found')).toBe(404);
+const input = {
+  webhookId: 'w',
+  sessionId: 's',
+  event: 'message.received',
+  url: 'https://receiver.example',
+  idempotencyKey: 'key',
+  deliveryId: 'd',
+  attempts: 3,
+  lastStatusCode: 503,
+  lastError: 'HTTP 503: down',
+};
+
+describe('webhook failure persistence', () => {
+  let ds: DataSource;
+  let second: DataSource;
+  let directory: string;
+  let repo: Repository<WebhookDeliveryFailure>;
+  const logger = { error: jest.fn() };
+  beforeEach(async () => {
+    directory = mkdtempSync(join(tmpdir(), 'webhook-failures-'));
+    const options = {
+      type: 'better-sqlite3' as const,
+      database: join(directory, 'data.sqlite'),
+      entities: [WebhookDeliveryFailure],
+    };
+    ds = await new DataSource({ ...options, synchronize: true }).initialize();
+    second = await new DataSource(options).initialize();
+    repo = ds.getRepository(WebhookDeliveryFailure);
+    logger.error.mockClear();
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await second.destroy();
+    await ds.destroy();
+    rmSync(directory, { recursive: true, force: true });
   });
 
-  it('returns null for a non-HTTP error (network / timeout / SSRF)', () => {
-    expect(statusCodeFromError('The operation was aborted due to timeout')).toBeNull();
+  it('parses HTTP status while leaving network errors unclassified', () => {
+    expect(statusCodeFromError('HTTP 503: down')).toBe(503);
     expect(statusCodeFromError('fetch failed')).toBeNull();
   });
-});
-
-describe('recordWebhookDeliveryFailure', () => {
-  const input = {
-    webhookId: 'wh-1',
-    sessionId: 's1',
-    event: 'message.received',
-    url: 'https://r.example/h',
-    idempotencyKey: 'k',
-    deliveryId: 'd',
-    attempts: 3,
-    lastStatusCode: 503,
-    lastError: 'HTTP 503: x',
-  };
-
-  const repoWith = (insert: jest.Mock, existing = 0): Repository<WebhookDeliveryFailure> =>
-    ({
-      insert,
-      count: jest.fn().mockResolvedValue(existing),
-      delete: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-    }) as unknown as Repository<WebhookDeliveryFailure>;
-
-  it('inserts the failure record, defaulting a missing lastStatusCode to null', async () => {
-    const insert = jest.fn().mockResolvedValue({});
-    const logger = { error: jest.fn() };
-
+  it('keeps a terminal payload and updates attempts and the latest error on repeat', async () => {
+    const payload = { body: 'private' };
+    await expect(recordWebhookDeliveryFailure(repo, logger, { ...input, payload })).resolves.toBe(true);
     await expect(
-      recordWebhookDeliveryFailure(repoWith(insert), logger, { ...input, lastStatusCode: undefined }),
-    ).resolves.toBe(true);
-
-    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ webhookId: 'wh-1', lastStatusCode: null }));
-    expect(logger.error).not.toHaveBeenCalled();
-  });
-
-  it('skips a delivery it has already recorded, so one lost event is one row', async () => {
-    // The reconciler replays a stranded delivery once per sweep until its budget is spent, and each
-    // failed replay lands here with the SAME idempotency key.
-    const insert = jest.fn().mockResolvedValue({});
-    const logger = { error: jest.fn() };
-
-    await expect(recordWebhookDeliveryFailure(repoWith(insert, 1), logger, input)).resolves.toBe(false);
-
-    expect(insert).not.toHaveBeenCalled();
-    expect(logger.error).not.toHaveBeenCalled();
-  });
-
-  it('gives the attempts-0 row the reason of an unsent delivery recorded again, without a second row', async () => {
-    // A shed delivery whose replay then fails before sending: the operator has to act on the new
-    // reason, not on the shed. Only attempts-0 rows take it, and the metric does not count it again.
-    const insert = jest.fn().mockResolvedValue({});
-    const update = jest.fn().mockResolvedValue({ affected: 1 });
-    const repo = {
-      insert,
-      update,
-      count: jest.fn().mockResolvedValue(1),
-    } as unknown as Repository<WebhookDeliveryFailure>;
-    const logger = { error: jest.fn() };
-
-    await expect(
-      recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0, lastStatusCode: null, lastError: 'too big' }),
+      recordWebhookDeliveryFailure(repo, logger, {
+        ...input,
+        attempts: 1,
+        lastStatusCode: 504,
+        lastError: 'HTTP 504: timeout',
+      }),
     ).resolves.toBe(false);
-
-    expect(insert).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith(
-      { webhookId: 'wh-1', idempotencyKey: 'k', attempts: 0 },
-      { lastError: 'too big', url: 'https://r.example/h', deliveryId: 'd' },
-    );
-  });
-
-  it('leaves the recorded row alone for a terminal failure recorded again', async () => {
-    const update = jest.fn();
-    const repo = {
-      insert: jest.fn(),
-      update,
-      count: jest.fn().mockResolvedValue(1),
-    } as unknown as Repository<WebhookDeliveryFailure>;
-
-    await expect(recordWebhookDeliveryFailure(repo, { error: jest.fn() }, input)).resolves.toBe(false);
-
-    expect(update).not.toHaveBeenCalled();
-  });
-
-  it('still reports an unsent duplicate as not recorded when refreshing its reason fails', async () => {
-    // A true here would bump the failure metric for a loss that is already counted.
-    const repo = {
-      insert: jest.fn(),
-      update: jest.fn().mockRejectedValue(new Error('db down')),
-      count: jest.fn().mockResolvedValue(1),
-    } as unknown as Repository<WebhookDeliveryFailure>;
-    const logger = { error: jest.fn() };
-
-    await expect(recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0 })).resolves.toBe(false);
-
-    expect(logger.error).toHaveBeenCalledTimes(1);
-  });
-
-  it('still records a failure that carries no idempotency key', async () => {
-    // Control: without a key there is no identity to dedupe on, so the guard must not swallow the
-    // row. Otherwise "skips a duplicate" would be satisfied by a helper that stopped inserting.
-    const insert = jest.fn().mockResolvedValue({});
-    const logger = { error: jest.fn() };
-
-    await expect(
-      recordWebhookDeliveryFailure(repoWith(insert, 1), logger, { ...input, idempotencyKey: undefined }),
-    ).resolves.toBe(true);
-
-    expect(insert).toHaveBeenCalled();
-  });
-
-  it('dedupes a terminal row only against terminal rows, then removes the attempts-0 row it replaces', async () => {
-    // A shed or shutdown-refused dispatch left an attempts-0 row. Counted as a duplicate, it would
-    // keep the capacity reason as the only record and drop the receiver's actual answer.
-    const calls: string[] = [];
-    const insert = jest.fn().mockImplementation(() => (calls.push('insert'), Promise.resolve({})));
-    const count = jest.fn().mockResolvedValue(0);
-    const del = jest.fn().mockImplementation(() => (calls.push('delete'), Promise.resolve({})));
-    const repo = { insert, count, delete: del } as unknown as Repository<WebhookDeliveryFailure>;
-    const logger = { error: jest.fn() };
-
-    await expect(recordWebhookDeliveryFailure(repo, logger, input)).resolves.toBe(true);
-
-    expect(count).toHaveBeenCalledWith({
-      where: { webhookId: 'wh-1', idempotencyKey: 'k', attempts: MoreThan(0) },
+    const rows = await repo.find({
+      select: { id: true, attempts: true, lastStatusCode: true, lastError: true, payload: true },
     });
-    expect(del).toHaveBeenCalledWith({ webhookId: 'wh-1', idempotencyKey: 'k', attempts: 0 });
-    // Written first, so a crash in between leaves two rows for the event rather than none.
-    expect(calls).toEqual(['insert', 'delete']);
-  });
-
-  it('dedupes an attempts-0 row against every row of the delivery and removes nothing', async () => {
-    const insert = jest.fn().mockResolvedValue({});
-    const count = jest.fn().mockResolvedValue(0);
-    const del = jest.fn().mockResolvedValue({});
-    const repo = { insert, count, delete: del } as unknown as Repository<WebhookDeliveryFailure>;
-    const logger = { error: jest.fn() };
-
-    await expect(recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0 })).resolves.toBe(true);
-
-    expect(count).toHaveBeenCalledWith({ where: { webhookId: 'wh-1', idempotencyKey: 'k' } });
-    expect(del).not.toHaveBeenCalled();
-  });
-
-  it('keeps the terminal row and the result when removing the attempts-0 row fails', async () => {
-    const insert = jest.fn().mockResolvedValue({});
-    const repo = {
-      insert,
-      count: jest.fn().mockResolvedValue(0),
-      delete: jest.fn().mockRejectedValue(new Error('db down')),
-    } as unknown as Repository<WebhookDeliveryFailure>;
-    const logger = { error: jest.fn() };
-
-    await expect(recordWebhookDeliveryFailure(repo, logger, input)).resolves.toBe(true);
-
-    expect(insert).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.any(String),
-      'db down',
-      expect.objectContaining({ action: 'webhook_failure_clear_error' }),
-    );
-  });
-
-  it('swallows a repository error so a logging hiccup cannot re-poison the delivery', async () => {
-    const insert = jest.fn().mockRejectedValue(new Error('db down'));
-    const logger = { error: jest.fn() };
-
-    // Reported as recorded even though the row was lost: the delivery really did fail, and the
-    // caller's failure metric must count it rather than hide it behind a database problem.
-    await expect(recordWebhookDeliveryFailure(repoWith(insert), logger, input)).resolves.toBe(true);
-    expect(logger.error).toHaveBeenCalled();
-  });
-});
-
-describe('clearDeliveryFailureRows', () => {
-  const repoWithDelete = (del: jest.Mock): Repository<WebhookDeliveryFailure> =>
-    ({ delete: del }) as unknown as Repository<WebhookDeliveryFailure>;
-
-  it('deletes every row of one delivery, or only its attempts-0 rows', async () => {
-    const del = jest.fn().mockResolvedValue({});
-    const logger = { error: jest.fn() };
-
-    await clearDeliveryFailureRows(repoWithDelete(del), logger, 'wh-1', 'k');
-    await clearDeliveryFailureRows(repoWithDelete(del), logger, 'wh-1', 'k', true);
-
-    expect(del.mock.calls).toEqual([
-      [{ webhookId: 'wh-1', idempotencyKey: 'k' }],
-      [{ webhookId: 'wh-1', idempotencyKey: 'k', attempts: 0 }],
+    expect(rows).toEqual([
+      expect.objectContaining({ attempts: 4, lastStatusCode: 504, lastError: 'HTTP 504: timeout', payload }),
     ]);
   });
-
-  it('deletes nothing without an idempotency key', async () => {
-    // Matching on webhookId alone would erase the rows of every other lost event of that webhook.
-    const del = jest.fn().mockResolvedValue({});
-
-    await clearDeliveryFailureRows(repoWithDelete(del), { error: jest.fn() }, 'wh-1', undefined);
-
-    expect(del).not.toHaveBeenCalled();
+  it('does not resurrect an expired payload when refreshing a terminal failure', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, input);
+    await repo.update({ idempotencyKey: 'key' }, { payload: null, createdAt: new Date(Date.now() - 25 * 3600000) });
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, payload: { body: 'private' } });
+    const row = await repo.findOneOrFail({ where: { idempotencyKey: 'key' }, select: { id: true, payload: true } });
+    expect(row.payload).toBeNull();
   });
 
-  it('logs a failed delete instead of throwing', async () => {
-    const logger = { error: jest.fn() };
-
-    await expect(
-      clearDeliveryFailureRows(repoWithDelete(jest.fn().mockRejectedValue(new Error('db down'))), logger, 'wh-1', 'k'),
-    ).resolves.toBeUndefined();
-
-    expect(logger.error).toHaveBeenCalledTimes(1);
+  it('converges simultaneous recorders from two connections on one terminal identity', async () => {
+    const results = await Promise.all([
+      recordWebhookDeliveryFailure(repo, logger, input),
+      recordWebhookDeliveryFailure(second.getRepository(WebhookDeliveryFailure), logger, { ...input, attempts: 1 }),
+    ]);
+    expect(results.sort()).toEqual([false, true]);
+    expect(await repo.count()).toBe(1);
+    expect((await repo.findOneByOrFail({ idempotencyKey: 'key' })).attempts).toBe(4);
+  });
+  it('replaces an unattempted row only after the terminal row is stored', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0, payload: { body: 'unused' } });
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, payload: { body: 'retained' } });
+    expect(await repo.count()).toBe(1);
+    expect((await repo.findOneByOrFail({ idempotencyKey: 'key' })).attempts).toBe(3);
+  });
+  it('keeps an unattempted row when terminal persistence fails', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0 });
+    jest.spyOn(repo, 'insert').mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(recordWebhookDeliveryFailure(repo, logger, input)).resolves.toBeNull();
+    expect((await repo.findOneByOrFail({ idempotencyKey: 'key' })).attempts).toBe(0);
+    expect(logger.error).toHaveBeenCalled();
+  });
+  it('returns a persistence failure when refreshing a terminal row fails', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, input);
+    jest.spyOn(repo, 'update').mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(recordWebhookDeliveryFailure(repo, logger, input)).resolves.toBeNull();
+  });
+  it('records unkeyed losses separately and stores no replay payload by default', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, idempotencyKey: undefined });
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, idempotencyKey: undefined });
+    expect(await repo.count()).toBe(2);
+    const rows = await repo.find({ select: { id: true, payload: true } });
+    expect(rows.every(r => r.payload === null)).toBe(true);
+  });
+  it('never keeps a payload on an unattempted row and refreshes its refusal reason', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0, payload: { body: 'unused' } });
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, attempts: 0, lastError: 'too large' });
+    const row = await repo.findOneOrFail({
+      where: { idempotencyKey: 'key' },
+      select: { id: true, lastError: true, payload: true },
+    });
+    expect(row).toMatchObject({ lastError: 'too large', payload: null });
+  });
+  it('clears only the matching identity and never deletes every row for an unkeyed loss', async () => {
+    await recordWebhookDeliveryFailure(repo, logger, input);
+    await recordWebhookDeliveryFailure(repo, logger, { ...input, idempotencyKey: 'other' });
+    await clearDeliveryFailureRows(repo, logger, 'w', undefined);
+    expect(await repo.count()).toBe(2);
+    await clearDeliveryFailureRows(repo, logger, 'w', 'key');
+    expect(await repo.count()).toBe(1);
+  });
+  it('logs a failed clear without changing the delivery outcome', async () => {
+    jest.spyOn(repo, 'delete').mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(clearDeliveryFailureRows(repo, logger, 'w', 'key')).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalled();
   });
 });

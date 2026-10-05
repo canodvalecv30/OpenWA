@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { HttpException, Logger } from '@nestjs/common';
+import { HttpException } from '@nestjs/common';
+import { createLogger } from '../../common/services/logger.service';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
-const logger = new Logger('Mcp');
+const logger = createLogger('Mcp');
 
 /**
  * Format a tool result, inlining small payloads as text and offloading large
@@ -46,7 +47,10 @@ export function jsonToolResult(data: object, isError = false): CallToolResult {
  */
 export function handleToolError(error: unknown): CallToolResult {
   if (error instanceof HttpException) {
-    logger.error(error.message, error.stack);
+    // A 4xx is the client's mistake (unknown session, bad input, missing role), which REST does not
+    // log at all: a warn line without a stack, so error-level alerting fires on server faults only.
+    if (error.getStatus() >= 500) logger.error(error.message, error.stack);
+    else logger.warn(`MCP tool error ${error.getStatus()}: ${error.message}`);
     const res = error.getResponse();
     const message =
       typeof res === 'object' && res !== null && 'message' in res

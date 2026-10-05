@@ -258,7 +258,7 @@ describe('PendingMessageReaperService.onModuleInit (scheduling)', () => {
       { execute: jest.fn() } as unknown as HookManager,
     );
 
-  it('does not schedule a timer when MESSAGE_REAPER_INTERVAL_MS <= 0', () => {
+  it('does not schedule a timer when MESSAGE_REAPER_INTERVAL_MS=0', () => {
     process.env.MESSAGE_REAPER_INTERVAL_MS = '0';
     const svc = makeService();
 

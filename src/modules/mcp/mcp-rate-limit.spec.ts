@@ -52,8 +52,8 @@ describe('readRateLimitConfig', () => {
     expect(readRateLimitConfig({ MCP_RATE_LIMIT_MAX: '1.9' }).max).toBe(1);
   });
 
-  it('floors 60.7 to 60 (valid positive integer)', () => {
-    expect(readRateLimitConfig({ MCP_RATE_LIMIT_MAX: '60' }).max).toBe(60);
+  it('floors 70.7 to 70 (valid positive integer)', () => {
+    expect(readRateLimitConfig({ MCP_RATE_LIMIT_MAX: '70.7' }).max).toBe(70);
   });
 
   it('falls back to default for MCP_RATE_LIMIT_WINDOW_MS 0.5', () => {

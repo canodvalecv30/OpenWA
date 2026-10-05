@@ -3,6 +3,7 @@ import { MediaInput, StatusPostOptions, StatusResult } from '../interfaces/whats
 import { BadRequestException } from '@nestjs/common';
 import { resolveMediaBuffer } from './baileys-messaging';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 
 /** How long WhatsApp keeps a status up. */
 const STATUS_TTL_MS = 24 * 3_600_000;
@@ -18,6 +19,8 @@ export interface BaileysStatusHost {
   ensureReady(): void;
   /** Post-ensureReady socket handle — call host.ensureReady() first. */
   getSocket(): WASocket;
+  /** The live socket or null, read without a readiness check: null once a stop or logout tore it down. */
+  getSocketOrNull(): WASocket | null;
   toEngineJid(jid: string): string;
   normalizedSelfJid(): string;
   /** Baileys timestamps are `number | Long`; normalize to unix seconds. */
@@ -35,6 +38,23 @@ export class BaileysStatus {
   /** Post-ensureReady socket handle. */
   private sock(): WASocket {
     return this.host.getSocket();
+  }
+
+  /**
+   * Send to `status@broadcast`. A send that fails after a stop or logout has torn its socket down is
+   * not ready (409), as a chat send is; a failure on a socket still in place propagates.
+   */
+  private async sendStatus(
+    content: AnyMessageContent,
+    options: Parameters<WASocket['sendMessage']>[2],
+  ): Promise<WAMessage | undefined> {
+    const sock = this.sock();
+    try {
+      return await sock.sendMessage('status@broadcast', content, options);
+    } catch (error) {
+      if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+      throw error;
+    }
   }
 
   postTextStatus(text: string, options: StatusPostOptions): Promise<StatusResult> {
@@ -61,7 +81,9 @@ export class BaileysStatus {
     options: StatusPostOptions,
   ): Promise<StatusResult> {
     this.host.ensureReady();
-    const { data, mimetype } = await resolveMediaBuffer(media, this.host.sessionProxyUrl());
+    // The kind's default labels a URL whose host serves a generic type, rather than octet-stream.
+    const fallbackType = kind === 'image' ? 'image/jpeg' : kind === 'video' ? 'video/mp4' : 'audio/ogg; codecs=opus';
+    const { data, mimetype } = await resolveMediaBuffer(media, this.host.sessionProxyUrl(), fallbackType);
     // A voice status carries no caption: WhatsApp has nowhere to render one on a status voice note,
     // and `ptt` is what makes it a voice note rather than an audio file. Baileys reads that same flag
     // to decide a status may take a background colour, so the colour `postStatus` already forwards
@@ -94,8 +116,7 @@ export class BaileysStatus {
           'unknown and the revoke cannot be addressed to them',
       );
     }
-    const sent = await this.sock().sendMessage(
-      'status@broadcast',
+    const sent = await this.sendStatus(
       {
         delete: {
           remoteJid: 'status@broadcast',
@@ -124,7 +145,7 @@ export class BaileysStatus {
       throw new BadRequestException('recipients is required to post a status on the Baileys engine');
     }
     const statusJidList = options.recipients.map(r => this.host.toEngineJid(r));
-    const sent = await this.sock().sendMessage('status@broadcast', content, {
+    const sent = await this.sendStatus(content, {
       statusJidList,
       backgroundColor: options.backgroundColor,
       font: options.font,

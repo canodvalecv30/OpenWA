@@ -1,9 +1,11 @@
 import { ContactController } from './contact.controller';
 import { ContactService } from './contact.service';
+import { ChatScopeService } from '../auth/chat-scope.service';
+import type { ApiKey } from '../auth/entities/api-key.entity';
 
 describe('ContactController', () => {
   const service = {
-    getContacts: jest.fn(),
+    listContacts: jest.fn(),
     getProfilePictures: jest.fn(),
     getContactById: jest.fn(),
     getNumberId: jest.fn(),
@@ -15,31 +17,49 @@ describe('ContactController', () => {
     unblockContact: jest.fn(),
     getBlockedContacts: jest.fn(),
   };
-  const controller = new ContactController(service as unknown as ContactService);
+  const controller = new ContactController(service as unknown as ContactService, new ChatScopeService());
 
   beforeEach(() => jest.clearAllMocks());
 
-  it('findAll parses limit/offset query strings', async () => {
-    service.getContacts.mockResolvedValue([]);
-    await controller.findAll('s1', '5', '10');
-    expect(service.getContacts).toHaveBeenCalledWith('s1', { limit: 5, offset: 10 });
+  const contacts = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `${i}@c.us` }));
+
+  it('findAll applies limit/offset query strings', async () => {
+    service.listContacts.mockResolvedValue(contacts(50));
+    const page = (await controller.findAll('s1', '5', '10')) as { id: string }[];
+    expect(service.listContacts).toHaveBeenCalledWith('s1');
+    expect(page.map(c => c.id)).toEqual(['10@c.us', '11@c.us', '12@c.us', '13@c.us', '14@c.us']);
   });
 
-  it('findAll leaves paging undefined without query params', async () => {
-    service.getContacts.mockResolvedValue([]);
-    await controller.findAll('s1');
-    expect(service.getContacts).toHaveBeenCalledWith('s1', { limit: undefined, offset: undefined });
+  it('findAll caps an unpaged list at the default window', async () => {
+    service.listContacts.mockResolvedValue(contacts(1500));
+    await expect(controller.findAll('s1')).resolves.toHaveLength(1000);
+  });
+
+  it('findAll filters to a chat-restricted key before the window, matching either phone dialect', async () => {
+    // The disallowed contact comes first, so a page of 1 taken before filtering would hold nothing allowed.
+    service.listContacts.mockResolvedValue([
+      { id: '999@c.us' },
+      { id: '62811@s.whatsapp.net' },
+      { id: '62811@c.us' },
+      { id: '555000111@lid' },
+    ]);
+    const apiKey = { allowedChats: ['62811@c.us'] } as ApiKey;
+
+    const all = (await controller.findAll('s1', undefined, undefined, apiKey)) as { id: string }[];
+    expect(all.map(c => c.id)).toEqual(['62811@s.whatsapp.net', '62811@c.us']);
+    const first = (await controller.findAll('s1', '1', '0', apiKey)) as { id: string }[];
+    expect(first.map(c => c.id)).toEqual(['62811@s.whatsapp.net']);
   });
 
   it('getProfilePictures splits, trims and drops empty ids', async () => {
-    service.getProfilePictures.mockResolvedValue([null, 'https://pps/2.jpg']);
+    service.getProfilePictures.mockResolvedValue({ 'a@c.us': null, 'b@c.us': 'https://pps/2.jpg' });
     const out = await controller.getProfilePictures('s1', ' a@c.us , ,b@c.us ');
     expect(service.getProfilePictures).toHaveBeenCalledWith('s1', ['a@c.us', 'b@c.us']);
-    expect(out).toEqual({ pictures: [null, 'https://pps/2.jpg'] });
+    expect(out).toEqual({ pictures: { 'a@c.us': null, 'b@c.us': 'https://pps/2.jpg' } });
   });
 
   it('getProfilePictures defaults a missing ids param to an empty list', async () => {
-    service.getProfilePictures.mockResolvedValue([]);
+    service.getProfilePictures.mockResolvedValue({});
     await controller.getProfilePictures('s1');
     expect(service.getProfilePictures).toHaveBeenCalledWith('s1', []);
   });
@@ -104,5 +124,32 @@ describe('ContactController', () => {
     service[method].mockResolvedValue(undefined);
     await expect(controller[method]('s1', 'c1')).resolves.toEqual(body);
     expect(service[method]).toHaveBeenCalledWith('s1', 'c1');
+  });
+});
+
+// Every route resolves the session's engine first, which answers 400 "Session is not started" for a
+// session with no running engine; clients generated from the OpenAPI contract need it declared.
+describe('ContactController OpenAPI error responses', () => {
+  const handler = (name: string) => Object.getOwnPropertyDescriptor(ContactController.prototype, name)?.value as object;
+  const routes = Object.getOwnPropertyNames(ContactController.prototype).filter(
+    name => name !== 'constructor' && Reflect.getMetadata('path', handler(name)) !== undefined,
+  );
+
+  it('covers every route', () => {
+    expect(routes).toHaveLength(11);
+  });
+
+  it.each(routes)('%s declares 400', method => {
+    const responses = Reflect.getMetadata('swagger/apiResponse', handler(method)) as Record<string, unknown>;
+    expect(Object.keys(responses)).toContain('400');
+  });
+
+  // A started session that is not ready answers 409, so the 400 must not describe it as "not ready".
+  it.each(routes)('%s describes its 400 as a session that is not started', method => {
+    const responses = Reflect.getMetadata('swagger/apiResponse', handler(method)) as Record<
+      string,
+      { description?: string }
+    >;
+    expect(responses['400']?.description).toMatch(/^Session is not started/);
   });
 });

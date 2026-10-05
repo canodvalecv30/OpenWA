@@ -74,3 +74,71 @@ describe('boolean chat operations distinguish a dead page from a refusal', () =>
     expect(reportIfPageTransportError).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Mute and pin resolve the chat first and then write. The write leg is where a renderer that dies
+ * mid-call rejects, so it needs the same split: a 503 with the death reported, while any other page
+ * rejection still reaches the caller unchanged. Setting the account's own presence is the same kind
+ * of write and makes the same split.
+ */
+describe('mute, pin and presence classify a dead page on the write leg', () => {
+  const transportError = new Error('Protocol error (Runtime.callFunctionOn): Target closed');
+
+  function makeChats(reject: unknown): { chats: WwebjsChats; reportIfPageTransportError: jest.Mock } {
+    const client = {
+      getChatById: jest.fn().mockResolvedValue({ id: { _serialized: '628123@c.us' } }),
+      muteChat: jest.fn().mockRejectedValue(reject),
+      unmuteChat: jest.fn().mockRejectedValue(reject),
+      pinChat: jest.fn().mockRejectedValue(reject),
+      unpinChat: jest.fn().mockRejectedValue(reject),
+      sendPresenceAvailable: jest.fn().mockRejectedValue(reject),
+      sendPresenceUnavailable: jest.fn().mockRejectedValue(reject),
+    };
+    const reportIfPageTransportError = jest.fn();
+    const host = {
+      ensureReady: jest.fn(),
+      getClient: () => client as unknown as Client,
+      isPageTransportError: (error: unknown) => error === transportError,
+      reportIfPageTransportError,
+      logger,
+    } as unknown as WwebjsEngineHost;
+    return { chats: new WwebjsChats(host, {} as unknown as WwebjsMessaging), reportIfPageTransportError };
+  }
+
+  const WRITES: [string, (chats: WwebjsChats) => Promise<unknown>][] = [
+    ['muteChat', chats => chats.muteChat('628123@c.us', Date.now() + 60_000)],
+    ['unmuteChat', chats => chats.muteChat('628123@c.us', null)],
+    ['pinChat', chats => chats.pinChat('628123@c.us', true)],
+    ['unpinChat', chats => chats.pinChat('628123@c.us', false)],
+    ['setOnlinePresence(true)', chats => chats.setOnlinePresence(true)],
+    ['setOnlinePresence(false)', chats => chats.setOnlinePresence(false)],
+  ];
+
+  it.each(WRITES)('%s reports a dead page as a transport failure', async (_op, call) => {
+    const { chats, reportIfPageTransportError } = makeChats(transportError);
+
+    await expect(call(chats)).rejects.toThrow(EngineTransportError);
+    expect(reportIfPageTransportError).toHaveBeenCalledWith(transportError, expect.any(String));
+  });
+
+  it.each(WRITES)(
+    '%s answers a protocol timeout as a transport failure without reporting a death',
+    async (_op, call) => {
+      const timeout = new Error(
+        "Runtime.callFunctionOn timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed.",
+      );
+      const { chats, reportIfPageTransportError } = makeChats(timeout);
+
+      await expect(call(chats)).rejects.toThrow(EngineTransportError);
+      expect(reportIfPageTransportError).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(WRITES)('%s rethrows any other page rejection unchanged', async (_op, call) => {
+    const refusal = new Error('Evaluation failed: TypeError: renamed internal');
+    const { chats, reportIfPageTransportError } = makeChats(refusal);
+
+    await expect(call(chats)).rejects.toBe(refusal);
+    expect(reportIfPageTransportError).not.toHaveBeenCalled();
+  });
+});

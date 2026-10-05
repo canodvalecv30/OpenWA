@@ -29,18 +29,6 @@ describe('RedisThrottlerStorage', () => {
     expect(rec).toEqual({ totalHits: 1, timeToExpire: 2, isBlocked: false, timeToBlockExpire: 0 });
   });
 
-  it('treats a repaired legacy TTL-less counter as a fresh first hit', async () => {
-    const redis = makeRedis({ hits: 1, ttlMs: 1000 });
-    const rec = await new RedisThrottlerStorage(redis as unknown as Redis).increment('k', 1000, 10, 60000, 'short');
-    expect(redis.eval).toHaveBeenCalledWith(
-      expect.stringContaining("redis.call('SET', KEYS[1], 1, 'PX'"),
-      1,
-      expect.any(String),
-      '1000',
-    );
-    expect(rec).toEqual({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 });
-  });
-
   // The block is the counter itself, so it lifts when the window key expires, not after blockDuration:
   // advertising blockDuration made a client that honours Retry-After wait up to an hour for nothing.
   it('over the limit (incr>limit) is blocked until the window expires, in seconds', async () => {

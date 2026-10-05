@@ -9,7 +9,7 @@ export interface SearchProvider {
   /** Human label for dashboard/config. */
   readonly label: string;
   search(query: SearchQuery): Promise<SearchResults>;
-  /** Registry/route use this; 503 when not ok. */
+  /** Provider liveness. Not yet consumed by the route, the registry or /health. */
   health(): Promise<SearchHealth>;
 }
 

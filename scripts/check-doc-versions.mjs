@@ -4,7 +4,7 @@
  *
  * Stops the recurring "we cut a release but a doc still shows the old version" problem by failing
  * CI when a *current-version* reference drifts from package.json. It does NOT touch historical
- * version mentions (CHANGELOG history, roadmap milestones, example image tags) — only the three
+ * version mentions (CHANGELOG history, roadmap milestones, example image tags) — only the
  * places that must always reflect the shipped version:
  *
  *   1. The README version badges (root + docs/) must be the DYNAMIC shields endpoint that reads

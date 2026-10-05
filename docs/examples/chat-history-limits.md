@@ -8,7 +8,7 @@ OpenWA has two different history paths, and they answer different questions.
 GET /api/sessions/{sessionId}/messages
 ```
 
-This endpoint reads from OpenWA's local database. It returns messages that OpenWA has observed and persisted while the session was connected.
+This endpoint reads from OpenWA's local database. It returns messages that OpenWA has observed and persisted while the session was connected, including, on Baileys, the history WhatsApp syncs to the device when it is linked.
 
 Use this when you want stable pagination over messages already stored by OpenWA.
 
@@ -46,9 +46,12 @@ Deep mode is **metadata-only** — `includeMedia` is ignored, because downloadin
 you need. Note that a very large, rapid history pull is heavier on the linked session and can increase the
 risk of WhatsApp rate-limiting; use the smallest window that meets your need.
 
-Deep mode applies to the `whatsapp-web.js` engine. The Baileys engine does not expose on-demand history
-(it has no message-history sync), so the history endpoint returns `501 Not Implemented` there regardless
-of `deep`; consume Baileys history through local storage / webhooks / WebSocket as it arrives instead.
+Deep mode applies to the `whatsapp-web.js` engine. The Baileys engine does not expose on-demand history,
+so the history endpoint returns `501 Not Implemented` there regardless of `deep`; consume Baileys history
+through local storage / webhooks / WebSocket as it arrives instead. When the device is linked, Baileys
+backfills WhatsApp's recent history window into local storage (the full archive if
+`BAILEYS_SYNC_FULL_HISTORY=true` was set before linking; an already-linked session must be re-linked to get
+it), where `GET /api/sessions/{sessionId}/messages` serves it.
 
 There is still an ultimate ceiling: once WhatsApp's servers stop returning older messages for the linked
 session, no further history is retrievable through the web engine, regardless of `limit`. So the endpoint

@@ -32,7 +32,7 @@ export const proto = {
 // (the package is pure ESM; ts-jest runs CJS, so the mock owns the serialisation helpers)
 
 type BufferLike = { type: 'Buffer'; data: string | number[] };
-type BufferJsonObject = { buffer?: boolean; type?: string; data?: string | number[]; value?: string | number[] };
+type BufferJsonObject = { type?: string; data?: unknown };
 
 export const BufferJSON = {
   replacer: (_k: string, value: unknown): unknown => {
@@ -47,9 +47,17 @@ export const BufferJSON = {
   reviver: (_: string, value: unknown): unknown => {
     if (typeof value === 'object' && value !== null) {
       const obj = value as BufferJsonObject;
-      if (obj.buffer === true || obj.type === 'Buffer') {
-        const val = obj.data ?? obj.value;
-        return typeof val === 'string' ? Buffer.from(val, 'base64') : Buffer.from(val ?? []);
+      if (obj.type === 'Buffer' && typeof obj.data === 'string') {
+        return Buffer.from(obj.data, 'base64');
+      }
+      if (!Array.isArray(value)) {
+        const keys = Object.keys(value);
+        if (keys.length > 0 && keys.every(k => !isNaN(parseInt(k, 10)))) {
+          const values = Object.values(value);
+          if (values.every(v => typeof v === 'number')) {
+            return Buffer.from(values);
+          }
+        }
       }
     }
     return value;

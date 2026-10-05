@@ -242,9 +242,6 @@ describe('SessionProxyInterceptor', () => {
       expect(seen[0].body).toBe('');
     });
 
-    // Without the chain the owner sees every forwarded call as coming from THIS node — an
-    // allowedIps-restricted key 401s on every forwarded request, and the per-IP throttler pools
-    // all forwarded traffic into one bucket.
     // End-to-end proof of the absolute-form vector: a raw HTTP request whose target names another
     // origin must still be forwarded to the OWNER, never to the origin the caller chose — otherwise
     // the caller receives the attacker origin's response with their own API key already spent on it.
@@ -272,6 +269,9 @@ describe('SessionProxyInterceptor', () => {
       }
     });
 
+    // Without the chain the owner sees every forwarded call as coming from THIS node: an
+    // allowedIps-restricted key is refused with 403 on every forwarded request, and the per-IP
+    // throttler pools all forwarded traffic into one bucket.
     it('appends the observed peer to x-forwarded-for so the owner can resolve the real client', async () => {
       const direct = build({
         req: request({ socket: { remoteAddress: '::ffff:203.0.113.7' } }),

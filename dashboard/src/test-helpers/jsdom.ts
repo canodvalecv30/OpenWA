@@ -4,8 +4,9 @@
 // module — some modules read `window.location.origin` at import time (useWebSocket).
 
 /**
- * Installs JSDOM globals on globalThis. Idempotent: later calls replace the window with a fresh
- * one, which is what a second test file in the same process would want anyway.
+ * Installs JSDOM globals on globalThis. Call it once per process: a second call swaps window,
+ * document, storage and location, but the constructors (HTMLElement, Node, Event, ...) stay bound
+ * to the first window, because the copy loop below never overwrites a key that already exists.
  */
 export async function installJsdomGlobals(url = 'http://localhost/'): Promise<void> {
   // jsdom ships no bundled types and @types/jsdom is not installed; import it untyped and narrow

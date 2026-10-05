@@ -16,6 +16,8 @@
  * // Sessions are addressed by the UUID that create() returns, not by name.
  * const session = await client.sessions.create({ name: 'my-session' });
  * await client.sessions.start(session.id);
+ * // Link the account before sending: scan sessions.getQrCode or use sessions.requestPairingCode,
+ * // then wait for status 'ready'. An unlinked session answers the send with 409.
  * await client.messages.sendText(session.id, {
  *   chatId: '628123456789@c.us',
  *   text: 'Hello from the OpenWA SDK!',
@@ -106,7 +108,23 @@ export class OpenWAClient {
   // ── Internal API ─────────────────────────────────────────────────
 
   /** Issue a raw request against the API. (Public for advanced use.) */
-  request<T>(options: RequestOptions): Promise<T> {
+  request<T>(options: RequestOptions, idempotencyKey?: string): Promise<T> {
+    if (idempotencyKey !== undefined) {
+      if (
+        typeof idempotencyKey !== 'string' ||
+        idempotencyKey.length < 1 ||
+        idempotencyKey.length > 255 ||
+        /[^\x21-\x7E]/.test(idempotencyKey)
+      ) {
+        return Promise.reject(new TypeError('OpenWA: idempotencyKey must be 1-255 visible ASCII characters'));
+      }
+      const headers = { ...options.headers };
+      for (const name of Object.keys(headers)) {
+        if (name.toLowerCase() === 'idempotency-key') delete headers[name];
+      }
+      headers['Idempotency-Key'] = idempotencyKey;
+      options = { ...options, headers };
+    }
     return request<T>(this.config, options);
   }
 
@@ -119,12 +137,12 @@ export class OpenWAClient {
    * Shared transport helper for image/video/audio/document/sticker sends. Public resource methods
    * expose the narrower per-route request types (including audio-only `ptt`).
    */
-  sendMedia(sessionId: string, segment: string, body: SendMediaRequest): Promise<MessageResponse> {
+  sendMedia(sessionId: string, segment: string, body: SendMediaRequest, idempotencyKey?: string): Promise<MessageResponse> {
     return this.request<MessageResponse>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/messages/${segment}`,
       body,
-    });
+    }, idempotencyKey);
   }
 }
 

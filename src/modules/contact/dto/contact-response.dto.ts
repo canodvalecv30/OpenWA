@@ -36,8 +36,11 @@ export class ContactDto {
   isBlocked!: boolean;
 
   @ApiPropertyOptional({
-    description: 'Profile picture URL. Absent when the contact has none or their privacy settings hide it.',
-    example: 'https://pps.whatsapp.net/v/t61.24694-24/12345_678_910_n.jpg',
+    description:
+      'A cached profile picture URL. Only Baileys can fill it (whatsapp-web.js never sets it), and it is often ' +
+      'absent there too, so its absence does not say whether the contact has a picture; fetch the URL from ' +
+      'GET /contacts/{contactId}/profile-picture.',
+    example: 'https://pps.whatsapp.net/v/...',
   })
   profilePicUrl?: string;
 }

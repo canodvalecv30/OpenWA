@@ -1,4 +1,7 @@
 import { resolve } from 'path';
+import { normalizeS3KeyPrefix } from '../common/storage/s3-key-prefix';
+import { resolveBodyLimit } from './bootstrap-security';
+import { parseBodyLimitBytes } from './inflight-body-budget';
 
 type EnvConfig = Record<string, unknown>;
 
@@ -86,9 +89,9 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     errors.push(`DATABASE_TYPE must be "sqlite" or "postgres" (got ${JSON.stringify(dbType)})`);
   }
 
-  // Whitelist the registered engine/storage ids so a typo fails fast at boot instead of silently
-  // falling back to the default (engine.factory swallows an unknown ENGINE_TYPE → legacy wwebjs;
-  // STORAGE_TYPE → local). Values must match the ids registered in engine.factory / configuration.
+  // Whitelist the registered engine/storage ids so a typo fails fast at boot: an unknown ENGINE_TYPE
+  // would otherwise fail every session start, and an unknown STORAGE_TYPE would silently fall back to
+  // local. Values must match the ids registered in engine.factory / configuration.
   const checkEnum = (key: string, allowed: string[]): void => {
     const value = rawEnum(key);
     if (value !== undefined && !allowed.includes(value)) {
@@ -97,6 +100,22 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   };
   checkEnum('ENGINE_TYPE', ['whatsapp-web.js', 'baileys']);
   checkEnum('STORAGE_TYPE', ['local', 's3']);
+  checkEnum('MESSAGE_INLINE_MEDIA', ['inline', 'archive']);
+  // 'archive' drops the inline copy only after the archiver stored the file; with the archiver off
+  // nothing is ever stored, so the mode would silently do nothing. Refuse that rather than let an
+  // operator believe the inline copies are being reclaimed.
+  if (rawEnum('MESSAGE_INLINE_MEDIA') === 'archive' && config.CHAT_MEDIA_ARCHIVE_ENABLED !== 'true') {
+    errors.push('MESSAGE_INLINE_MEDIA=archive needs CHAT_MEDIA_ARCHIVE_ENABLED=true');
+  }
+  // The S3 key root. A prefix that is absolute, traverses, or is only slashes would put this
+  // deployment's objects (and its orphan sweeps' deletes) at the bucket root or outside its own root;
+  // one with an empty or '.' segment builds keys an S3-compatible store refuses on every write.
+  const s3KeyPrefix = str('S3_KEY_PREFIX');
+  if (s3KeyPrefix !== undefined && normalizeS3KeyPrefix(s3KeyPrefix) === null) {
+    errors.push(
+      `S3_KEY_PREFIX must be a relative key prefix such as "staging/" with no empty, "." or ".." segment (got ${JSON.stringify(s3KeyPrefix)})`,
+    );
+  }
   // Every production hardening in the repo gates on the exact string 'production', so an
   // unrecognised value silently selects the permissive branch of each one — CORS, Swagger, DTO
   // error detail, the default-secret guard and the ALLOW_DEV_API_KEY rejection that stops the public
@@ -104,9 +123,9 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   //
   // Unset stays legal because it is the standard Node default for a plain `node dist/main` outside
   // any packaged runtime — refusing it would break local runs. The packaged runtimes all set it (the
-  // runtime image carries `ENV NODE_ENV=production`, the chart sets it, and both compose files set it
-  // via `${NODE_ENV:-production}` and a hardcoded `development`); only a hand-rolled deployment that
-  // strips it still takes the permissive branch of every hardening listed above.
+  // runtime image carries `ENV NODE_ENV=production`, the chart sets it, and both compose files forward
+  // it with a default, `${NODE_ENV:-production}` and `${NODE_ENV:-development}`); only a hand-rolled
+  // deployment that strips it still takes the permissive branch of every hardening listed above.
   //
   // Checked RAW rather than through `str()`: the readers compare `process.env.NODE_ENV` verbatim, so
   // a padded ' production ' that only matches after trimming would validate clean here and still take
@@ -201,9 +220,6 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     }
   };
   for (const key of [
-    'RATE_LIMIT_SHORT_TTL',
-    'RATE_LIMIT_MEDIUM_TTL',
-    'RATE_LIMIT_LONG_TTL',
     'WEBHOOK_RETRY_DELAY',
     'DATABASE_POOL_SIZE',
     'DATABASE_STATEMENT_TIMEOUT_MS',
@@ -211,15 +227,27 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'DATABASE_CONNECTION_TIMEOUT_MS',
     'REDIS_CONNECT_TIMEOUT_MS',
     'MAX_CONCURRENT_SESSIONS', // 0 = unlimited
-    'INGRESS_INSTANCE_TTL',
     'WEBHOOK_DISPATCH_MAX_QUEUED',
     'STATS_CACHE_TTL_MS', // 0 = memo disabled
     'WEBHOOK_MAX_PER_SESSION', // 0 = unlimited
     'AUTOMATION_MAX_PER_SESSION', // 0 = unlimited
     'WEBHOOK_MEDIA_INLINE_MAX_BYTES', // 0 = never inline media
+    'WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS', // 0 = failure rows keep no payload (no redrive)
     'EXPORT_INLINE_MEDIA_BUDGET_BYTES', // 0 = a data export carries no inline media at all
     'MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES', // 0 = a message list carries no inline media at all
     'CHAT_MEDIA_ARCHIVE_TTL_DAYS', // 0 = keep archived chat media forever
+    'INGRESS_RETRY_DELAY_MS', // 0 = retry without backoff
+    'REDIS_CACHE_DB',
+    'INBOUND_MEDIA_GLOBAL_CONCURRENCY', // 0 = no process-wide ceiling, only the per-session one
+    'SHUTDOWN_DELAY_MS', // 0 = no drain; parseInt read `3s` as a 3 ms drain
+    // 0 = disabled. A negative value failed the digits-only read and silently kept the default sweep.
+    'MESSAGE_REAPER_INTERVAL_MS',
+    'WEBHOOK_RECONCILE_INTERVAL_MS',
+    'INGRESS_RECONCILE_INTERVAL_MS',
+    // 0 = act on a row as soon as it is seen; the cap below keeps the cutoff inside the safe range.
+    'MESSAGE_REAPER_GRACE_MS',
+    'WEBHOOK_RECONCILE_GRACE_MS',
+    'INGRESS_RECONCILE_GRACE_MS',
   ]) {
     checkNonNegativeInt(key);
   }
@@ -243,8 +271,47 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   // into a bare checkInt('AUDIT_RETENTION_DAYS') call would silently drop the knob out of that gate.
   for (const key of [
     'AUDIT_RETENTION_DAYS', // <= 0 disables retention
+    'MESSAGE_RETENTION_DAYS', // unset or <= 0 keeps messages forever
+    'WEBHOOK_FAILURE_RETENTION_DAYS', // <= 0 disables retention
+    'INGRESS_RETENTION_DAYS', // <= 0 disables retention
+    // <= 0 cannot disable these two: the read site warns and keeps its default.
+    'WEBHOOK_OUTBOX_RETENTION_DAYS',
+    'INGRESS_DEDUP_RETENTION_DAYS',
   ]) {
     checkInt(key);
+  }
+  // TypeORM binds a Date on SQLite with its year cut to the last 4 digits, so a cutoff before about
+  // year -2000 (roughly 1.48M days back) can bind as a year that sorts after today and the prune
+  // deletes every row. A "keep forever" row of nines is such a value. 36500 is a conservative cap
+  // well inside the safe range. Keep in step with MAX_MESSAGE_RETENTION_DAYS in
+  // message-retention.service.ts.
+  for (const key of [
+    'MESSAGE_RETENTION_DAYS',
+    'AUDIT_RETENTION_DAYS',
+    'CHAT_MEDIA_ARCHIVE_TTL_DAYS',
+    'WEBHOOK_FAILURE_RETENTION_DAYS',
+    'WEBHOOK_OUTBOX_RETENTION_DAYS',
+    'INGRESS_RETENTION_DAYS',
+    'INGRESS_DEDUP_RETENTION_DAYS',
+  ]) {
+    const days = str(key);
+    if (days !== undefined && Number(days) > 36500) {
+      errors.push(`${key} must be at most 36500 (got "${days}")`);
+    }
+  }
+  // The same cutoff bound, expressed in hours.
+  {
+    const hours = str('WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS');
+    if (hours !== undefined && Number(hours) > 36500 * 24) {
+      errors.push(`WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS must be at most ${36500 * 24} (got "${hours}")`);
+    }
+  }
+  // The grace windows build the same kind of cutoff (now minus the grace), so they share the cap.
+  for (const key of ['MESSAGE_REAPER_GRACE_MS', 'WEBHOOK_RECONCILE_GRACE_MS', 'INGRESS_RECONCILE_GRACE_MS']) {
+    const raw = str(key);
+    if (raw !== undefined && DECIMAL_INTEGER.test(raw) && Number(raw) > 36500 * 86_400_000) {
+      errors.push(`${key} must be at most ${36500 * 86_400_000} ms, 36500 days (got "${raw}")`);
+    }
   }
 
   // BAILEYS_WA_VERSION: optional version pin for the Baileys engine (e.g. 2.3000.1045340097 or 2,3000,1045340097)
@@ -284,6 +351,11 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'RATE_LIMIT_SHORT_LIMIT',
     'RATE_LIMIT_MEDIUM_LIMIT',
     'RATE_LIMIT_LONG_LIMIT',
+    // A 0 window expires each hit as it lands, so the tier never blocks: the same self-DoS as a 0 limit.
+    'RATE_LIMIT_SHORT_TTL',
+    'RATE_LIMIT_MEDIUM_TTL',
+    'RATE_LIMIT_LONG_TTL',
+    'INGRESS_INSTANCE_TTL',
     // WebSocket (/events) limits: 0 would disable a tier entirely (a self-DoS on the WS surface).
     'WS_RATE_LIMIT_FRAME_PER_SECOND',
     'WS_RATE_LIMIT_FRAME_BURST',
@@ -297,6 +369,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'HEADERS_TIMEOUT_MS',
     'KEEPALIVE_TIMEOUT_MS',
     'WEBHOOK_DISPATCH_CONCURRENCY',
+    'WEBHOOK_DEGRADED_SESSION_CONCURRENCY',
     // 0 would reject every webhook dispatch (a total, silent webhook outage).
     'WEBHOOK_MAX_PAYLOAD_BYTES',
     // 0 would refuse every request carrying a body (a self-DoS), so the budget is positive-only.
@@ -314,6 +387,8 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // Positive-only is the POINT here, not a convention: 0 arms no Puppeteer timer at all, so a
     // wedged renderer holds the request forever (see wwebjs-lifecycle.ts).
     'PUPPETEER_PROTOCOL_TIMEOUT_MS',
+    // The read fell back to its default on garbage, so `10s` silently meant 10000.
+    'SSRF_DNS_TIMEOUT_MS',
     // The media knobs take RAW numbers while their neighbours in .env.example and docs/12 take unit
     // strings (`BODY_SIZE_LIMIT=25mb`), and their read sites parse with `Number.parseInt`. That
     // accepts the leading digits of a unit-suffixed value and discards the unit, so
@@ -337,8 +412,34 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // the boot sweep delete every archive older than 24 ms, breaking export, restart, import.
     'STORAGE_EXPORT_TTL_MS',
     'STORAGE_EXPORT_SWEEP_MAX_AGE_MS',
+    // Same parseInt read: `5mb` became a 5-byte plugin download cap, `30s` a 30 ms capability timeout
+    // and `64k` a 64-character template render cap.
+    'PLUGIN_DOWNLOAD_MAX_BYTES',
+    'PLUGIN_STORAGE_MAX_BYTES',
+    'PLUGIN_CAP_TIMEOUT_MS',
+    'TEMPLATE_RENDER_MAX_CHARS',
+    'STORAGE_IMPORT_MAX_BYTES',
+    'STORAGE_IMPORT_MAX_ENTRIES',
+    'STORAGE_LIST_MAX_FILES',
+    'BAILEYS_MESSAGE_STORE_LIMIT',
+    // Each read fell back to its default on 0 or garbage, or passed a negative or fractional value on
+    // (SEARCH_LIMIT_MAX reached plugin search providers as-is).
+    'SEARCH_LIMIT_MAX',
+    'INGRESS_MAX_ATTEMPTS',
+    'WEBHOOK_WORKER_CONCURRENCY',
+    'INGRESS_WORKER_CONCURRENCY',
   ]) {
     checkPositiveInt(key);
+  }
+
+  // The body cap takes a unit string. A spelling the parser does not know (`50M`, `50MiB`) silently
+  // becomes the 25mb default, and a value that parses to 0 bytes refuses every request carrying a
+  // body, the same self-DoS INFLIGHT_BODY_BUDGET_BYTES is refused for above.
+  const bodyLimit = str('BODY_SIZE_LIMIT');
+  if (bodyLimit !== undefined && (resolveBodyLimit(bodyLimit) !== bodyLimit || parseBodyLimitBytes(bodyLimit) < 1)) {
+    errors.push(
+      `BODY_SIZE_LIMIT must be a positive size such as 25mb or 1048576 (units b, kb, mb, gb, tb, pb; got "${bodyLimit}")`,
+    );
   }
 
   // The ceiling matters for the same reason from the other side: the docs forbid 0, so an operator
@@ -352,10 +453,23 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     ['STATUS_ORPHAN_SWEEP_INTERVAL_MS', 'the orphan sweep reruns every millisecond'],
     ['S3_REPROBE_INTERVAL_MS', 'S3 is re-probed every millisecond while it is down'],
     ['STORAGE_EXPORT_TTL_MS', 'the export archive is deleted about 1 ms after it is written'],
+    ['SESSION_TAKEOVER_SWEEP_MS', 'the takeover sweep reruns every millisecond'],
+    ['SESSION_LEASE_HEARTBEAT_MS', 'the lease heartbeat renews every millisecond'],
+    ['SESSION_PROXY_TIMEOUT_MS', 'every proxied request times out after 1 ms'],
+    ['MEDIA_DOWNLOAD_TIMEOUT_MS', 'every media download fails'],
+    ['WEBHOOK_TIMEOUT', 'every webhook delivery fails'],
+    ['RATE_LIMIT_SHORT_TTL', 'each hit expires after 1 ms and that rate-limit tier never blocks'],
+    ['RATE_LIMIT_MEDIUM_TTL', 'each hit expires after 1 ms and that rate-limit tier never blocks'],
+    ['RATE_LIMIT_LONG_TTL', 'each hit expires after 1 ms and that rate-limit tier never blocks'],
+    ['INGRESS_INSTANCE_TTL', 'each hit expires after 1 ms and the ingress rate limits never block'],
+    ['SSRF_DNS_TIMEOUT_MS', 'every guarded DNS lookup times out, failing webhook deliveries and URL downloads'],
     // 0 still disables these three, so they carry only the ceiling, not the positive-only check.
     ['MESSAGE_REAPER_INTERVAL_MS', 'the pending message reaper reruns every millisecond'],
     ['WEBHOOK_RECONCILE_INTERVAL_MS', 'the webhook reconciler reruns every millisecond'],
     ['INGRESS_RECONCILE_INTERVAL_MS', 'the ingress reconciler reruns every millisecond'],
+    // 0 disables these two as well; pg arms both with a plain setTimeout.
+    ['DATABASE_CONNECTION_TIMEOUT_MS', 'every pool connect times out'],
+    ['DATABASE_IDLE_TIMEOUT_MS', 'each idle pool connection is closed 1 ms after release'],
   ]) {
     const raw = str(key);
     const n = raw !== undefined && DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
@@ -363,6 +477,41 @@ export function validateEnv(config: EnvConfig): EnvConfig {
       errors.push(
         `${key} must not exceed ${MAX_TIMER_MS} ms (got "${raw}"): Node's ` +
           `timers overflow above that and fire after 1 ms, so ${consequence}`,
+      );
+    }
+  }
+  // Not a Node timer, but the same ceiling: PostgreSQL's statement_timeout is an int capped at
+  // 2147483647, and a larger startup value is refused on every runtime connection. 0 still disables.
+  const statementTimeout = str('DATABASE_STATEMENT_TIMEOUT_MS');
+  if (
+    statementTimeout !== undefined &&
+    DECIMAL_INTEGER.test(statementTimeout) &&
+    Number(statementTimeout) > MAX_TIMER_MS
+  ) {
+    errors.push(
+      `DATABASE_STATEMENT_TIMEOUT_MS must not exceed ${MAX_TIMER_MS} ms (got "${statementTimeout}"): ` +
+        'PostgreSQL refuses a larger statement_timeout, so every runtime connection fails',
+    );
+  }
+  // Knobs armed at a multiple of their value get that fraction of the timer's ceiling. Send verbs arm
+  // four times PLUGIN_CAP_TIMEOUT_MS (SEND_CAP_TIMEOUT_FACTOR in plugin-worker-host.ts); a direct
+  // (queue-off) webhook delivery doubles WEBHOOK_RETRY_DELAY on each retry, up to 2^3 for the maximum
+  // retryCount of 5.
+  for (const [key, factor, multiple, consequence] of [
+    ['PLUGIN_CAP_TIMEOUT_MS', 4, 'send verbs wait four times this long', 'every plugin send times out'],
+    [
+      'WEBHOOK_RETRY_DELAY',
+      8,
+      'the last direct-delivery retry waits eight times this long',
+      'webhook retries fire back to back',
+    ],
+  ] as const) {
+    const raw = str(key);
+    const max = Math.floor(MAX_TIMER_MS / factor);
+    if (raw !== undefined && DECIMAL_INTEGER.test(raw) && Number(raw) > max) {
+      errors.push(
+        `${key} must not exceed ${max} ms (got "${raw}"): ${multiple}, ` +
+          `and Node's timers overflow above that and fire after 1 ms, so ${consequence}`,
       );
     }
   }
@@ -435,6 +584,9 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // Read at boot by the throttler factory (app.module.ts) and CacheService with `=== 'true'`: a
     // typo like `ture` silently downgrades rate-limit storage + cache to per-process in-memory.
     'REDIS_ENABLED',
+    // `=== 'true'` in redis-options.ts: a typo silently connects in plaintext to a Redis the operator
+    // expected to reach over TLS, which a TLS-only managed Redis then refuses.
+    'REDIS_TLS',
     // Read by the SSRF guard's redirect loop with `=== 'true'`: a typo silently keeps the secure
     // default, but an accidental 'true'-ish string is not the flag the operator meant to audit.
     'PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS',
@@ -454,9 +606,8 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // `!== 'false'`, so a typo keeps the SECURE value — but it is still not the flag the operator set,
     // and it is only meaningful alongside DATABASE_SSL above.
     'DATABASE_SSL_REJECT_UNAUTHORIZED',
-    // `!== 'false'`, so a typo keeps synchronize ON — and app.module.ts derives `migrationsRun` from
-    // its negation, so the main connection's migration ledger silently never advances for an operator
-    // who deliberately opted into migration-managed api_keys/audit_logs.
+    // `=== 'true'`: a typo keeps the main connection on its migrations, so an operator who meant to
+    // opt into synchronize for api_keys/audit_logs silently does not get it.
     'MAIN_DATABASE_SYNCHRONIZE',
     // Read with `=== 'true'` by the plugin ingress gate: a typo turns an intentional
     // `ALLOW_UNSIGNED_INGRESS=true` back off, and a route the operator meant to open stops loading.
@@ -487,6 +638,15 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // Perf/observability only, but same silent-typo class.
     'CACHE_ENABLED',
     'DATABASE_LOGGING',
+    // Exact 'true'/'false' overrides; any other spelling silently falls back to the NODE_ENV default,
+    // so `CSP_UPGRADE_INSECURE_REQUESTS=False` kept the blank-dashboard upgrade on in production and a
+    // `PLUGIN_INSTALL_REQUIRE_PIN=True` outside production left the integrity pin unenforced.
+    'CSP_UPGRADE_INSECURE_REQUESTS',
+    'ENABLE_SWAGGER',
+    'VALIDATION_ERROR_DETAIL',
+    'PLUGIN_INSTALL_REQUIRE_PIN',
+    // `=== 'true'` in the SSRF guard: a typo keeps redirects refused when the operator allowed them.
+    'WEBHOOK_SSRF_REDIRECTS',
     // DELIBERATELY NOT LISTED. `MCP_READONLY` is read `!== 'false'` and mcp.server.spec.ts asserts
     // that `yes` keeps it read-only — a tolerance the repo tests on purpose. `PUPPETEER_HEADLESS` is
     // read `!== 'false'` and `new` is a real Puppeteer value that works today. Both fail toward the

@@ -47,9 +47,10 @@ type GroupEventChanges struct {
 }
 
 // GroupEventPayload is the payload of the group.join / group.leave /
-// group.update events (webhook and socket alike). ParticipantIDs carries the
-// affected users for join/leave and is empty for metadata updates; Changes is
-// the metadata delta, present on group.update. Timestamp is unix seconds.
+// group.update / group.join_request events (webhook and socket alike).
+// ParticipantIDs carries the affected users for join/leave, the users asking
+// to join for join_request, and is empty for metadata updates; Changes is the
+// metadata delta, present on group.update. Timestamp is unix seconds.
 type GroupEventPayload struct {
 	GroupID        string             `json:"groupId"`
 	ActorID        *string            `json:"actorId,omitempty"`
@@ -84,6 +85,19 @@ type WebhookFilterCondition struct {
 // WebhookFilters groups filter conditions.
 type WebhookFilters struct {
 	Conditions []WebhookFilterCondition `json:"conditions"`
+}
+
+// MarshalJSON encodes a nil Conditions as `[]` rather than `null`.
+//
+// The gateway requires conditions to be an array and answers 400 for `null`, so the zero value
+// &WebhookFilters{} could not express the documented empty filter `{ "conditions": [] }`.
+func (f WebhookFilters) MarshalJSON() ([]byte, error) {
+	type alias WebhookFilters
+	out := alias(f)
+	if out.Conditions == nil {
+		out.Conditions = []WebhookFilterCondition{}
+	}
+	return json.Marshal(out)
 }
 
 // CreateWebhookRequest registers a webhook. RetryCount is 0–5 (default 3).
@@ -166,8 +180,9 @@ type WebhookTestResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// WebhookDeliveryFailure is a webhook delivery abandoned after every retry,
-// as listed by the delivery-failure log.
+// WebhookDeliveryFailure is a webhook delivery the gateway gave up on or could
+// not dispatch, as listed by the delivery-failure log. A later successful
+// delivery removes the row.
 type WebhookDeliveryFailure struct {
 	ID        string `json:"id"`
 	WebhookID string `json:"webhookId"`
@@ -177,12 +192,63 @@ type WebhookDeliveryFailure struct {
 	// IdempotencyKey is the key the receiver would have deduped on.
 	IdempotencyKey *string `json:"idempotencyKey,omitempty"`
 	DeliveryID     *string `json:"deliveryId,omitempty"`
-	// Attempts is the total number of attempts made before giving up.
+	// Attempts is the number of attempts made before giving up; 0 when the
+	// delivery was not given up after retries (oversize or unserializable
+	// payload, capacity shed, or shutdown, possibly in a retry backoff after
+	// earlier attempts were sent).
 	Attempts int `json:"attempts"`
 	// LastStatusCode is the last HTTP status when the failure was a non-2xx
-	// response; nil for a network or timeout error.
+	// response; nil for a network or timeout error, or when Attempts is 0.
 	LastStatusCode *int   `json:"lastStatusCode,omitempty"`
 	LastError      string `json:"lastError"`
-	// CreatedAt is the ISO timestamp of when the delivery was finally abandoned.
+	// CreatedAt is the ISO timestamp of when the failure was first recorded.
 	CreatedAt string `json:"createdAt"`
+	// Replayable is true when the row still holds the event data and can be
+	// replayed with RedriveDeliveryFailures: a terminal row (Attempts > 0)
+	// recorded while the gateway's WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS is
+	// above 0, until that window passes.
+	Replayable bool `json:"replayable"`
+}
+
+// RedriveWebhookDeliveriesRequest is the body of RedriveDeliveryFailures.
+// Every field narrows; an empty body takes eligible rows with the fewest attempts.
+type RedriveWebhookDeliveriesRequest struct {
+	// SessionID limits the batch to one session (within the key's allowedSessions).
+	SessionID string `json:"sessionId,omitempty"`
+	// WebhookID limits the batch to one webhook.
+	WebhookID string `json:"webhookId,omitempty"`
+	// IDs limits the batch to these failure rows (at most 500).
+	// A nil pointer uses the default scope; a pointer to an empty slice replays nothing.
+	IDs *[]string `json:"ids,omitempty"`
+	// Limit caps the rows replayed by this call (1-500, default 100).
+	Limit int `json:"limit,omitempty"`
+}
+
+// WebhookRedriveResult is the outcome of RedriveDeliveryFailures.
+type WebhookRedriveResult struct {
+	// Redriven is the rows replayed by this call: Delivered plus Enqueued.
+	Redriven int `json:"redriven"`
+	// Delivered rows went out by a direct POST; their failure rows were removed.
+	Delivered int `json:"delivered"`
+	// Enqueued is reserved for compatibility; operator redrive always returns zero.
+	Enqueued int `json:"enqueued"`
+	// Failed replays failed again; their rows stay, with attempts raised by one.
+	Failed int `json:"failed"`
+	// Skipped rows were not replayed: the webhook was removed, disabled or
+	// unsubscribed, or a plugin cancelled it.
+	Skipped int `json:"skipped"`
+	// Remaining is the replayable rows still in scope after this call.
+	Remaining int `json:"remaining"`
+}
+
+// WebhookDelivery is the JSON body of a webhook delivery (docs/06 section
+// 6.6). Event is "test" for a delivery sent by the test endpoint. Check the
+// raw body with VerifyWebhookSignature before decoding it.
+type WebhookDelivery struct {
+	Event          WebhookEvent    `json:"event"`
+	Timestamp      string          `json:"timestamp"`
+	SessionID      string          `json:"sessionId"`
+	IdempotencyKey string          `json:"idempotencyKey"`
+	DeliveryID     string          `json:"deliveryId"`
+	Data           json.RawMessage `json:"data"`
 }

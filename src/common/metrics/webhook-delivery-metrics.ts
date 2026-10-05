@@ -1,6 +1,7 @@
 /**
  * Process-local monotonic counter of webhook delivery failures: deliveries whose every retry was
- * exhausted, and deliveries never sent (shed, refused at shutdown, rejected before sending). It is
+ * exhausted, deliveries never sent (shed, refused at shutdown, rejected before sending), and direct
+ * deliveries stopped by shutdown between retries after earlier attempts were sent. It is
  * incremented once per row inserted into the durable `webhook_delivery_failures` dead-letter table;
  * a later replay may replace or remove that row, and the counter keeps the failure. Kept as a plain
  * in-process counter rather than a `COUNT(*)` over that table because the table is pruned on a

@@ -28,8 +28,9 @@ function installFetchStub(): void {
         resolve(
           new Response(
             JSON.stringify({
-              hits: texts.map((text, i) => ({
-                messageId: `${q}-${offset}-${i}`,
+              // A hit's id follows its text, so a page that repeats a text repeats the message.
+              hits: texts.map(text => ({
+                messageId: `${q}-${text}`,
                 sessionId: 'sess-1',
                 chatId: 'chat-1@c.us',
                 timestamp: 1_767_225_600,
@@ -46,14 +47,18 @@ function installFetchStub(): void {
 }
 
 let rtl: typeof import('@testing-library/react');
+// The label of the button that loads the next page when 20 of 40 hits are shown. It names the action;
+// a bare "40 results" says nothing about what a click does.
+let more40: string;
 let GlobalSearch: (typeof import('./GlobalSearch.tsx'))['GlobalSearch'];
 
 before(async () => {
   const { installJsdomGlobals } = await import('../test-helpers/jsdom.ts');
   await installJsdomGlobals();
   installFetchStub();
-  const { i18nReady } = await import('../i18n/index.ts');
+  const { i18nReady, default: i18n } = await import('../i18n/index.ts');
   await i18nReady;
+  more40 = i18n.t('search.loadMore', { shown: 20, total: 40 });
   rtl = await import('@testing-library/react');
   ({ GlobalSearch } = await import('./GlobalSearch.tsx'));
 });
@@ -97,7 +102,6 @@ test('a response for a query the user cleared does not fill the list', async () 
   await rtl.act(async () => pending.get('refund')!(['refund issued']));
   // Typing again shows the panel before the next debounce fires: it must not hold the cleared results.
   rtl.fireEvent.change(input, { target: { value: 'r' } });
-  rtl.fireEvent.focus(input);
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(rtl.screen.queryByText('refund issued') === null, true, 'the cleared query filled the list');
 });
@@ -160,7 +164,7 @@ test('a mouse click on "more" keeps the results open and appends the next page',
   input.focus();
   await typeAndWaitForRequest(input, 'refund');
   await act(async () => pending.get('refund')!(page(0), 40));
-  const more = await screen.findByRole('button', { name: '40 results' });
+  const more = await screen.findByRole('button', { name: more40 });
 
   // A real mousedown moves focus off the input; cancelling it is what keeps the input focused.
   assert.equal(fireEvent.mouseDown(more), false, 'mousedown on "more" was not cancelled');
@@ -172,6 +176,30 @@ test('a mouse click on "more" keeps the results open and appends the next page',
   assert.equal(screen.getAllByRole('option').length, 40);
 });
 
+test('"more" does not repeat a hit that a newly indexed message pushed onto the next page', async () => {
+  const { screen, fireEvent, act, waitFor } = rtl;
+  rtl.render(createElement(GlobalSearch, { onHit: () => undefined }));
+  const input = screen.getByRole('textbox');
+  input.focus();
+  await typeAndWaitForRequest(input, 'refund');
+  await act(async () => pending.get('refund')!(page(0), 40));
+  fireEvent.click(await screen.findByRole('button', { name: more40 }));
+  await waitFor(() => assert.deepEqual(offsets, ['0', '20']));
+  // A match indexed in between shifted every hit down by one, so offset 20 starts with the old 20th.
+  await act(async () => pending.get('refund')!(page(19), 41));
+  await waitFor(() => assert.ok(screen.queryByText('refund 38')));
+  assert.equal(screen.getAllByText('refund 19').length, 1, 'the shifted hit is listed twice');
+  assert.equal(screen.getAllByRole('option').length, 39);
+  // The next page starts after the 40 rows the server has sent, not after the 39 listed, and the last
+  // row it returns ends the list: the dropped repeat must not keep "more" up for a match never fetched.
+  fireEvent.click(screen.getByRole('button', { name: /39/ }));
+  await waitFor(() => assert.deepEqual(offsets, ['0', '20', '40']));
+  await act(async () => pending.get('refund')!(['refund 39'], 41));
+  await waitFor(() => assert.ok(screen.queryByText('refund 39')));
+  assert.equal(screen.getAllByRole('option').length, 40);
+  assert.equal(screen.queryByRole('button', { name: /41/ }) === null, true, '"more" stayed up after the last page');
+});
+
 test('a failed "more" keeps the results already shown and offers the button again', async () => {
   const { screen, fireEvent, act, waitFor } = rtl;
   rtl.render(createElement(GlobalSearch, { onHit: () => undefined }));
@@ -179,18 +207,18 @@ test('a failed "more" keeps the results already shown and offers the button agai
   input.focus();
   await typeAndWaitForRequest(input, 'refund');
   await act(async () => pending.get('refund')!(page(0), 40));
-  fireEvent.click(await screen.findByRole('button', { name: '40 results' }));
+  fireEvent.click(await screen.findByRole('button', { name: more40 }));
   await waitFor(() => assert.deepEqual(offsets, ['0', '20']));
   await act(async () => failing.get('refund')!(500));
 
   await screen.findByText('Search failed. Try again.');
   assert.equal(screen.getAllByRole('option').length, 20, 'the first page was dropped');
   // The retry runs the same page again, and its success clears the error.
-  fireEvent.click(screen.getByRole('button', { name: '40 results' }));
+  fireEvent.click(screen.getByRole('button', { name: more40 }));
   await waitFor(() => assert.deepEqual(offsets, ['0', '20', '20']));
   await act(async () => pending.get('refund')!(page(20), 40));
   await waitFor(() => assert.equal(screen.getAllByRole('option').length, 40));
-  assert.equal(screen.queryByText('Search failed. Try again.'), null);
+  assert.equal(screen.queryByText('Search failed. Try again.') === null, true);
 });
 
 test('a failed search shows only the error', async () => {
@@ -200,14 +228,14 @@ test('a failed search shows only the error', async () => {
   input.focus();
   await typeAndWaitForRequest(input, 'refund');
   await act(async () => pending.get('refund')!(page(0), 40));
-  await screen.findByRole('button', { name: '40 results' });
+  await screen.findByRole('button', { name: more40 });
 
   await typeAndWaitForRequest(input, 'refunds');
   await act(async () => failing.get('refunds')!(500));
   await screen.findByText('Search failed. Try again.');
   assert.equal(screen.queryAllByRole('option').length, 0, "the previous query's hits stayed on screen");
-  assert.equal(screen.queryByRole('button', { name: '40 results' }), null);
-  assert.equal(screen.queryByText('No messages found.'), null);
+  assert.equal(screen.queryByRole('button', { name: more40 }) === null, true);
+  assert.equal(screen.queryByText('No messages found.') === null, true);
 });
 
 test('Tab then Enter on "more" keeps the results open and returns focus to the input', async () => {
@@ -217,7 +245,7 @@ test('Tab then Enter on "more" keeps the results open and returns focus to the i
   input.focus();
   await typeAndWaitForRequest(input, 'refund');
   await act(async () => pending.get('refund')!(page(0), 40));
-  const more = await screen.findByRole('button', { name: '40 results' });
+  const more = await screen.findByRole('button', { name: more40 });
 
   // Tabbing moves focus from the input to the button; the results must outlive the close timer.
   act(() => more.focus());
@@ -345,7 +373,7 @@ test('Escape with focus on "more" closes the results and is consumed', async () 
   input.focus();
   await typeAndWaitForRequest(input, 'refund');
   await act(async () => pending.get('refund')!(page(0), 40));
-  const more = await screen.findByRole('button', { name: '40 results' });
+  const more = await screen.findByRole('button', { name: more40 });
   act(() => more.focus());
   // Unconsumed, the key would reach the Chats page handler and close the open conversation instead.
   assert.equal(fireEvent.keyDown(more, { key: 'Escape' }), false, 'Escape on "more" was not consumed');

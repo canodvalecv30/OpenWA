@@ -13,11 +13,13 @@ import { ChatStateStoreService } from '../../engine/adapters/baileys-chat-state-
 import { SessionOwnershipService } from '../session/session-ownership.service';
 import { ScopeBindingService } from '../integration/scope-binding.service';
 import { ReKeyChatStatesBySessionId1786500000000 } from '../../database/migrations/1786500000000-ReKeyChatStatesBySessionId';
+import { ScrubRevokedMessageContent1786900000000 } from '../../database/migrations/1786900000000-ScrubRevokedMessageContent';
+import { ScrubNonPhoneLidMappings1786950000000 } from '../../database/migrations/1786950000000-ScrubNonPhoneLidMappings';
 import { Session as SessionEntity, SessionStatus } from '../session/entities/session.entity';
 import { In } from 'typeorm';
 import { DateUtils } from 'typeorm/util/DateUtils';
 import type { MigrationTables, TableCounts } from './migration-tables.types';
-import { EXPORT_TABLES, EXPORT_TABLE_EXCLUSIONS } from './export-tables';
+import { EXPORT_TABLES, EXPORT_TABLE_EXCLUSIONS, type AnyExportTable } from './export-tables';
 import { TABLE_IMPORTERS } from './table-importers';
 
 /**
@@ -189,6 +191,14 @@ function newestFirst<T>(rows: readonly T[], at: (row: T) => number): T[] {
 }
 
 /**
+ * A chunk of full-row reads from an inline-media table holds at most max(budget, 1 MiB) of stored
+ * payload (and always at least one row), as the message list does. The row cap keeps a chunk of
+ * small rows well inside every driver's bound-parameter limit.
+ */
+const EXPORT_READ_CHUNK_MIN_BYTES = 1024 * 1024;
+const EXPORT_READ_CHUNK_MAX_ROWS = 200;
+
+/**
  * Spends the shared budget, and remembers what it refused.
  *
  * `exceeds` returns true when this payload does not fit and must be dropped. The tally matters as
@@ -196,11 +206,19 @@ function newestFirst<T>(rows: readonly T[], at: (row: T) => number): T[] {
  * is deliberately the same shape a payload skipped on the way in gets — so without a count, a
  * truncated backup is indistinguishable from a complete one, both on inspection and on restore.
  */
-function createInlineMediaBudget(): { exceeds: (encodedBytes: number) => boolean; droppedPayloads: () => number } {
+interface InlineMediaBudget {
+  /** The configured budget, which also sizes the export's chunked reads. */
+  bytes: number;
+  exceeds: (encodedBytes: number) => boolean;
+  droppedPayloads: () => number;
+}
+
+function createInlineMediaBudget(): InlineMediaBudget {
   const budget = exportInlineMediaBudgetBytes();
   let spent = 0;
   let dropped = 0;
   return {
+    bytes: budget,
     exceeds: (encodedBytes: number): boolean => {
       if (spent + encodedBytes > budget) {
         dropped += 1;
@@ -229,6 +247,8 @@ export interface InfraExportDataResult {
   omittedInlineMedia: { messages: number; messageBatches: number };
 }
 
+const EMPTY_ARCHIVE_WARNING = 'Backup contained no rows to restore; refused to replace existing data. Check the file.';
+
 /** Result of POST /infra/import-data; InfraImportDataResponseDto is the published contract. */
 export interface InfraImportDataResult {
   imported: boolean;
@@ -242,7 +262,9 @@ export interface InfraImportDataResult {
   /**
    * True when an engine may still be writing into the restored tables, from any of three causes:
    * orphans deliberately left running (`force`), a `stopOrphans` teardown that failed, or sessions
-   * held by another node, which this request has no channel to stop. Restart to reconcile.
+   * held by another node, which this request has no channel to stop. Restart to reconcile those.
+   * Also true when the post-commit plugin binding re-sync failed; a restart does not repair that
+   * one, so its notice names the manual check instead.
    */
   restartRequired: boolean;
   /** Session ids with a running engine that the restored data no longer contains. */
@@ -272,6 +294,13 @@ export class InfraDataService {
    * run a destructive replace nobody is waiting on.
    */
   private importInFlight = false;
+
+  /**
+   * Exports running in this process. On better-sqlite3 an export's reads share the import's connection,
+   * so an export and an import that overlap would archive the import's uncommitted (possibly rolled-back)
+   * tables. Each refuses while the other runs.
+   */
+  private exportsInFlight = 0;
 
   constructor(
     private readonly configService: ConfigService,
@@ -337,7 +366,24 @@ export class InfraDataService {
 
   async exportData(): Promise<InfraExportDataResult> {
     this.assertExportRegistryMatchesMetadata();
+    if (this.importInFlight) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        message: 'A data import is running; export after it finishes.',
+        code: 'IMPORT_ALREADY_RUNNING',
+      });
+    }
+    this.exportsInFlight++;
+    try {
+      return await this.runExport();
+    } finally {
+      this.exportsInFlight--;
+    }
+  }
 
+  /** The table reads behind exportData, entered only through its import guard. */
+  private async runExport(): Promise<InfraExportDataResult> {
     // The tables below may legitimately not exist yet (created by migrations an older DB has not run).
     // Only a GENUINE missing-table error (isMissingTableError) may be tolerated — anything else (lock,
     // I/O, timeout, aborted connection) must FAIL the export. The old blind `catch { debug-log }`
@@ -346,13 +392,13 @@ export class InfraDataService {
     // A skipped table is surfaced in `skippedTables` (and logged as a warning) so an operator can tell
     // "not migrated yet" apart from "exported empty".
     const skippedTables: string[] = [];
-    const queryOptionalTable = async (table: string): Promise<unknown[]> => {
+    const readTable = async (entry: AnyExportTable, sql: string): Promise<unknown[]> => {
       try {
-        return await this.dataDataSource.query(`SELECT * FROM ${table}`);
+        return await this.dataDataSource.query(sql);
       } catch (error) {
-        if (!isMissingTableError(error)) throw error;
-        skippedTables.push(table);
-        this.logger.warn('Optional table does not exist in this DB; exporting without it', { table });
+        if (!entry.optional || !isMissingTableError(error)) throw error;
+        skippedTables.push(entry.table);
+        this.logger.warn('Optional table does not exist in this DB; exporting without it', { table: entry.table });
         return [];
       }
     };
@@ -360,7 +406,7 @@ export class InfraDataService {
     // One budget shared by the tables that carry a full inline payload (messages and
     // message_batches today), so the total is what is bounded rather than each table separately.
     const inlineMediaBudget = createInlineMediaBudget();
-    // The per-bucket drop counts are measured as the delta around each budgeted table's loop, which
+    // The per-bucket drop counts are measured as the delta around each budgeted table's read, which
     // attributes every refusal to the table that spent it and keeps the snapshot semantics the
     // response documents: messages are served first, batches spend what is left.
     const droppedByBucket: Record<'messages' | 'messageBatches', number> = { messages: 0, messageBatches: 0 };
@@ -368,22 +414,30 @@ export class InfraDataService {
     const counts = {} as TableCounts;
 
     for (const entry of EXPORT_TABLES) {
-      const rows: unknown[] = entry.optional
-        ? await queryOptionalTable(entry.table)
-        : await this.dataDataSource.query(`SELECT * FROM ${entry.table}`);
+      const droppedBefore = inlineMediaBudget.droppedPayloads();
+      const rows: unknown[] = entry.inlineMedia
+        ? await this.readInlineMediaTable(entry, entry.inlineMedia, sql => readTable(entry, sql), inlineMediaBudget)
+        : await readTable(entry, `SELECT * FROM ${entry.table}`);
       // `rows` was read for exactly this entry's table, so it holds the row type the entry's hooks
       // declare. That correlation is what the erased entry type cannot carry, and this loop is the
       // one place it is known — so the casts live here rather than at each hook.
       entry.afterRead?.(rows as never[]);
       if (entry.inlineMedia) {
-        const droppedBefore = inlineMediaBudget.droppedPayloads();
-        for (const row of newestFirst(rows, entry.inlineMedia.newestFirst as (row: unknown) => number)) {
-          entry.inlineMedia.strip(row as never, inlineMediaBudget.exceeds);
-        }
         droppedByBucket[entry.inlineMedia.bucket] = inlineMediaBudget.droppedPayloads() - droppedBefore;
       }
       tables[entry.key] = rows as never;
       counts[entry.key] = rows.length;
+    }
+
+    // See ExportTable.sessionFk: a child row of a session missing from the archive cannot be restored.
+    const exportedSessions = new Set(tables.sessions.map(session => session.id));
+    for (const entry of EXPORT_TABLES) {
+      if (!entry.sessionFk) continue;
+      const kept = (tables[entry.key] as Array<{ sessionId: string }>).filter(row =>
+        exportedSessions.has(row.sessionId),
+      );
+      tables[entry.key] = kept as never;
+      counts[entry.key] = kept.length;
     }
 
     // Audit the full-DB export: this payload carries plugin-instance secrets, so WHO pulled
@@ -401,6 +455,64 @@ export class InfraDataService {
     };
   }
 
+  /**
+   * Read a table whose rows carry inline media without ever holding all of its payloads at once.
+   *
+   * A `SELECT *` put every payload on the heap before the budget could drop one, so a media-heavy
+   * database could exhaust memory for a response that only ever carries the budget's worth. Instead
+   * every row is read as `id`, its recency key and its payload's stored size; the full rows follow
+   * newest-first in chunks, and each chunk is stripped against the budget before the next is read.
+   * Peak memory is the stripped rows, one chunk and the budget.
+   *
+   * The budget sees the rows in exactly the order `newestFirst` gave it over a `SELECT *`, and the
+   * result keeps the key read's row order, which is the order `SELECT *` returned; the caller applies
+   * `afterRead` to it as to any other table. A row deleted between the key read and its chunk is left
+   * out; one inserted after the key read is not exported.
+   */
+  private async readInlineMediaTable(
+    entry: AnyExportTable,
+    media: NonNullable<AnyExportTable['inlineMedia']>,
+    readKeys: (sql: string) => Promise<unknown[]>,
+    budget: InlineMediaBudget,
+  ): Promise<unknown[]> {
+    const keys = (await readKeys(
+      `SELECT id, "${media.recencyColumn}", OCTET_LENGTH("${media.payloadColumn}") AS "payloadBytes" FROM ${entry.table}`,
+    )) as Array<{ id: unknown; payloadBytes: number | string | null }>;
+    const chunkLimit = Math.max(budget.bytes, EXPORT_READ_CHUNK_MIN_BYTES);
+    const stripped = new Map<unknown, unknown>();
+    let chunk: unknown[] = [];
+    let chunkBytes = 0;
+
+    const flush = async (): Promise<void> => {
+      const isPostgres = this.dataDataSource.options.type === 'postgres';
+      const placeholders = chunk.map((_, i) => (isPostgres ? `$${i + 1}` : '?')).join(', ');
+      const rows = await this.dataDataSource.query<Array<{ id: unknown }>>(
+        `SELECT * FROM ${entry.table} WHERE id IN (${placeholders})`,
+        chunk,
+      );
+      // IN returns the rows in no particular order; the budget is spent in the chunk's own order.
+      const byId = new Map(rows.map(row => [row.id, row]));
+      for (const id of chunk) {
+        const row = byId.get(id);
+        if (!row) continue;
+        media.strip(row as never, budget.exceeds);
+        stripped.set(id, row);
+      }
+      chunk = [];
+      chunkBytes = 0;
+    };
+
+    for (const key of newestFirst(keys, media.newestFirst as (row: unknown) => number)) {
+      const bytes = Number(key.payloadBytes) || 0;
+      const full = chunk.length === EXPORT_READ_CHUNK_MAX_ROWS || chunkBytes + bytes > chunkLimit;
+      if (chunk.length > 0 && full) await flush();
+      chunk.push(key.id);
+      chunkBytes += bytes;
+    }
+    if (chunk.length > 0) await flush();
+    return keys.filter(key => stripped.has(key.id)).map(key => stripped.get(key.id));
+  }
+
   async importData(data: {
     tables: Partial<MigrationTables>;
     force?: boolean;
@@ -416,6 +528,14 @@ export class InfraDataService {
         error: 'Conflict',
         message: 'A data import is already running; wait for it to finish before starting another.',
         code: 'IMPORT_ALREADY_RUNNING',
+      });
+    }
+    if (this.exportsInFlight > 0) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        message: 'A data export is running; import after it finishes.',
+        code: 'EXPORT_IN_PROGRESS',
       });
     }
     this.importInFlight = true;
@@ -463,6 +583,31 @@ export class InfraDataService {
       }
     }
 
+    // An archive with no rows is always refused (see the totalRestored check below), so refuse it here,
+    // before the orphan pre-flight: with no sessions in it every running engine reads as an orphan, and
+    // a stopOrphans retry would tear all of them down for a restore that was never going to happen.
+    // A row a skip guard vetoes is just as certain a rollback (see the warnings gate below), and the
+    // guards read only the archived tables, so run them here too. The in-transaction call stays as a backstop.
+    const refusals = TABLE_IMPORTERS.every(importer => !data.tables[importer.key]?.length)
+      ? [EMPTY_ARCHIVE_WARNING]
+      : TABLE_IMPORTERS.flatMap(importer =>
+          (data.tables[importer.key] ?? [])
+            .map((row, _index, rows) => importer.skip?.(row as never, rows as never))
+            .filter((warning): warning is string => warning != null),
+        );
+    if (refusals.length > 0) {
+      return {
+        imported: false,
+        counts: Object.fromEntries(TABLE_IMPORTERS.map(importer => [importer.key, 0] as const)) as TableCounts,
+        warnings: refusals,
+        notices: [],
+        restartRequired: false,
+        orphanedEngines: [],
+        stoppedOrphanEngines: [],
+        failedOrphanEngines: [],
+      };
+    }
+
     const importedSessionIds = new Set((data.tables.sessions ?? []).map(s => s.id));
     const orphanedEngines = (this.sessionService?.getActiveSessionIds() ?? []).filter(
       id => !importedSessionIds.has(id),
@@ -492,9 +637,9 @@ export class InfraDataService {
     }
 
     if (orphanedEngines.length > 0 && data.stopOrphans && this.sessionService) {
-      // Stop the orphans inside this request, BEFORE the transaction opens. destroyEngineSafely's
-      // per-engine 10s deadline bounds the worst case (a stuck Chromium cannot wedge the import); the
-      // engines are reconciled from the Map regardless of teardown outcome.
+      // Stop the orphans inside this request, BEFORE the transaction opens. Two 10s deadlines per
+      // engine (destroy, then forceDestroy), run in parallel, bound the worst case (a stuck Chromium
+      // cannot wedge the import); the engines are reconciled from the Map regardless of teardown outcome.
       const result = await this.sessionService.stopOrphanEngines(orphanedEngines);
       stoppedOrphanEngines = result.stopped;
       failedOrphanEngines = result.failed;
@@ -509,12 +654,13 @@ export class InfraDataService {
             `(removed from the engine registry; a process restart guarantees cleanup).`,
         );
       }
-      // Engines still mid-initialization (no Map entry yet) are reported in notRunning: their start()
-      // self-aborts via the stop mark, but they are not counted as stopped here.
+      // Sessions with no engine yet are reported in notRunning: one still initializing aborts its start()
+      // on the stop mark, and one waiting to relaunch after a failed reconnect had its relaunch cancelled.
+      // Neither is counted as stopped here.
       if (result.notRunning.length > 0) {
         notices.push(
-          `${result.notRunning.length} orphan session(s) had no live engine yet (still initializing): ` +
-            `${result.notRunning.join(', ')} — their start() will self-abort.`,
+          `${result.notRunning.length} orphan session(s) had no live engine yet (initializing or waiting to ` +
+            `reconnect): ${result.notRunning.join(', ')}; they will not start.`,
         );
       }
     } else if (orphanedEngines.length > 0 && !data.force) {
@@ -718,7 +864,7 @@ export class InfraDataService {
             // cannot carry, and this loop is the one place it is known — so the cast lives here rather
             // than at each of the three uses below.
             const row = untypedRow as never;
-            const skipWarning = importer.skip?.(row);
+            const skipWarning = importer.skip?.(row, rows as never);
             if (skipWarning != null) {
               warnings.push(skipWarning);
               continue;
@@ -772,6 +918,17 @@ export class InfraDataService {
           }
         }
 
+        // The same holds for the 0.24.0 scrubs: an archive taken before them restores revoked messages
+        // with their media, quote and reactions, and lid mappings with a broadcast id as the phone.
+        if (warnings.length === 0) {
+          try {
+            await ScrubRevokedMessageContent1786900000000.scrub(queryRunner);
+            await ScrubNonPhoneLidMappings1786950000000.scrub(queryRunner);
+          } catch (error) {
+            warnings.push(`Failed to clean restored rows: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
         // "Replace all data" must be all-or-nothing: the import already DELETEd every row, so if any
         // INSERT failed we must roll back (restoring the pre-import data) rather than commit a
         // half-wiped DB and report success. A partial restore reported as imported:true was how
@@ -822,14 +979,14 @@ export class InfraDataService {
         }
 
         // A wrong/empty/garbage backup file restores zero rows but the DELETE already ran — committing
-        // would silently WIPE the database and report success. Refuse it and roll back instead. (#488 review)
+        // would silently WIPE the database and report success. Refuse it and roll back instead. (#488)
         const totalRestored = Object.values(counts).reduce((sum, n) => sum + n, 0);
         if (totalRestored === 0) {
           await queryRunner.rollbackTransaction();
           return {
             imported: false,
             counts,
-            warnings: ['Backup contained no rows to restore; refused to replace existing data. Check the file.'],
+            warnings: [EMPTY_ARCHIVE_WARNING],
             notices,
             ...engineStateAfterRollback,
           };
@@ -872,7 +1029,9 @@ export class InfraDataService {
 
         // restartRequired was computed in the pre-flight, from three independent causes: orphans left
         // running (force=true legacy path), a stopOrphans teardown that failed for at least one
-        // engine, and sessions held by another node, which this request cannot reach to stop.
+        // engine, and sessions held by another node, which this request cannot reach to stop. It is
+        // also set above when the post-commit plugin binding re-sync fails; a restart does not repair
+        // that one, so its notice names the manual check instead.
         return {
           imported: true,
           counts,

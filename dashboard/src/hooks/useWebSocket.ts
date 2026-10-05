@@ -138,10 +138,10 @@ interface ServerErrorFrame {
   message?: string;
 }
 
-// VITE_WS_URL when set, else the API origin (a split-origin build names it in VITE_API_URL), else the
+// The origin of VITE_WS_URL when set, else of VITE_API_URL (a split-origin build names the API there), else the
 // page's own origin (the single-container setup, or nginx proxying /socket.io in Docker).
 const SOCKET_URL = resolveSocketUrl(import.meta.env.VITE_WS_URL, API_ORIGIN, window.location.origin);
-// Warn when VITE_WS_URL is an insecure http:// URL on a non-localhost host; api.ts already warns
+// Warn when VITE_WS_URL is an insecure http:// or ws:// URL on a non-localhost host; api.ts already warns
 // about VITE_API_URL under its own name.
 if (import.meta.env.VITE_WS_URL) warnIfInsecureHttpUrl(SOCKET_URL, 'VITE_WS_URL');
 

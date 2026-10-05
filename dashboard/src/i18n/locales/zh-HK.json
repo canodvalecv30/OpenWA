@@ -36,6 +36,7 @@
     "hoursAgo": "{{count}} 小時前",
     "hoursAgo_other": "{{count}} 小時前",
     "optional": "選填",
+    "fieldTooLong": "最多 {{max}} 個字元（目前 {{count}} 個）。",
     "language": "語言",
     "back": "返回",
     "next": "下一步",
@@ -90,6 +91,7 @@
     "noMessageYet": "尚無訊息",
     "unreadBadge": "{{count}} 條未讀訊息",
     "unreadBadge_other": "{{count}} 條未讀訊息",
+    "markedUnread": "已標示為未讀",
     "loadingMessages": "正在載入訊息...",
     "loadingOlderMessages": "正在載入較舊的訊息...",
     "loadOlderMessagesError": "無法載入較舊的訊息。向上捲動重試。",
@@ -121,7 +123,6 @@
       "unknownType": "未知類型"
     },
     "you": "你",
-    "youPrefix": "你：",
     "yesterday": "昨天",
     "attachTitle": "傳送檔案 / 圖片",
     "emojiTitle": "選擇表情符號",
@@ -347,7 +348,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "未設定代理",
       "hasCredentials": "憑證已儲存，但不會顯示。輸入完整的 URL 即可更改。",
-      "hint": "變更會在下次啟動工作階段時生效，不會套用至正在運作的連線。代理必須真實且可連線：無法連線的代理會令 QR 碼無法送達，啟動請求會傳回 504。",
+      "hint": "變更會在下次啟動工作階段時生效，不會套用至正在運作的連線。代理必須真實且可連線：無法連線的代理會令 QR 碼無法送達。在 whatsapp-web.js 上啟動請求會傳回 504，在 Baileys 上啟動會成功，但工作階段會持續重試。",
       "createHint": "只有在你的網絡無法直接連線 WhatsApp 時才需要。必須是真實且可連線的代理。",
       "invalidUrl": "請輸入有效的 http、https、socks4 或 socks5 代理 URL。",
       "saveSuccessTitle": "代理已儲存",
@@ -446,11 +447,13 @@
     "selectSession": "選擇工作階段...",
     "session": "工作階段",
     "events": "事件",
+    "noEvents": "請至少選擇一個事件。",
     "available": "可用事件",
     "saveChanges": "儲存變更",
     "filters": {
       "title": "篩選條件（選填）",
       "hint": "僅當所有條件都符合時才觸發。適用於訊息事件。",
+      "incomplete": "請為每個篩選條件填寫值，且條件最多 20 個、每個條件最多 100 個值、文字最多 1000 個字元。",
       "badge": "{{count}} 個篩選條件",
       "badge_other": "{{count}} 個篩選條件",
       "addCondition": "新增條件",
@@ -484,11 +487,9 @@
       "valueLabel": "篩選值"
     },
     "columns": {
-      "url": "URL",
       "events": "事件",
       "session": "工作階段",
-      "status": "狀態",
-      "actions": "操作"
+      "status": "狀態"
     },
     "empty": {
       "title": "尚未設定 Webhook",
@@ -538,6 +539,33 @@
       "call.missed": "來電未接聽時",
       "status.received": "聯絡人發佈狀態時",
       "all": "所有事件"
+    },
+    "auth": {
+      "title": "傳送驗證",
+      "hint": "選填。儲存後，已儲存的值不會再次顯示。",
+      "editHint": "已儲存的密鑰及標頭永遠不會顯示。保持此部分不變即可保留它們。",
+      "secret": "簽署密鑰",
+      "secretHint": "16 至 255 個字元。每次傳送都會在 X-OpenWA-Signature 標頭中附上 HMAC-SHA256 簽署。",
+      "secretKeepPlaceholder": "留空以保留目前的密鑰",
+      "generateSecret": "產生",
+      "copySecret": "複製",
+      "secretCopied": "已複製簽署密鑰",
+      "removeSecret": "停止為傳送簽署（移除密鑰）",
+      "headers": "自訂標頭",
+      "headerName": "標頭名稱",
+      "headerValue": "標頭值",
+      "addHeader": "新增標頭",
+      "removeHeader": "移除標頭",
+      "replaceHeaders": "取代自訂標頭",
+      "replaceHint": "這些列會取代所有已儲存的標頭。沒有任何列時，已儲存的標頭會被移除。",
+      "errors": {
+        "headerName": "標頭名稱只可包含字母、數字及連字號。",
+        "headerValue": "標頭值最多 1024 個字元，不可包含控制字元或 Latin-1 以外的字元。",
+        "headerReserved": "Content-Type、User-Agent、X-OpenWA-* 及連線類標頭由閘道設定，不可使用。",
+        "headerDuplicate": "每個標頭名稱只可使用一次。",
+        "tooMany": "最多允許 50 個自訂標頭。",
+        "secretLength": "簽署密鑰長度必須為 16 至 255 個字元。"
+      }
     }
   },
   "templates": {
@@ -571,6 +599,7 @@
     },
     "empty": {
       "title": "未儲存任何範本",
+      "noMatch": "沒有符合搜尋條件的範本。",
       "description": "建立可重用的範本，加快常用回覆和通知的速度。",
       "noSessionsTitle": "沒有可用的工作階段",
       "noSessionsDesc": "請先建立 WhatsApp 工作階段，才能新增範本。",
@@ -597,6 +626,7 @@
     "createdTitle": "API 金鑰已建立",
     "createdHint": "請立即複製此金鑰。之後將無法再次查看。",
     "namePlaceholder": "例如：Production Key",
+    "nameTooShort": "請至少輸入 3 個字元。",
     "rolesTitle": "角色參考",
     "roles": {
       "admin": "管理員",
@@ -615,11 +645,13 @@
       "status": "狀態",
       "lastUsed": "上次使用",
       "actions": "操作",
-      "sessions": "工作階段"
+      "sessions": "工作階段",
+      "restrictions": "限制"
     },
     "statuses": {
       "active": "活躍",
-      "revoked": "已撤銷"
+      "revoked": "已撤銷",
+      "expired": "已過期"
     },
     "empty": {
       "title": "尚未建立 API 金鑰",
@@ -637,10 +669,9 @@
       "revoke": "撤銷"
     },
     "actions": {
-      "copy": "複製",
       "revoke": "撤銷",
       "delete": "刪除",
-      "editSessions": "編輯工作階段"
+      "edit": "編輯存取權限"
     },
     "sessions": {
       "label": "工作階段存取",
@@ -648,10 +679,36 @@
       "all": "全部工作階段",
       "empty": "尚未有工作階段。建立後，此密鑰便可存取全部工作階段。",
       "restricted": "已選 {{count}} 個",
-      "editTitle": "編輯工作階段存取",
       "save": "儲存",
       "choose": "選擇工作階段",
       "leaveAll": "保留為全部工作階段"
+    },
+    "edit": {
+      "title": "編輯金鑰存取權限",
+      "signedIn": "此控制台正以此金鑰登入。更改其角色、IP 位址、聊天或到期時間可能會令你登出。"
+    },
+    "restrictions": {
+      "none": "無",
+      "ips": "IP：{{count}}",
+      "chats": "聊天：{{count}}",
+      "expires": "{{date}} 到期",
+      "expired": "已於 {{date}} 過期"
+    },
+    "ips": {
+      "label": "允許的 IP 位址（選填）",
+      "hint": "每行一個 IP 位址或 CIDR 範圍。留空則接受任何位址。",
+      "invalid": "不是 IPv4 位址或 CIDR 範圍：{{value}}"
+    },
+    "chats": {
+      "label": "聊天存取（選填）",
+      "hint": "每行一個聊天：以 @g.us 結尾的群組 ID、以 @c.us 或 @lid 結尾的聯絡人 ID，或電話號碼。留空則允許所有聊天。受聊天限制的金鑰只可使用對此類金鑰開放的路由；事件 WebSocket 及 MCP 會拒絕它。",
+      "invalid": "不是聊天 ID 或電話號碼：{{value}}"
+    },
+    "expiry": {
+      "label": "到期時間（選填）",
+      "hint": "使用此瀏覽器的時區。留空則金鑰永不過期。",
+      "clear": "移除到期時間",
+      "invalid": "請填寫不晚於 9999 年的完整日期和時間，或清空此欄位使金鑰永不過期。"
     }
   },
   "logs": {
@@ -826,7 +883,7 @@
       "sslRejectUnauthorized": "驗證 SSL 憑證",
       "sslRejectUnauthorizedDesc": "拒絕自簽署或無效的憑證。對於使用自簽署憑證的託管 Postgres（Supabase、Heroku、Render、Railway），請關閉此項。",
       "migrationsTitle": "資料庫遷移",
-      "migrationsStatus": "結構會透過 TypeORM 自動同步",
+      "migrationsStatus": "待處理的遷移會在啟動時自動套用",
       "migrationsHint": "遷移會自動管理。手動遷移請使用 CLI。"
     },
     "engine": {
@@ -849,7 +906,7 @@
     "redis": {
       "title": "Redis",
       "enable": "啟用 Redis",
-      "enableDesc": "快取、工作階段儲存及 BullMQ 佇列需要 Redis",
+      "enableDesc": "用於快取、BullMQ 佇列、速率限制計數器及多節點 WebSocket 分發",
       "useBuiltIn": "使用內置 Redis 容器",
       "builtInDesc": "OpenWA 會為你管理 Redis 容器",
       "queueTitle": "啟用 BullMQ 佇列系統",
@@ -861,7 +918,7 @@
       "failed": "失敗",
       "viewBullMq": "查看 Bull MQ 控制面板",
       "disabledTitle": "Redis 已停用",
-      "disabledDesc": "啟用 Redis 以使用快取、工作階段儲存及 BullMQ 訊息佇列。",
+      "disabledDesc": "啟用 Redis 以使用快取、BullMQ 訊息佇列、速率限制計數器及多節點 WebSocket 分發。",
       "passwordOptional": "（選填）",
       "bullMqUrlCopied": "已複製 Bull MQ 儀表板網址",
       "bullMqUrlHint": "請使用 ADMIN API 金鑰開啟 — 瀏覽器分頁無法進行身份驗證。"
@@ -901,8 +958,8 @@
       "checking": "正在檢查伺服器狀態...",
       "dontClose": "請不要關閉此視窗",
       "successMsg": "伺服器已重新上線！頁面將自動重新載入。",
-      "errorMsg": "伺服器在 30 秒後仍未回應。請檢查 Docker 記錄並手動重新啟動。",
-      "outcomeUnknown": "伺服器回應前代理已逾時。重新啟動可能仍在進行中；請在一分鐘後重新載入頁面查看。",
+      "errorMsg": "伺服器沒有回應。請檢查 Docker 記錄並手動重新啟動。",
+      "outcomeUnknown": "伺服器回應前代理傳回了錯誤，因此無法確定重新啟動是否正在進行。請在一分鐘後重新載入頁面查看。",
       "reload": "重新載入頁面"
     },
     "toasts": {
@@ -916,7 +973,7 @@
       "storageWarning": "現有的媒體檔案不會自動移至新的儲存後端；它們會保留在舊位置。",
       "downloadBackup": "請先下載備份",
       "backupTitle": "資料備份與還原",
-      "backupHint": "在切換資料庫前，請將所有資料匯出為 JSON，然後在切換後再匯入。備份以明文包含 webhook 密鑰及代理憑證 — 請妥善保存，並在還原後刪除。",
+      "backupHint": "在切換資料庫前，請將所有資料匯出為 JSON，然後在切換後再匯入。備份不包含 webhook 簽署密鑰、webhook 自訂標頭及代理憑證，還原後請重新輸入。整合實例的密鑰及設定以明文包含在內，請妥善保存檔案，並在還原後刪除。",
       "export": "匯出資料",
       "import": "匯入資料",
       "exportFailed": "無法匯出資料",
@@ -964,7 +1021,7 @@
     "config": {
       "title": "設定 {{name}}",
       "noOptions": "此外掛沒有可用設定選項",
-      "uiHandshakeError": "外掛設定介面未初始化。如有可用的結構表單，請使用下方表單。",
+      "uiHandshakeError": "外掛設定介面未初始化。",
       "save": "儲存設定",
       "addItem": "新增",
       "tabConfig": "設定",
@@ -995,7 +1052,7 @@
       "healthFail": "健康檢查失敗",
       "healthError": "健康檢查錯誤",
       "savedTitle": "設定已儲存",
-      "savedDesc": "需要重新啟動伺服器以套用變更。",
+      "savedDesc": "變更無需重新啟動伺服器即可生效。",
       "saveFailed": "儲存失敗",
       "installed": "外掛已安裝",
       "installFailed": "安裝失敗",
@@ -1100,7 +1157,7 @@
   },
   "search": {
     "placeholder": "搜尋訊息…",
-    "results": "{{count}} 個結果",
+    "loadMore": "顯示更多（{{shown}}/{{total}}）",
     "empty": "未找到訊息。",
     "error": "搜尋失敗。請重試。",
     "unavailable": "搜尋未設定。",

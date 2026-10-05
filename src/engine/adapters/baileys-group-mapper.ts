@@ -79,9 +79,9 @@ export function mapBaileysGroupInfo(
     createdAt: metadata.creation,
     participants,
     // WhatsApp "announce" = only admins can post. isAnnounce reports the group SETTING; isReadOnly
-    // reports what it means for THIS account, which is the question whatsapp-web.js answers with WA
-    // Web's own per-account flag. Copying announce into both told an admin of an announce-only group
-    // that they could not post, in the one field a client uses to disable its composer.
+    // reports what it means for THIS account. Copying announce into both told an admin of an
+    // announce-only group that they could not post, in the one field a client uses to disable its
+    // composer.
     isAnnounce: metadata.announce,
     isReadOnly: selfJid
       ? Boolean(metadata.announce) && !isSelfAdmin(metadata, selfJid, normalizeJid)

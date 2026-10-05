@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -111,6 +114,54 @@ func TestJIDPathIsReadable(t *testing.T) {
 	}
 }
 
+func TestEmptyAndDotSegmentsRefused(t *testing.T) {
+	var hits int32
+	rt := RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&hits, 1)
+		return &http.Response{StatusCode: 204, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: req}, nil
+	})
+	c := newTestClient(t, rt)
+	ctx := context.Background()
+
+	refused := map[string]error{
+		`Webhooks.Delete ".."`: c.Webhooks.Delete(ctx, "s1", ".."),
+		`Webhooks.Delete "."`:  c.Webhooks.Delete(ctx, "s1", "."),
+		`Webhooks.Delete ""`:   c.Webhooks.Delete(ctx, "s1", ""),
+		`Do %2E%2e`:            c.Do(ctx, "DELETE", "/api/sessions/s1/labels/%2E%2e", nil, nil, nil),
+		`Do ..`:                c.Do(ctx, "GET", "/api/sessions/s1/..?x=1", nil, nil, nil),
+	}
+	_, err := c.Sessions.Get(ctx, "")
+	refused[`Sessions.Get ""`] = err
+	_, err = c.Messages.Media(ctx, "s1", "..", "m1")
+	refused[`Messages.Media ".."`] = err
+	_, err = c.Status.Media(ctx, "s1", ".")
+	refused[`Status.Media "."`] = err
+	for name, err := range refused {
+		if err == nil || !strings.Contains(err.Error(), "path segment") {
+			t.Errorf("%s: err = %v, want a path segment error", name, err)
+		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("%d requests sent, want 0", n)
+	}
+
+	// Dots inside an id, a dot-only query value, and a hand-written trailing or
+	// double slash are not refused.
+	for _, id := range []string{"a.b", "...", "628123@c.us"} {
+		if err := c.Webhooks.Delete(ctx, "s1", id); err != nil {
+			t.Errorf("Webhooks.Delete %q: %v", id, err)
+		}
+	}
+	for _, path := range []string{"/api/sessions/", "/api/sessions//x", "/", "/api/labels/a.b?x=/.."} {
+		if err := c.Do(ctx, "GET", path, nil, nil, nil); err != nil {
+			t.Errorf("Do %q: %v", path, err)
+		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 7 {
+		t.Fatalf("%d requests sent, want 7", n)
+	}
+}
+
 func TestListSessionsQueryName(t *testing.T) {
 	rt := &recordTransport{status: 200, body: `[]`}
 	c := newTestClient(t, rt)
@@ -177,6 +228,53 @@ func TestTypedErrors(t *testing.T) {
 	}
 	if apiErr.StatusCode != 409 || apiErr.Kind != "Conflict" || apiErr.Message != "engine not ready" {
 		t.Fatalf("APIError = %+v", apiErr)
+	}
+}
+
+func TestAPIErrorCodeRetryAfterAndHeader(t *testing.T) {
+	fail := func(status int, body string, header http.Header) *APIError {
+		t.Helper()
+		c := newTestClient(t, &recordTransport{status: status, body: body, header: header})
+		_, err := c.Sessions.List(context.Background(), nil)
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("errors.As *APIError failed for %v", err)
+		}
+		return apiErr
+	}
+
+	throttled := fail(429, `{"statusCode":429,"message":"ThrottlerException: Too Many Requests"}`, http.Header{"Retry-After": {"7"}})
+	if !errors.Is(throttled, ErrRateLimited) || throttled.RetryAfter != 7*time.Second || throttled.Code != "" {
+		t.Fatalf("throttled = %+v", throttled)
+	}
+	if throttled.Header.Get("Retry-After") != "7" {
+		t.Fatalf("Header = %v", throttled.Header)
+	}
+
+	// Send pacing puts its wait in the body; a header must not shorten it.
+	pacing := `{"statusCode":429,"error":"Too Many Requests","message":"Daily send cap reached","code":"SEND_PACING_LIMITED","retryAfterSeconds":34521}`
+	for _, h := range []http.Header{nil, {"Retry-After": {"1"}}} {
+		e := fail(429, pacing, h)
+		if e.Code != "SEND_PACING_LIMITED" || e.RetryAfter != 34521*time.Second {
+			t.Fatalf("pacing with header %v = %+v", h, e)
+		}
+	}
+
+	dated := fail(503, "", http.Header{"Retry-After": {time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)}})
+	if dated.RetryAfter <= 0 || dated.RetryAfter > 3*time.Second {
+		t.Fatalf("HTTP-date RetryAfter = %v", dated.RetryAfter)
+	}
+	for _, v := range []string{"soon", "-5"} {
+		if e := fail(503, "", http.Header{"Retry-After": {v}}); e.RetryAfter != 0 {
+			t.Fatalf("Retry-After %q gave %v", v, e.RetryAfter)
+		}
+	}
+
+	if e := fail(502, `{"statusCode":502,"message":"x","code":"SESSION_LOGOUT_INCOMPLETE"}`, nil); e.Code != "SESSION_LOGOUT_INCOMPLETE" {
+		t.Fatalf("Code = %q", e.Code)
+	}
+	if e := fail(500, "oops", nil); e.Code != "" || e.RetryAfter != 0 {
+		t.Fatalf("plain-text error = %+v", e)
 	}
 }
 
@@ -1528,5 +1626,193 @@ func TestRequestEnumWireValues(t *testing.T) {
 	}
 	if !strings.Contains(string(pin), `"durationSeconds":86400`) {
 		t.Errorf("durationSeconds did not marshal as a bare number: %s", pin)
+	}
+}
+
+// A Do path that does not begin with "/" would be appended to the base URL's
+// authority, so "@evil.example/x" sends the API key to evil.example.
+func TestDoPathWithoutLeadingSlashRefused(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{}`}
+	c := newTestClient(t, rt)
+	for _, path := range []string{"@evil.example/api/x", ".evil.example/api/x", "api/x", ""} {
+		if err := c.Do(context.Background(), "GET", path, nil, nil, nil); err == nil {
+			t.Errorf("Do %q: want an error", path)
+		}
+	}
+	if rt.lastReq != nil {
+		t.Fatalf("request sent to %s, want none", rt.lastReq.URL.Host)
+	}
+}
+
+// stallServer stalls every request before answering; with flush set it sends
+// the headers first and stalls the body instead. It blocks until the request is
+// cancelled or the test ends.
+func stallServer(t *testing.T, flush bool) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if flush {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("partial"))
+			w.(http.Flusher).Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv
+}
+
+func TestTimeoutReportsTheBudgetThatExpired(t *testing.T) {
+	for _, flush := range []bool{false, true} {
+		srv := stallServer(t, flush)
+
+		// The client timeout fired: the error names it.
+		c, err := New(srv.URL, "k", WithTimeout(100*time.Millisecond))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		_, err = c.Messages.Media(context.Background(), "s1", "c1", "m1")
+		var te *TimeoutError
+		if !errors.As(err, &te) || te.Timeout != 100*time.Millisecond {
+			t.Errorf("flush=%v client timeout: err = %v, want a *TimeoutError after 100ms", flush, err)
+		}
+
+		// The caller's shorter deadline fired: the 30s client timeout is not the
+		// budget that ran out, so the error does not name it.
+		c, err = New(srv.URL, "k")
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err = c.Messages.Media(ctx, "s1", "c1", "m1")
+		cancel()
+		te = nil
+		if !errors.As(err, &te) || te.Timeout != 0 || err.Error() != "openwa: request timed out" {
+			t.Errorf("flush=%v caller deadline: err = %v, want a *TimeoutError without a duration", flush, err)
+		}
+	}
+}
+
+// argsLogger records every logged key-value argument as text.
+type argsLogger struct{ text strings.Builder }
+
+func (l *argsLogger) Log(_ context.Context, _ string, msg string, args ...any) {
+	fmt.Fprintln(&l.text, msg, args)
+}
+
+// A base URL may carry basic-auth credentials for a fronting proxy; the
+// password must not reach the request log.
+func TestRequestLogRedactsBaseURLPassword(t *testing.T) {
+	ok := &recordTransport{status: 200, body: `{}`}
+	failing := RoundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("refused") })
+	for _, rt := range []http.RoundTripper{ok, failing} {
+		lg := &argsLogger{}
+		c, err := New("https://proxyuser:s3cret@api.example.com", "k", WithTransport(rt), WithLogger(lg))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		_, _ = c.Health.Check(context.Background())
+		if got := lg.text.String(); !strings.Contains(got, "api.example.com") || strings.Contains(got, "s3cret") {
+			t.Errorf("request log = %q, want the URL without the password", got)
+		}
+	}
+
+	// The retry layer logs the URL of every request it replays.
+	lg := &argsLogger{}
+	policy := RetryPolicy{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+	c, err := New("https://proxyuser:s3cret@api.example.com", "k",
+		WithTransport(&statusTransport{status: 503}), WithLogger(lg), WithRetry(policy))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _ = c.Health.Check(context.Background())
+	if got := lg.text.String(); !strings.Contains(got, "openwa retrying request") || strings.Contains(got, "s3cret") {
+		t.Errorf("retry log = %q, want the retry logged without the password", got)
+	}
+}
+
+// A Do path that already carries a query string keeps it; the query values are appended with "&"
+// rather than a second "?", which the server would read as part of the first value.
+func TestDoPathWithQueryAppendsQueryValues(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `[]`}
+	c := newTestClient(t, rt)
+	if err := c.Do(context.Background(), "GET", "/api/sessions?limit=5", url.Values{"name": {"x"}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := rt.lastReq.URL.RawQuery; got != "limit=5&name=x" {
+		t.Errorf("query = %q, want %q", got, "limit=5&name=x")
+	}
+}
+
+func TestSendIdempotencyKey(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{"messageId":"m","timestamp":1}`}
+	c := newTestClient(t, rt, WithHeader("idempotency-key", "default"))
+	for _, segment := range []string{"send-text", "send-image", "send-video", "send-audio", "send-document", "send-sticker", "send-location", "send-contact", "send-template", "send-poll", "reply", "forward"} {
+		ctx := WithIdempotencyKey(context.Background(), segment)
+		if _, err := c.Messages.send(ctx, "s", segment, map[string]string{"chatId": "x"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := rt.lastReq.Header.Values("Idempotency-Key"); len(got) != 1 || got[0] != segment {
+			t.Fatalf("%s: %v", segment, got)
+		}
+		if string(rt.lastRaw) != `{"chatId":"x"}` {
+			t.Fatalf("body changed: %s", rt.lastRaw)
+		}
+	}
+	if _, err := c.Messages.SendText(context.Background(), "s", SendTextRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rt.lastReq.Header.Get("Idempotency-Key"); got != "default" {
+		t.Fatalf("default mutated: %s", got)
+	}
+	for _, key := range []string{"", "a b", "a\n", "é", strings.Repeat("x", 256)} {
+		rt.lastReq = nil
+		if _, err := c.Messages.SendText(WithIdempotencyKey(context.Background(), key), "s", SendTextRequest{}); err == nil {
+			t.Fatalf("accepted %q", key)
+		}
+		if rt.lastReq != nil {
+			t.Fatalf("transport called for %q", key)
+		}
+	}
+}
+
+func TestRedrivePreservesAnEmptyIDsFilter(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{}`}
+	c := newTestClient(t, rt)
+	empty := []string{}
+	for _, ids := range []*[]string{nil, &empty} {
+		if _, err := c.Webhooks.RedriveDeliveryFailures(context.Background(), &RedriveWebhookDeliveriesRequest{IDs: ids}); err != nil {
+			t.Fatal(err)
+		}
+		want := `{}`
+		if ids != nil {
+			want = `{"ids":[]}`
+		}
+		if string(rt.lastRaw) != want {
+			t.Fatalf("body = %s, want %s", rt.lastRaw, want)
+		}
+	}
+}
+
+func TestRetryKeepsIdempotencyKey(t *testing.T) {
+	var keys []string
+	rt := RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		keys = append(keys, req.Header.Get("Idempotency-Key"))
+		return &http.Response{StatusCode: 503, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: req}, nil
+	})
+	c := newTestClient(t, rt, WithRetry(RetryPolicy{MaxRetries: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RetryableStatuses: []int{503}}))
+	_, _ = c.Messages.SendText(WithIdempotencyKey(context.Background(), "stable"), "s", SendTextRequest{})
+	if len(keys) != 3 {
+		t.Fatalf("attempts: %v", keys)
+	}
+	for _, key := range keys {
+		if key != "stable" {
+			t.Fatalf("keys: %v", keys)
+		}
 	}
 }

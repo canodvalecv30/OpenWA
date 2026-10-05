@@ -16,11 +16,9 @@ export class AddMessageMediaPathIndex1786100000000 implements MigrationInterface
   name = 'AddMessageMediaPathIndex1786100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // The data pool boots with a runtime statement_timeout (default 30s). On an upgrade where this
-    // is the only pending migration, MigrationExecutor wraps it in its OWN transaction, so no
-    // earlier migration's SET LOCAL is in effect and a CREATE INDEX over a large messages table is
-    // cancelled at the timeout, aborting the ledger-advancing transaction and crash-looping the
-    // boot retries. Lift it for this transaction only, exactly like AddMessagesCreatedAtIndex.
+    // Boot and CLI migrations run on a pool without the runtime statement_timeout (pg-boot-migrations.ts),
+    // and MigrationExecutor wraps a lone pending migration in its own transaction, so lift any role- or
+    // database-level default for this transaction only, exactly like AddMessagesCreatedAtIndex.
     if (queryRunner.dataSource.options.type === 'postgres') {
       await queryRunner.query('SET LOCAL statement_timeout = 0');
     }

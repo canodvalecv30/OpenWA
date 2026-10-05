@@ -128,17 +128,11 @@ export class InfraConfigController {
     // while the process actually runs baileys/postgres (#1313). isEnvPinned's boot snapshot excludes
     // file-sourced keys, so a value that only ever lived in data/.env.generated is NOT pinned and the
     // freshly-saved file still wins over process.env's stale boot-time copy — keeping the
-    // "saved, pending restart" form state intact until the reboot applies it (#226/#1082). The blank
-    // rule is the same one the save guard's bootValue applies: a blank counts as unset only for the
-    // blank-forwarded keys boot's clearBlankEnv clears; elsewhere the runtime reads the blank as-is
-    // (configuration.ts's `=== 'true'` checks), so the read must not fall through to the file there.
-    const effective = (key: string): string | undefined => {
-      const envValue = isEnvPinned(key) ? process.env[key] : undefined;
-      if (envValue !== undefined && (envValue.trim() !== '' || !BLANK_SHADOWED_ENV_KEYS.includes(key))) {
-        return envValue;
-      }
-      return saved[key];
-    };
+    // "saved, pending restart" form state intact until the reboot applies it (#226/#1082). A pinned
+    // blank is read as-is: boot's clearBlankEnv drops blank host forwards before the snapshot, so a
+    // blank that is still pinned is a `KEY=` line in ./.env, which the file can never fill at boot.
+    const effective = (key: string): string | undefined =>
+      (isEnvPinned(key) ? process.env[key] : undefined) ?? saved[key];
 
     // Secrets (passwords, S3 keys) are never returned; the form shows a "set" indicator
     // and an empty submission preserves the stored value (see saveConfig). This lets
@@ -172,7 +166,10 @@ export class InfraConfigController {
         s3Bucket: effective('S3_BUCKET') || '',
         s3Region: effective('S3_REGION') || '',
         s3Endpoint: effective('S3_ENDPOINT') || '',
-        s3CredentialsSet: Boolean(effective('S3_ACCESS_KEY_ID') && effective('S3_SECRET_ACCESS_KEY')),
+        s3CredentialsSet: Boolean(
+          (effective('S3_ACCESS_KEY_ID') || effective('S3_ACCESS_KEY')) &&
+          (effective('S3_SECRET_ACCESS_KEY') || effective('S3_SECRET_KEY')),
+        ),
       },
       engine: {
         type: effective('ENGINE_TYPE') || 'whatsapp-web.js',
@@ -188,8 +185,14 @@ export class InfraConfigController {
   @ApiOperation({ summary: 'Save infrastructure configuration to .env file' })
   @ApiResponse({
     status: 200,
-    description: 'Save outcome. A failed write also answers 200 with `saved: false` — read the flag, not the status.',
+    description: 'Save outcome. A failed disk write answers 200 with `saved: false`, so read the flag, not the status.',
     type: InfraConfigSaveResponseDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Rejected before anything was written: an invalid or unknown field, an unknown engine type, a value with a ' +
+      'line break or one that cannot be stored, or a configuration that would not boot in production.',
   })
   @ApiBody({ description: 'Configuration to save', type: SaveConfigDto })
   saveConfig(@Body() config: SaveConfigDto): { message: string; saved: boolean; envPath: string; profiles: string[] } {
@@ -300,16 +303,21 @@ export class InfraConfigController {
     // loads with dotenv override:false, so a value supplied via the container environment
     // (compose `environment:`) wins over this file — the precedence the file header documents.
     // Without that, a deployment providing DATABASE_PASSWORD & co. through the environment is
-    // refused on EVERY save even though its boot passes the guard. A blank compose-forwarded
-    // value counts as unset exactly like clearBlankEnv treats it at boot.
+    // refused on EVERY save even though its boot passes the guard. A pinned blank is kept as-is:
+    // clearBlankEnv drops blank host forwards before either snapshot, so a blank that is still
+    // pinned is a `KEY=` line in ./.env, and boot keeps it. Only without a snapshot (a process that
+    // never ran load-env) does a blank on a blank-forwarded key count as unset, as clearBlankEnv would.
     //
-    // Only a HOST-supplied key may win. load-env also merges .env and data/.env.generated into
-    // process.env, so reading process.env alone would hand back the very file this save is
-    // replacing — the guard would then bless a flip by validating the OLD config (a built-in ->
-    // external switch keeping the bundled 'openwa' password would save cleanly and crash-loop the
-    // next production boot, the exact case this guard exists for). isOsProvidedEnv separates the
-    // two using the snapshot load-env takes before either file is loaded.
+    // Only a key from a layer ABOVE the file may win: the host, or the project .env, which load-env
+    // also loads ahead of data/.env.generated with override:false. load-env merges the generated
+    // file into process.env too, so reading process.env alone would hand back the very file this
+    // save is replacing: the guard would then bless a flip by validating the OLD config (a
+    // built-in -> external switch keeping the bundled 'openwa' password would save cleanly and
+    // crash-loop the next production boot, the exact case this guard exists for). isEnvPinned's
+    // snapshot is taken before that file loads; isOsProvidedEnv keeps the no-snapshot default of
+    // assuming an override.
     const bootValue = (key: string): string | undefined => {
+      if (isEnvPinned(key) && process.env[key] !== undefined) return process.env[key];
       const envValue = isOsProvidedEnv(key) ? process.env[key] : undefined;
       if (envValue !== undefined && (envValue.trim() !== '' || !BLANK_SHADOWED_ENV_KEYS.includes(key))) {
         return envValue;
@@ -324,8 +332,9 @@ export class InfraConfigController {
         postgresBuiltIn: bootValue('POSTGRES_BUILTIN'),
         databaseHost: bootValue('DATABASE_HOST'),
         storageType: bootValue('STORAGE_TYPE'),
-        s3AccessKey: bootValue('S3_ACCESS_KEY_ID'),
-        s3SecretKey: bootValue('S3_SECRET_ACCESS_KEY'),
+        // The same canonical-with-legacy fallback main.ts and storage.service apply.
+        s3AccessKey: bootValue('S3_ACCESS_KEY_ID') || bootValue('S3_ACCESS_KEY'),
+        s3SecretKey: bootValue('S3_SECRET_ACCESS_KEY') || bootValue('S3_SECRET_KEY'),
         s3Endpoint: bootValue('S3_ENDPOINT'),
         minioBuiltIn: bootValue('MINIO_BUILTIN'),
         redisPassword: bootValue('REDIS_PASSWORD'),

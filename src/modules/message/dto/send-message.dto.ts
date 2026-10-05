@@ -5,7 +5,6 @@ import {
   IsNotEmpty,
   IsOptional,
   MaxLength,
-  ValidateIf,
   IsArray,
   ArrayMaxSize,
   IsBoolean,
@@ -64,6 +63,7 @@ export class CustomLinkPreviewDto {
   @ApiProperty({
     description: 'The URL as it appears in the message text — WhatsApp anchors the preview to it.',
     example: 'https://example.com/launch',
+    maxLength: CUSTOM_PREVIEW_URL_MAX_LENGTH,
   })
   @IsString()
   @IsNotEmpty()
@@ -106,7 +106,13 @@ export class SendTextMessageDto {
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -204,7 +210,6 @@ export class SendMediaMessageDto {
   })
   @IsOptional()
   @IsString()
-  @ValidateIf((o: SendMediaMessageDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({
@@ -219,6 +224,7 @@ export class SendMediaMessageDto {
     description:
       "Filename for the media. Only rendered on document sends — defaults to 'file' when omitted (a URL-based document send on whatsapp-web.js first derives the URL basename)",
     example: 'image.jpg',
+    maxLength: 255,
   })
   @IsOptional()
   @IsString()
@@ -235,7 +241,13 @@ export class SendMediaMessageDto {
   @MaxLength(1024)
   caption?: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -331,9 +343,9 @@ export class MessageResponseDto {
   @ApiProperty({
     description:
       'The message id, assigned when the gateway accepts the message for sending. A 201 here means the ' +
-      'message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject ' +
-      'an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still ' +
-      'returns 201 with a valid messageId; whether it later delivers, stalls, or is reported as an error ' +
+      'message was handed to the WhatsApp client — it does NOT confirm delivery. On Baileys a message to a ' +
+      'number that is not on WhatsApp still returns 201 with a valid messageId (whatsapp-web.js answers ' +
+      '400); whether it later delivers, stalls, or is reported as an error ' +
       'reaches you asynchronously, if at all. To confirm a number is on WhatsApp before ' +
       'sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the ' +
       'message `status` field (sent → delivered → read, or failed if WhatsApp reports an error for it). ' +

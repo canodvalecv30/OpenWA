@@ -23,9 +23,9 @@ import type {
 export class CatalogResource {
   constructor(private readonly client: OpenWAClient) {}
 
-  /** Get the business catalog info. */
-  info(sessionId: string): Promise<CatalogInfo> {
-    return this.client.request<CatalogInfo>({
+  /** Get the business catalog info, or `null` when the account has no catalog. */
+  info(sessionId: string): Promise<CatalogInfo | null> {
+    return this.client.request<CatalogInfo | null>({
       method: 'GET',
       path: `/api/sessions/${encodeSegment(sessionId)}/catalog`,
     });
@@ -40,9 +40,9 @@ export class CatalogResource {
     });
   }
 
-  /** Get a single product by id. */
-  product(sessionId: string, productId: string): Promise<CatalogProduct> {
-    return this.client.request<CatalogProduct>({
+  /** Get a single product by id, or `null` when no product in the catalog carries that id. */
+  product(sessionId: string, productId: string): Promise<CatalogProduct | null> {
+    return this.client.request<CatalogProduct | null>({
       method: 'GET',
       path: `/api/sessions/${encodeSegment(sessionId)}/catalog/products/${encodeSegment(productId)}`,
     });

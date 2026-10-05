@@ -23,8 +23,9 @@ func (s *SessionsService) GetConfig(ctx context.Context, sessionID string) (*Ses
 	return &out, nil
 }
 
-// UpdateConfig changes a RUNNING session's configuration. It takes effect without re-linking the
-// account — all three fields were fixed at creation before this route existed.
+// UpdateConfig merges the given keys into a session's stored configuration, running or stopped,
+// with no restart or re-link. AutoRejectCalls applies immediately; MaxReconnectAttempts and
+// ReconnectBaseDelay apply on the next start.
 func (s *SessionsService) UpdateConfig(ctx context.Context, sessionID string, body UpdateSessionConfigRequest) (*SessionConfig, error) {
 	var out SessionConfig
 	err := s.client.do(ctx, "PATCH", "/api/sessions/"+pathEscape(sessionID)+"/config", nil, body, &out)
@@ -45,7 +46,8 @@ func (s *SessionsService) GetProxy(ctx context.Context, sessionID string) (*Sess
 }
 
 // UpdateProxy changes per-session proxy settings. No restart is performed -- changes apply on the
-// next start. Send ProxyURL as JSON null to clear the proxy.
+// next start. Set ClearProxyURL to send an explicit null and clear the proxy; a nil ProxyURL leaves
+// it unchanged. Requires an unscoped ADMIN key.
 func (s *SessionsService) UpdateProxy(ctx context.Context, sessionID string, body UpdateSessionProxyRequest) (*SessionProxy, error) {
 	var out SessionProxy
 	err := s.client.do(ctx, "PATCH", "/api/sessions/"+pathEscape(sessionID)+"/proxy", nil, body, &out)
@@ -65,7 +67,7 @@ func (s *SessionsService) Get(ctx context.Context, sessionID string) (*SessionRe
 	return &out, nil
 }
 
-// Create provisions a new session.
+// Create provisions a new session. Requires an OPERATOR-level key; setting ProxyURL requires an ADMIN key.
 func (s *SessionsService) Create(ctx context.Context, body CreateSessionRequest) (*SessionResponse, error) {
 	var out SessionResponse
 	err := s.client.do(ctx, "POST", "/api/sessions", nil, body, &out)
@@ -123,7 +125,12 @@ func (s *SessionsService) Logout(ctx context.Context, sessionID string) (*Sessio
 	return &out, nil
 }
 
-// ForceKill terminates a stuck session immediately.
+// ForceKill terminates a stuck session immediately. It returns an *APIError with
+// StatusCode 502 and Code "SESSION_FORCE_KILL_INCOMPLETE" when the session was
+// stopped locally but the force-destroy threw or timed out, so the engine process
+// may still be running; the status is settled to disconnected and a retry
+// answers 400 because no engine is left to kill. Restart the node to reap a
+// leaked process.
 func (s *SessionsService) ForceKill(ctx context.Context, sessionID string) (*SessionResponse, error) {
 	var out SessionResponse
 	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/force-kill", nil, nil, &out)

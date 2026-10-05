@@ -2,12 +2,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   createSwaggerConfig,
+  documentErrorResponses,
   dropUnexpressibleOperations,
+  ERROR_RESPONSE_SCHEMA,
   exemptPublicOperations,
   PUBLIC_PATHS,
   METRICS_BEARER_SCHEME,
 } from './swagger.config';
-import type { OpenAPIObject } from '@nestjs/swagger';
+import type { OpenAPIObject, OperationObject } from '@nestjs/swagger';
+import { EnginePageError } from '../common/errors/engine-page.error';
 
 describe('createSwaggerConfig', () => {
   // Regression test for issue #104: Swagger UI returned "Unauthorized" because the
@@ -86,6 +89,116 @@ describe('exemptPublicOperations', () => {
     delete doc.paths['/api/health'];
 
     expect(() => exemptPublicOperations(doc)).not.toThrow();
+  });
+});
+
+describe('documentErrorResponses', () => {
+  const ref = { 'application/json': { schema: { $ref: `#/components/schemas/${ERROR_RESPONSE_SCHEMA}` } } };
+  function fixtureDoc(): OpenAPIObject {
+    return {
+      openapi: '3.0.0',
+      info: { title: 't', version: '0' },
+      paths: {
+        '/api/sessions': {
+          post: {
+            responses: {
+              '201': { description: 'Created' },
+              '403': { description: 'Session-scoped keys cannot create sessions' },
+              '404': { description: 'Not found' },
+            },
+          },
+        },
+        '/api/health': { get: { security: [], responses: { '503': { description: 'Not ready' } } } },
+        '/api/metrics': { get: { security: [{ 'metrics-bearer': [] }], responses: { '200': { description: 'ok' } } } },
+      },
+    };
+  }
+
+  it('adds 401 and 403 to an API-key operation and a schema to each of its error responses', () => {
+    const responses = documentErrorResponses(fixtureDoc()).paths['/api/sessions'].post!.responses as Record<
+      string,
+      { description: string; content?: unknown }
+    >;
+    expect(Object.keys(responses)).toEqual(['201', '401', '403', '404']);
+    expect(responses['403'].description).toBe(
+      "Session-scoped keys cannot create sessions. Also returned when the API key's role, session or chat scope, " +
+        'or IP allow-list does not allow this operation.',
+    );
+    for (const status of ['401', '403', '404']) expect(responses[status].content).toEqual(ref);
+    expect(responses['201']).toEqual({ description: 'Created' });
+  });
+
+  // The auth guard answers 403 before the handler runs, so an operation's own 403 cannot replace it.
+  it('merges the auth refusal into an existing 403 once, however often it runs', () => {
+    const doc = documentErrorResponses(documentErrorResponses(fixtureDoc()));
+    const description = (doc.paths['/api/sessions'].post!.responses['403'] as { description: string }).description;
+    expect(description.match(/IP allow-list/g)).toHaveLength(1);
+    expect(description.startsWith('Session-scoped keys cannot create sessions. ')).toBe(true);
+  });
+
+  it('adds the plain auth refusal once to an operation without a 403 of its own, however often it runs', () => {
+    const doc = fixtureDoc();
+    doc.paths['/api/sessions'].get = { responses: { '200': { description: 'ok' } } };
+    const twice = documentErrorResponses(documentErrorResponses(doc));
+    expect((twice.paths['/api/sessions'].get!.responses['403'] as { description: string }).description).toBe(
+      "The API key's role, session or chat scope, or IP allow-list does not allow this operation",
+    );
+  });
+
+  // The global ValidationPipe (whitelist + forbidNonWhitelisted) and the JSON body parser answer 400
+  // before the handler runs, so every operation that takes a body can return one.
+  it('adds a 400 to an operation that takes a request body, keeping its own when it has one', () => {
+    const doc = fixtureDoc();
+    const body = { content: { 'application/json': { schema: { type: 'object' } } } };
+    doc.paths['/api/sessions'].post!.requestBody = body;
+    doc.paths['/api/sessions'].put = { requestBody: body, responses: { '400': { description: 'Name taken' } } };
+    doc.paths['/api/sessions'].get = { responses: { '200': { description: 'ok' } } };
+    const paths = documentErrorResponses(doc).paths['/api/sessions'];
+    const description = (op: OperationObject | undefined): string | undefined =>
+      (op?.responses['400'] as { description: string } | undefined)?.description;
+    expect(description(paths.post)).toMatch(/does not declare/);
+    expect(paths.post!.responses['400']).toEqual(expect.objectContaining({ content: ref }));
+    expect(description(paths.put)).toBe('Name taken');
+    expect(description(paths.get)).toBeUndefined();
+  });
+
+  it('leaves operations with their own security as they were', () => {
+    const before = fixtureDoc();
+    const after = documentErrorResponses(fixtureDoc());
+    expect(after.paths['/api/health']).toEqual(before.paths['/api/health']);
+    expect(after.paths['/api/metrics']).toEqual(before.paths['/api/metrics']);
+  });
+
+  it('keeps 401 for a dead key and names the IP allow-list under 403, as the auth guard answers', () => {
+    const doc = fixtureDoc();
+    doc.paths['/api/sessions'].get = { responses: { '200': { description: 'ok' } } };
+    const responses = documentErrorResponses(doc).paths['/api/sessions'].get!.responses as Record<
+      string,
+      { description: string }
+    >;
+    expect(responses['401'].description).toBe('The API key is missing, unknown, revoked, or expired');
+    expect(responses['403'].description).toMatch(/IP allow-list/);
+  });
+
+  it('describes every field and the code of the ENGINE_PAGE_ERROR body', () => {
+    const schema = documentErrorResponses(fixtureDoc()).components?.schemas?.[ERROR_RESPONSE_SCHEMA] as {
+      properties: Record<string, { description?: string }>;
+    };
+    const body = new EnginePageError(
+      { name: 'Error', message: 'boom', build: '2.3000' },
+      new Error('boom'),
+    ).getResponse();
+    expect(Object.keys(body).filter(key => !(key in schema.properties))).toEqual([]);
+    expect(schema.properties.code.description).toContain('ENGINE_PAGE_ERROR');
+  });
+
+  it('registers the schema and is idempotent', () => {
+    const once = documentErrorResponses(fixtureDoc());
+    const schema = once.components?.schemas?.[ERROR_RESPONSE_SCHEMA] as { required?: string[] };
+    expect(schema.required).toEqual(['statusCode', 'message']);
+    expect(documentErrorResponses(JSON.parse(JSON.stringify(once)) as OpenAPIObject)).toEqual(
+      JSON.parse(JSON.stringify(once)),
+    );
   });
 });
 

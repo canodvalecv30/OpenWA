@@ -17,11 +17,13 @@ export interface ReconnectDecision {
  * after the initial connection. Extracted from the component so the transition is unit-testable
  * independent of React/socket.io.
  *
- * A reconnect means realtime events (message.received/ack/revoke) were missed during the gap. The
- * chat message cache uses staleTime:Infinity, so it won't refetch on its own; the caller invalidates
- * on `invalidate: true` to force a refresh of the thread the gap left stale.
+ * A reconnect means realtime events (message.received/ack/revoke) were missed during the gap. On
+ * `invalidate: true` the caller re-reads what it holds outside the per-connect refresh (Chats: the
+ * chat list and contact statuses; useSessionFeed: the session cards). Chat threads are not refreshed
+ * here: Chats invalidates them in its subscribe effect on every connect.
  *
- * - First connect (hadConnected false): no invalidate — nothing is cached yet to refresh.
+ * - First connect (hadConnected false): no invalidate. The cache is not necessarily empty (a remount
+ *   within gcTime keeps the threads read before it); refreshing those is not this decision's job.
  * - Disconnect after the first connect: mark a gap (wasDisconnected), no invalidate.
  * - Connect with a marked gap: RECONNECT — invalidate, then clear the gap marker.
  * - Disconnect before any connect (transient noise on mount): no gap marked (avoid a spurious first-

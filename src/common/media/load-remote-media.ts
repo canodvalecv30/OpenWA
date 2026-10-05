@@ -1,9 +1,5 @@
-import {
-  BadRequestException,
-  HttpException,
-  PayloadTooLargeException,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { BadRequestException, HttpException, PayloadTooLargeException } from '@nestjs/common';
+import { EngineNotSentError } from '../errors/engine-not-sent.error';
 import { SsrfBlockedError, withSafeFetch } from '../security/ssrf-guard';
 import { urlFetchProxy } from '../security/proxy-dispatcher';
 import { createLogger } from '../services/logger.service';
@@ -46,7 +42,9 @@ function positiveIntFromEnv(name: string, fallback: number): number {
  * instead: undici reports a proxy that refuses, cannot be resolved or fails its handshake with the
  * same `fetch failed` as an unreachable target, so the two cannot be told apart, and blaming the
  * caller's URL for an operator's proxy outage would send the client to fix a link that works. Once a
- * response has arrived the target was reached, and its failures stay 400/413.
+ * response has arrived the target was reached, and its failures stay 400/413. The 503 is an
+ * `EngineNotSentError`: the fetch runs before WhatsApp is asked, so a paced send gives its admission
+ * back.
  *
  * `sessionProxyUrl` is the egress proxy of the session the fetch is attributed to, or undefined for
  * a direct one. It is required rather than optional so a new call site cannot leave a proxied
@@ -109,7 +107,7 @@ export async function loadRemoteMediaBuffer(
     const proxyHop = proxyUrl !== undefined && !responded;
     if (name === 'TimeoutError' || name === 'AbortError') {
       if (proxyHop) {
-        throw new ServiceUnavailableException(`Media fetch through the session proxy timed out after ${timeoutMs} ms`);
+        throw new EngineNotSentError(`Media fetch through the session proxy timed out after ${timeoutMs} ms`);
       }
       throw new BadRequestException(`Media fetch timed out after ${timeoutMs} ms`);
     }
@@ -120,7 +118,7 @@ export async function loadRemoteMediaBuffer(
     if (error instanceof TypeError && (error.message === 'fetch failed' || error.message === 'terminated')) {
       const cause: unknown = error.cause;
       logger.warn('Media fetch failed', { cause: cause instanceof Error ? cause.message : error.message });
-      if (proxyHop) throw new ServiceUnavailableException('Media fetch through the session proxy failed');
+      if (proxyHop) throw new EngineNotSentError('Media fetch through the session proxy failed');
       throw new BadRequestException('Media fetch failed');
     }
     throw error;

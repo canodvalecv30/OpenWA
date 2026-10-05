@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 
 let role = 'operator';
+let scoped = false;
+const requested: string[] = [];
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -16,7 +18,8 @@ function installFetchStub(): void {
   globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const path = url.replace(/^https?:\/\/[^/]+/, '');
-    if (path === '/api/auth/validate') return Promise.resolve(jsonResponse({ valid: true, role }));
+    requested.push(path);
+    if (path === '/api/auth/validate') return Promise.resolve(jsonResponse({ valid: true, role, scoped }));
     if (path === '/api/audit' || path.startsWith('/api/audit?'))
       return Promise.resolve(jsonResponse({ data: [], total: 0 }));
     if (path === '/api/sessions' || path === '/api/webhooks') return Promise.resolve(jsonResponse([]));
@@ -31,6 +34,7 @@ before(async () => {
   const { installJsdomGlobals } = await import('./test-helpers/jsdom.ts');
   await installJsdomGlobals('http://localhost/logs');
   (globalThis as Record<string, unknown>).__APP_VERSION__ = '0.0.0-test';
+  (globalThis as Record<string, unknown>).__BUILD_TIME__ = new Date(0).toISOString();
   // jsdom has no matchMedia; the theme hook reads it for the system preference.
   window.matchMedia = ((query: string) => ({
     matches: false,
@@ -57,10 +61,13 @@ before(async () => {
 
 afterEach(() => {
   rtl.cleanup();
+  scoped = false;
+  window.sessionStorage.removeItem('openwa_key_scoped');
 });
 
 function renderAt(path: string, as: string): void {
   role = as;
+  requested.length = 0;
   window.history.replaceState(null, '', path);
   window.sessionStorage.setItem('openwa_api_key', 'test-key');
   window.sessionStorage.setItem('openwa_user_role', as);
@@ -83,4 +90,68 @@ test('an admin keeps the Logs entry and the route', async () => {
   // Give the router a chance to redirect before asserting that it did not.
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(window.location.pathname, '/logs');
+});
+
+// API keys, Infrastructure and Plugins read routes that refuse any session-scoped key, so a scoped
+// admin opening one by URL or reload must be sent home rather than mount a page whose reads all 403.
+for (const page of ['api-keys', 'infrastructure', 'plugins']) {
+  test(`a session-scoped admin opening /${page} is sent home without calling its routes`, async () => {
+    scoped = true;
+    window.sessionStorage.setItem('openwa_key_scoped', 'true');
+    renderAt(`/${page}`, 'admin');
+    await rtl.waitFor(() => assert.ok(document.querySelector('a[href="/sessions"]')));
+    await rtl.waitFor(() => assert.equal(window.location.pathname, '/'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const refused = requested.filter(path => /^\/api\/(auth\/api-keys|infra|plugins)/.test(path));
+    assert.deepEqual(refused, [], 'the page sent reads a session-scoped key is refused on');
+  });
+}
+
+// The startup /auth/validate for a saved key is not cancelled by a logout. If it lands after the user
+// has signed back in with another key, its answer is about a key no longer in use and must not touch
+// the new session's role.
+test('a startup validation that lands after a sign-in with another key is ignored', async () => {
+  const previous = globalThis.fetch;
+  let answerStale: ((res: Response) => void) | undefined;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith('/api/auth/validate')) {
+      if (new Headers(init?.headers).get('X-API-Key') === 'old-admin-key')
+        return new Promise<Response>(resolve => (answerStale = resolve));
+      return Promise.resolve(jsonResponse({ valid: true, role: 'viewer' }));
+    }
+    return previous(input, init);
+  }) as typeof fetch;
+  try {
+    window.history.replaceState(null, '', '/');
+    window.sessionStorage.setItem('openwa_api_key', 'old-admin-key');
+    window.sessionStorage.setItem('openwa_user_role', 'admin');
+    rtl.render(createElement(App));
+
+    const logout = await rtl.waitFor(() => {
+      const button = document.querySelector('.logout-btn');
+      assert.ok(button);
+      return button;
+    });
+    rtl.fireEvent.click(logout);
+    const input = await rtl.waitFor(() => {
+      const field = document.getElementById('apiKey');
+      assert.ok(field);
+      return field;
+    });
+    rtl.fireEvent.change(input, { target: { value: 'new-viewer-key' } });
+    rtl.fireEvent.submit(input.closest('form')!);
+    await rtl.waitFor(() => assert.ok(document.querySelector('a[href="/sessions"]')));
+    assert.equal(logsLink() === null, true, 'the Logs nav entry is shown to a viewer');
+
+    assert.ok(answerStale, 'the startup validation was never sent');
+    await rtl.act(async () => {
+      answerStale!(jsonResponse({ valid: true, role: 'admin' }));
+      await new Promise(resolve => setTimeout(resolve, 50));
+    });
+    assert.equal(logsLink() === null, true, "the old key's admin role was applied to the new viewer session");
+    assert.equal(window.sessionStorage.getItem('openwa_api_key'), 'new-viewer-key');
+  } finally {
+    globalThis.fetch = previous;
+  }
 });

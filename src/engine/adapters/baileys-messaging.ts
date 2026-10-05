@@ -24,7 +24,7 @@ import {
 import { toEngineParticipants } from './baileys-groups';
 import { findSelfParticipant } from './baileys-group-mapper';
 import { buildVCard } from './vcard';
-import { resolveBaileysButtonClick, setBaileysText } from './baileys-message-mapper';
+import { baileysChatJid, resolveBaileysButtonClick, setBaileysText, storedKeyInChat } from './baileys-message-mapper';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
 import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
@@ -45,6 +45,8 @@ export interface BaileysMessagingHost {
   ensureReady(): void;
   /** Post-ensureReady socket handle — call host.ensureReady() first. */
   getSocket(): WASocket;
+  /** The live socket, or null once a stop or logout has torn it down. */
+  getSocketOrNull(): WASocket | null;
   readonly logger: ReturnType<typeof createLogger>;
   toNeutralJid(jid: string): string;
   toEngineJid(jid: string): string;
@@ -433,13 +435,19 @@ export class BaileysMessaging {
     // link is that token behind one of the library's two exported prefixes. Note the audio prefix
     // WhatsApp itself uses is `/voice/`, which is also what whatsapp-web.js calls the same thing.
     //
-    // timeoutMs is passed so the library can retire its own pending query, and the call is ALSO
-    // wrapped: baileys' query() swallows its timeout, so an unanswered request would otherwise
-    // resolve to nothing and be indistinguishable from a refusal.
-    const token = await this.confirmed(
-      this.sock().createCallLink(type, { startTime: Math.floor(startTime / 1000) }, this.queryBudgetMs),
-      'the call link',
-    );
+    // No timeoutMs is passed: without it the library's wait resolves nothing after its own 60 s, which
+    // would read as "no link". The wrap below is the deadline, but its 503 is rethrown as a 500:
+    // minting is non-idempotent and the deadline does not cancel the query, so a client replaying a
+    // 503 could create a second link. Same rule as createGroup and the whatsapp-web.js call link.
+    let token: string | undefined;
+    try {
+      token = await this.confirmed(
+        this.sock().createCallLink(type, { startTime: Math.floor(startTime / 1000) }),
+        'the call link',
+      );
+    } catch (err) {
+      throw err instanceof EngineTransportError ? new Error(err.message) : err;
+    }
     if (!token) {
       // A prefix with nothing after it is a dead link that looks like a real one — the caller would
       // hand it to a user and only find out then.
@@ -582,9 +590,11 @@ export class BaileysMessaging {
     // Whichever branch runs, the text leaves this account's view, so it must not stay the chat
     // preview. The echo of an own revoke is skipped as an own send, so the inbound path never clears it.
     const chatJid = target.key.remoteJid ?? chatId;
+    // The preview of a received broadcast-list message is kept in its sender's chat.
+    const previewJid = baileysChatJid(chatJid, target.key.participant, target.key.fromMe === true);
     if (forEveryone && (target.key.fromMe === true || (await this.selfIsGroupAdmin(target.key.remoteJid)) !== false)) {
       await this.send(await this.toDeliverableJid(chatId), { delete: target.key });
-      this.host.recordMessageEdit(chatJid, messageId, '');
+      this.host.recordMessageEdit(previewJid, messageId, '');
       // The echo of this delete is skipped as an own send, so the stored copy is emptied here, as
       // processInboundMessage does for a delete made from the phone or by the other side. Recorded
       // first, so the message stays deleted even if the store write fails or a repeat delivery of the
@@ -610,7 +620,7 @@ export class BaileysMessaging {
       ),
       'the delete-for-me',
     );
-    this.host.recordMessageEdit(chatJid, messageId, '');
+    this.host.recordMessageEdit(previewJid, messageId, '');
   }
 
   /**
@@ -788,15 +798,23 @@ export class BaileysMessaging {
    * same tag WhatsApp uses to replay what the account typed on its phone while the gateway was
    * down, and the id is the only thing that tells the two apart (see handleMessagesUpsert). The
    * record is synchronous on the send's own continuation, ahead of the library's buffered echo.
+   *
+   * A send that fails after a stop or logout has torn its socket down is not ready (409), the same as
+   * one interrupted before it reached the socket; a failure on a socket still in place propagates.
    */
   private async send(
     jid: string,
     content: Parameters<WASocket['sendMessage']>[1],
     options?: Parameters<WASocket['sendMessage']>[2],
   ): Promise<WAMessage | undefined> {
-    const sent = options
-      ? await this.sock().sendMessage(jid, content, options)
-      : await this.sock().sendMessage(jid, content);
+    const sock = this.sock();
+    let sent: WAMessage | undefined;
+    try {
+      sent = options ? await sock.sendMessage(jid, content, options) : await sock.sendMessage(jid, content);
+    } catch (error) {
+      if (this.host.getSocketOrNull() !== sock) throw new EngineNotReadyError();
+      throw error;
+    }
     this.host.rememberOwnSend(sent?.key?.id);
     return sent;
   }
@@ -878,10 +896,11 @@ export class BaileysMessaging {
    * The stored key must belong to the requested chat — acting with another chat's key is a
    * not-found here, not a cross-chat write (a pin sent into chat A referencing chat B's message, or
    * a star indexed under the wrong conversation, would report success). Both sides are neutralized
-   * so @c.us/@s.whatsapp.net (and a known lid<->pn twin) compare equal.
+   * so @c.us/@s.whatsapp.net (and a known lid<->pn twin) compare equal, and a received broadcast-list
+   * message is found under the sender chat it is reported in.
    */
   private assertStoredInChat(target: WAMessage, chatId: string, messageId: string): void {
-    if (this.host.toNeutralJid(target.key.remoteJid ?? '') !== this.host.toNeutralJid(chatId)) {
+    if (!storedKeyInChat(target.key, chatId, jid => this.host.toNeutralJid(jid))) {
       throw new MessageNotFoundError(messageId, chatId);
     }
   }

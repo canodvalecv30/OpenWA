@@ -35,6 +35,13 @@ describe('profile DTO validation', () => {
     expect(await errorsFor(SetProfilePictureDto, { url: 'not-a-url', base64: 'QUJD' })).toHaveLength(0);
   });
 
+  it('rejects a non-string base64 even when a url is also sent', async () => {
+    for (const url of ['https://example.com/a.jpg', 'not-a-url']) {
+      const body = { url, base64: ['x'], mimetype: 'image/png' };
+      expect((await errorsFor(SetProfilePictureDto, body)).length).toBeGreaterThan(0);
+    }
+  });
+
   it('accepts only an absolute http(s) url, the only form the engines fetch', async () => {
     for (const url of ['example.com/a.jpg', 'ftp://example.com/a.jpg']) {
       expect((await errorsFor(SetProfilePictureDto, { url })).length).toBeGreaterThan(0);

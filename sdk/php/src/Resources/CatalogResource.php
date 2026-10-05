@@ -23,8 +23,12 @@ class CatalogResource
         $this->http = $http;
     }
 
-    /** @return array<string,mixed> */
-    public function info(string $sessionId): array
+    /**
+     * The catalog summary, or null when the account has no catalog collection to describe.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function info(string $sessionId): ?array
     {
         return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/catalog");
     }
@@ -43,8 +47,12 @@ class CatalogResource
             ?? ['products' => [], 'pagination' => []];
     }
 
-    /** @return array<string,mixed> */
-    public function product(string $sessionId, string $productId): array
+    /**
+     * One catalog product, or null when no product in the catalog carries that id.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function product(string $sessionId, string $productId): ?array
     {
         return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/catalog/products/{$this->http->encodeSegment($productId)}");
     }

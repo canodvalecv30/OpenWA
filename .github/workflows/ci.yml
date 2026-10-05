@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
 env:
   NODE_VERSION: '22'
@@ -13,10 +13,19 @@ env:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's superseded run. Push runs each get a group
+# of their own (run_id), so pushes to main never queue behind or cancel one another and
+# every commit keeps its tests and its `:<sha>` image; the docker job's last step decides which of
+# them the branch tag follows.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -92,6 +101,7 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -126,14 +136,18 @@ jobs:
         run: cd dashboard && npm ci
 
       - name: Security audit (dashboard)
+        # A plain `npm audit` has no unavailable handling: when npm's audit endpoint cannot answer,
+        # this step fails even though the root audit above skips, so the job still goes red and the
+        # `build` job that needs it does not run. A re-run clears a transient outage.
         run: cd dashboard && npm audit --audit-level=high
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    # Real Redis for the queue-on e2e suite (test/queue-on.e2e-spec.ts); the rest of the e2e family
-    # boots QUEUE_ENABLED=false and never connects. Mirrors the test-postgres job's service pattern;
-    # the image pin matches docker-compose.yml.
+    timeout-minutes: 20
+    # Real Redis for the queue-on and throttler-redis e2e suites (test/queue-on.e2e-spec.ts,
+    # test/throttler-redis.e2e-spec.ts); the rest of the e2e family boots QUEUE_ENABLED=false and never
+    # connects. Mirrors the test-postgres job's service pattern; the image pin matches docker-compose.yml.
     services:
       redis:
         image: redis:7-alpine
@@ -175,22 +189,17 @@ jobs:
 
       - name: Run e2e smoke tests
         run: npm run test:e2e
-        # Point the queue-on suite at the service container (it self-skips without one). Every other
-        # suite keeps QUEUE_ENABLED=false via setup-e2e.ts and never touches Redis.
+        # Point the queue-on and throttler-redis suites at the service container (under GitHub Actions
+        # they fail without one; a local run without Redis skips). Every other suite keeps
+        # QUEUE_ENABLED=false via setup-e2e.ts and never touches Redis.
         env:
           REDIS_HOST: localhost
           REDIS_PORT: '6379'
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
-        if: always()
-        with:
-          files: ./coverage/lcov.info
-          fail_ci_if_error: false
-
   test-postgres:
     name: Test (PostgreSQL migrations)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -241,20 +250,20 @@ jobs:
       # differently between two statements, so an unstable order drops rows from a page walk), and
       # that the data entities can build their own schema (raw SQL the ORM passes through verbatim,
       # such as a partial index predicate, only case-folds on a real server), and that the UTC pin
-      # holds across a backup round trip, a retention window and a local-midnight count. All five
+      # holds across a backup round trip, a retention window and a local-midnight count. All six
       # self-skip unless DATABASE_TYPE=postgres, so they are a no-op in the default test job and only
       # execute here against the postgres:16 service.
       #
       # TZ is deliberately NOT UTC: the pin's whole job is to make a `timestamp` column mean the same
       # instant on a host that runs in another zone, and on a UTC runner every assertion about it
       # would pass for the wrong reason (the UTC-pin spec fails outright rather than pass vacuously).
-      - name: Postgres specs (FTS provider + boot-migration lock + list ordering + entity synchronize + UTC pin)
+      - name: Postgres specs (FTS + migrations + ordering + schema + UTC + recovery)
         # --runInBand: the specs issue DDL against the one shared service database, and jest's
         # default file-parallelism races their catalog writes (pg_type duplicate-key). The lock
         # spec's own two-migrator race is in-file (Promise.all) and unaffected by runInBand. The
         # synchronize spec additionally CREATEs and DROPs a scratch database of its own, which is
         # only safe serialized.
-        run: npx jest --runInBand src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts src/database/migrations/__tests__/pg-boot-migrations.pg.spec.ts src/modules/message/message-list-ordering.pg.spec.ts src/database/migrations/__tests__/pg-entity-synchronize.pg.spec.ts src/database/postgres-utc.pg.spec.ts
+        run: npx jest --runInBand src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts src/database/migrations/__tests__/pg-boot-migrations.pg.spec.ts src/modules/message/message-list-ordering.pg.spec.ts src/database/migrations/__tests__/pg-entity-synchronize.pg.spec.ts src/database/postgres-utc.pg.spec.ts src/modules/webhook/webhook-recovery.pg.spec.ts
         env:
           TZ: Asia/Jakarta
           DATABASE_TYPE: postgres
@@ -267,6 +276,7 @@ jobs:
   dashboard:
     name: Dashboard
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -298,7 +308,9 @@ jobs:
       - name: Build dashboard
         run: cd dashboard && npm run build
 
+      # --test-timeout in test:unit fails a hung test by name; this bounds a hang it cannot see.
       - name: Run dashboard unit tests
+        timeout-minutes: 10
         run: cd dashboard && npm run test:unit
 
   # The repo ships several host-level shell smoke scripts (scripts/smoke-test-*.sh, plus
@@ -308,6 +320,7 @@ jobs:
   scripts-smoke:
     name: Shell scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -344,6 +357,7 @@ jobs:
   chart:
     name: Helm chart and workflows
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -390,6 +404,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [lint, audit, test, dashboard, scripts-smoke, chart]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -406,6 +421,11 @@ jobs:
       - name: Build project
         run: npm run build
 
+      # Every jest lane stubs @whiskeysockets/baileys, so this is the one place the real library
+      # types and unwraps inbound messages, through the compiled adapter. Needs the build above.
+      - name: Run inbound messages through the real Baileys library
+        run: npm run test:engine-real
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -416,6 +436,7 @@ jobs:
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [build, test-postgres]
     permissions:
       contents: read
@@ -442,15 +463,17 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository }}
-          # Branch + SHA tags only. `latest` is deliberately NOT set here: re-pointing it on
-          # every main push would bypass the boot-smoke → promote discipline in release.yml
-          # (a main-push image is build-gated only, never boot-tested). `latest` moves exclusively
-          # through the tested release path.
+          # SHA tag only. The branch tag (`:main`) is applied by the last step of this job,
+          # after the non-root smoke passes and only while this commit is still the branch head, so
+          # a slower run for an older commit cannot re-point it. `latest` is deliberately NOT set
+          # here: re-pointing it on every main push would bypass the boot-smoke → promote
+          # discipline in release.yml (a main-push image is build-gated only, never boot-tested).
+          # `latest` moves exclusively through the tested release path.
           tags: |
-            type=ref,event=branch
             type=sha,prefix=
 
       - name: Build and optionally push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -492,3 +515,28 @@ jobs:
         env:
           OPENWA_SMOKE_IMAGE: openwa-ci:non-root-smoke
         run: ./scripts/smoke-test-non-root.sh
+
+      # Boot never loads Baileys (imported on the first session start) or launches the browser
+      # whatsapp-web.js drives, so a broken Dockerfile patch or a missing library would otherwise
+      # pass every gate. Hermetic: no network, no WhatsApp account.
+      - name: Load both engine libraries in the image
+        env:
+          OPENWA_SMOKE_IMAGE: openwa-ci:non-root-smoke
+        run: ./scripts/smoke-test-engine-libs.sh
+
+      # Re-point the branch tag at the image this run built, by digest. The head check sits seconds
+      # before the re-point rather than a whole build before it: a run whose commit has been
+      # superseded leaves the tag to the newer run.
+      - name: Move the branch tag to this image when it is still the branch head
+        if: github.event_name == 'push'
+        env:
+          REPO: ${{ github.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          head="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::$GITHUB_SHA is no longer the head of $GITHUB_REF_NAME ($head); leaving the branch tag alone"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "ghcr.io/${REPO,,}:${GITHUB_REF_NAME}" "ghcr.io/${REPO,,}@${DIGEST}"

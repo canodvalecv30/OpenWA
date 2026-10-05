@@ -36,6 +36,10 @@ export class StatsController {
     description: 'Message statistics with a time series for the requested period.',
     type: MessageStatsResponseDto,
   })
+  @ApiResponse({
+    status: 400,
+    description: 'A query value is invalid, or the query carries a field the DTO does not declare.',
+  })
   async getMessageStats(@Query() query: StatsQueryDto) {
     return this.statsService.getMessageStats(query.period || '24h');
   }
@@ -47,6 +51,7 @@ export class StatsController {
     description: 'Per-session statistics for the requested session.',
     type: SessionStatsResponseDto,
   })
+  @ApiResponse({ status: 404, description: 'Session not found' })
   async getSessionStats(@Param('sessionId') sessionId: string) {
     return this.statsService.getSessionStats(sessionId);
   }

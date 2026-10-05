@@ -1,5 +1,5 @@
 import { parentPort } from 'worker_threads';
-import { HostToWorkerMessage, WorkerToHostMessage } from './protocol';
+import { HostToWorkerMessage, PluginLogLevel, WorkerToHostMessage } from './protocol';
 import { WorkerCapabilityClient, buildSandboxContext } from './worker-capability';
 import { WorkerHookRegistry, WorkerHookHandler, hookConfigStore } from './worker-hooks';
 import { WebhookRegistry, WebhookHandler } from './worker-webhooks';
@@ -14,8 +14,10 @@ import { WorkerSearchRegistry, WorkerSearchHandler } from './worker-search-regis
  * filesystem, and network credentials. It provides crash / heap-OOM CONTAINMENT, NOT a security
  * boundary. Plugin code can `require('fs' | 'net' | 'child_process')` and reach the host's files and
  * sockets directly — `parentPort` is NOT the worker's only channel out, and the capability permission
- * model gates only the `ctx.*` verbs, not raw Node access. Load only trusted plugin code, or run
- * OpenWA under an OS-level sandbox (container / seccomp) when untrusted plugins must be supported.
+ * model gates only the `ctx.*` verbs, not raw Node access. Load only plugin code you trust as much as
+ * OpenWA itself. OS-level containment of the OpenWA process limits what the process can do to the host,
+ * not what a plugin inside it can reach; run a plugin you do not fully trust in a separate container or
+ * VM against the API instead (see docs/30).
  */
 
 interface LifecyclePlugin {
@@ -40,18 +42,25 @@ const hookRegistry = new WorkerHookRegistry(send);
 const webhookRegistry = new WebhookRegistry(send);
 const searchRegistry = new WorkerSearchRegistry(send);
 
+// A meta the structured clone cannot copy (a function, a fetch Response) makes postMessage throw. From
+// a timer that throw is uncaught and kills the worker, so the line goes out again without its meta,
+// keeping only logger.error's reason, which is always a string.
+const sendLog = (level: PluginLogLevel, message: string, meta?: Record<string, unknown>): void => {
+  try {
+    send({ kind: 'log', level, message, meta });
+  } catch {
+    const error = meta?.error;
+    send({ kind: 'log', level, message: String(message), meta: typeof error === 'string' ? { error } : undefined });
+  }
+};
+
 // ctx.logger proxy: forwards to the host's per-plugin logger (the same one in-process plugins use).
 const logger = {
-  log: (message: string, meta?: Record<string, unknown>) => send({ kind: 'log', level: 'log', message, meta }),
-  debug: (message: string, meta?: Record<string, unknown>) => send({ kind: 'log', level: 'debug', message, meta }),
-  warn: (message: string, meta?: Record<string, unknown>) => send({ kind: 'log', level: 'warn', message, meta }),
+  log: (message: string, meta?: Record<string, unknown>) => sendLog('log', message, meta),
+  debug: (message: string, meta?: Record<string, unknown>) => sendLog('debug', message, meta),
+  warn: (message: string, meta?: Record<string, unknown>) => sendLog('warn', message, meta),
   error: (message: string, error?: unknown, meta?: Record<string, unknown>) =>
-    send({
-      kind: 'log',
-      level: 'error',
-      message,
-      meta: error !== undefined ? { ...meta, error: errorMessage(error) } : meta,
-    }),
+    sendLog('error', message, error !== undefined ? { ...meta, error: errorMessage(error) } : meta),
 };
 let plugin: LifecyclePlugin | null = null;
 let context: Record<string, unknown> | null = null;
@@ -59,6 +68,13 @@ let context: Record<string, unknown> | null = null;
 let baseConfig: Record<string, unknown> = {};
 
 port.on('message', (message: HostToWorkerMessage) => {
+  // Answered here, before any plugin code, so a pending async handler never delays it. Dispatches
+  // queued ahead of it still do; the host counts their results as progress while it waits, so only a
+  // worker whose event loop is blocked (a synchronous loop in plugin code) goes silent.
+  if (message.kind === 'ping') {
+    send({ kind: 'pong', id: message.id });
+    return;
+  }
   if (message.kind === 'cap-result') {
     capClient.handleResult(message);
     return;
@@ -121,10 +137,12 @@ async function handle(message: HostToWorkerMessage): Promise<void> {
   if (message.kind === 'config-change') {
     // Refresh the base config so later (non-hook) reads of ctx.config see the new value, then notify
     // the plugin (fire-and-forget — onConfigChange returns void, and an ack would race the next op).
+    // Called inside the chain so a synchronous throw is caught too: escaping here, it would reject the
+    // discarded handle() promise and the unhandled rejection would kill the worker.
     baseConfig = message.config;
-    void Promise.resolve(plugin?.onConfigChange?.(context, message.config)).catch(error =>
-      logger.error('onConfigChange threw', error),
-    );
+    void Promise.resolve()
+      .then(() => plugin?.onConfigChange?.(context, message.config))
+      .catch(error => logger.error('onConfigChange threw', error));
     return;
   }
 

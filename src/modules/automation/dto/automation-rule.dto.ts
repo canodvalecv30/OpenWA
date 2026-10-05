@@ -2,6 +2,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Expose, plainToInstance } from 'class-transformer';
 import { IsBoolean, IsInt, IsNotEmpty, IsOptional, IsString, Max, MaxLength, Min, ValidateIf } from 'class-validator';
 import { ToStrictBoolean, ToStrictNumber } from '../../../common/utils/strict-boolean';
+import { MaxCodePoints } from '../../../common/validation/max-code-points';
+import { NoNulCharacter } from '../../../common/validation/no-nul-character';
 import { MESSAGE_TEXT_MAX_LENGTH } from '../../message/dto/send-message.dto';
 import { WebhookFilters } from '../../webhook/filters/filter-types';
 import { IsValidWebhookFilters } from '../../webhook/filters/filter-validation';
@@ -14,7 +16,9 @@ const CONDITIONS_DESCRIPTION =
   'Match conditions in the webhook filter format (message family: sender, recipient, chatId, body, ' +
   'type, isGroup, kind, fromMe, hasMedia, mentions). All conditions must match (AND). Omitted or ' +
   'empty means the rule matches every inbound message except channel, broadcast-list and status ' +
-  'messages, which a rule answers only when it has a `kind` condition that matches them.';
+  'messages, which a rule answers only when it has a `kind` condition that matches them. On Baileys ' +
+  "a message received through a contact's broadcast list is filed under the sender's chat (`kind` " +
+  'individual), so it matches.';
 
 const COOLDOWN_DESCRIPTION =
   'Quiet period per chat, in seconds: after the rule replies in a chat it stays silent there for ' +
@@ -25,7 +29,8 @@ export class CreateAutomationRuleDto {
   @ApiProperty({ description: 'Display name for the rule', example: 'Greet new enquiries', maxLength: 100 })
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100)
+  @MaxCodePoints(100)
+  @NoNulCharacter()
   name!: string;
 
   @ApiProperty({
@@ -36,6 +41,7 @@ export class CreateAutomationRuleDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
+  @NoNulCharacter()
   replyText!: string;
 
   @ApiPropertyOptional({ description: CONDITIONS_DESCRIPTION })
@@ -69,7 +75,8 @@ export class UpdateAutomationRuleDto {
   @ValidateIf((o: UpdateAutomationRuleDto) => o.name !== undefined)
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100)
+  @MaxCodePoints(100)
+  @NoNulCharacter()
   name?: string;
 
   @ApiPropertyOptional({
@@ -80,6 +87,7 @@ export class UpdateAutomationRuleDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
+  @NoNulCharacter()
   replyText?: string;
 
   @ApiPropertyOptional({ description: CONDITIONS_DESCRIPTION })

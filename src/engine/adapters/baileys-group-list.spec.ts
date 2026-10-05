@@ -1,3 +1,4 @@
+import { Boom } from '@hapi/boom';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { BaileysGroups, BaileysGroupsHost } from './baileys-groups';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
@@ -29,6 +30,17 @@ describe('getGroups', () => {
   it('reports an unanswered query instead of an empty group list', async () => {
     const groupFetchAllParticipating = jest.fn(() => new Promise<never>(() => undefined));
     await expect(groups({ groupFetchAllParticipating }, 15).getGroups()).rejects.toBeInstanceOf(EngineTransportError);
+  });
+
+  it.each([408, 429])('reports a WA %s as retryable instead of a bare 500', async code => {
+    const groupFetchAllParticipating = jest.fn().mockRejectedValue(new Boom('rate-overlimit', { data: code }));
+    await expect(groups({ groupFetchAllParticipating }, 500).getGroups()).rejects.toBeInstanceOf(EngineTransportError);
+  });
+
+  it('lets any other refusal propagate untouched', async () => {
+    const err = new Boom('forbidden', { data: 403 });
+    const groupFetchAllParticipating = jest.fn().mockRejectedValue(err);
+    await expect(groups({ groupFetchAllParticipating }, 500).getGroups()).rejects.toBe(err);
   });
 
   it('still returns an empty list when WhatsApp answers that there are no groups', async () => {

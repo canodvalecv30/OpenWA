@@ -22,7 +22,7 @@ const messageTypeFromMime = (mimetype: string): MessageType => {
 // Client pre-check before base64-encoding an upload, same cap as the message tester: base64
 // inflates ~1.33x, so ~18 MiB raw stays under the backend's default 25 MiB body limit and the
 // pick fails here with a toast instead of OOMing the tab on the FileReader.
-const MEDIA_UPLOAD_MAX_BYTES = 18 * 1024 * 1024;
+export const MEDIA_UPLOAD_MAX_BYTES = 18 * 1024 * 1024;
 
 /** A picked-but-unsent file, staged until send, removal, or a move to another chat. */
 export interface StagedAttachment {
@@ -158,6 +158,9 @@ function ChatComposer({
       return;
     }
 
+    // The pick replaces any staged file now, so a send while it is read cannot send the one it replaced.
+    // Not handleRemoveAttachment: bumping the read sequence would discard this read too.
+    setAttachment(null);
     if (file.type.startsWith('image/')) {
       setPreviewUrl(URL.createObjectURL(file));
     } else {
@@ -239,7 +242,9 @@ function ChatComposer({
 
     const currentAttachment = attachment;
     const currentReplyingTo = replyingTo;
-    handleRemoveAttachment();
+    // Clear only a file that is being sent: a pick still being read stages once it lands, so it is not
+    // silently dropped by text sent in the meantime.
+    if (currentAttachment) handleRemoveAttachment();
     setReplyingTo(null);
 
     try {

@@ -31,13 +31,26 @@ export class OpenWAApiError extends OpenWAError {
   readonly body: unknown;
   /** Value of the `error` field in the NestJS error envelope, if present. */
   readonly errorKind?: string;
+  /** The body's machine-readable `code` (e.g. `SEND_PACING_LIMITED`), if the body carries one. */
+  readonly code?: string;
+  /**
+   * Seconds to wait before retrying: the body's `retryAfterSeconds` when present, else the
+   * `Retry-After` response header (seconds or an HTTP date). Undefined when neither is sent.
+   */
+  readonly retryAfterSeconds?: number;
+  /** The response headers, when the error came from a response. */
+  readonly headers?: Headers;
 
-  constructor(message: string, status: number, body: unknown, errorKind?: string) {
+  constructor(message: string, status: number, body: unknown, errorKind?: string, headers?: Headers) {
     super(message);
     this.name = 'OpenWAApiError';
     this.status = status;
     this.body = body;
     this.errorKind = errorKind;
+    this.headers = headers;
+    const fields = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+    if (typeof fields.code === 'string') this.code = fields.code;
+    this.retryAfterSeconds = retryAfterSeconds(fields.retryAfterSeconds, headers?.get('retry-after'));
   }
 
   /** Build an {@link OpenWAApiError} from a fetch Response, awaiting its body. */
@@ -53,7 +66,12 @@ export class OpenWAApiError extends OpenWAError {
       );
     }
     let body: unknown = undefined;
-    const text = await res.text().catch(() => '');
+    // An unreadable body leaves only the status to report, but an abort is the client timeout
+    // firing mid-read: rethrow it so the caller sees OpenWATimeoutError, not this status.
+    const text = await res.text().catch((err: unknown) => {
+      if (err instanceof Error && err.name === 'AbortError') throw err;
+      return '';
+    });
     if (text) {
       try {
         body = JSON.parse(text);
@@ -64,24 +82,29 @@ export class OpenWAApiError extends OpenWAError {
     const env = isNestEnvelope(body) ? body : undefined;
     const messageText = describeMessage(env?.message ?? body ?? res.statusText);
     const message = `OpenWA API ${res.status} ${res.statusText} — ${context}: ${messageText}`;
-    return new OpenWAApiError(message, res.status, body, env?.error);
+    return new OpenWAApiError(message, res.status, body, env?.error, res.headers);
   }
 }
 
 /** 401 Unauthorized — missing or invalid API key. */
 export class OpenWAAuthError extends OpenWAApiError {}
-/** 403 Forbidden — the API key's role is insufficient for this endpoint. */
+/**
+ * 403 Forbidden: the API key's role or scope (session, IP or chat allow-list) refuses the call, or
+ * WhatsApp itself refused the operation (for example, missing group admin rights).
+ */
 export class OpenWAForbiddenError extends OpenWAApiError {}
 /** 404 Not Found. */
 export class OpenWANotFoundError extends OpenWAApiError {}
 /** 409 Conflict — typically an {@link EngineNotReadyError} from the backend. */
 export class OpenWAConflictError extends OpenWAApiError {}
 /**
- * 429 Too Many Requests — rate limited. The global rate limiter's 429 lifts when its window
- * expires (seconds for the per-second tier, up to an hour for the hourly tier by default); its
- * delay is only in the `Retry-After` response header, which this error does not carry. A 429 whose
- * `body` has `code: 'SEND_PACING_LIMITED'` is not transient: do not retry it before
- * `body.retryAfterSeconds`, which can be hours.
+ * 429 Too Many Requests: rate limited. The global rate limiter's 429 lifts when its window
+ * expires (seconds for the per-second tier, up to an hour for the hourly tier by default), and
+ * `retryAfterSeconds` carries its `Retry-After` header. A 429 with `code: 'SEND_PACING_LIMITED'` is
+ * usually not transient: do not retry it before `retryAfterSeconds`, which then comes from the body:
+ * a few seconds when only sends still in flight caused it, the rest of the failure breaker's cooldown
+ * (`SEND_PACING_BREAKER_COOLDOWN_MS`, 15 minutes by default) after a run of send failures, otherwise
+ * up to the next UTC day.
  */
 export class OpenWARateLimitError extends OpenWAApiError {}
 /** 501 Not Implemented — the active engine does not support this operation. */
@@ -95,10 +118,12 @@ export class OpenWANotImplementedError extends OpenWAApiError {}
  *
  * Not every 503 is safe to repeat blindly: the non-idempotent sends (group create, channel create,
  * media send) are deliberately left unbounded by the gateway so a slow WhatsApp reply never answers
- * one, and in a multi-node deployment a forwarded request answers 503 only when the owner node was
- * never reached. A forward that fails after the request was sent answers 502 or 504 instead (a plain
- * `OpenWAApiError`): the owner may already have carried it out, so do not repeat a non-idempotent
- * send on those unchecked.
+ * one, and in a multi-node deployment a forward that fails before reaching the owner node answers
+ * 503. A 503 from the owner itself is relayed unchanged and means the engine did not confirm, so a
+ * bounded write such as a group, channel, contact or profile change may still have been applied;
+ * re-read the state before repeating it. A forward that fails after the request was sent answers
+ * 502 or 504 instead (a plain `OpenWAApiError`): the owner may already have carried it out, so do
+ * not repeat a non-idempotent send on those unchecked.
  */
 export class OpenWAServiceUnavailableError extends OpenWAApiError {}
 
@@ -114,25 +139,47 @@ export class OpenWATimeoutError extends OpenWAError {
  * Construct the most specific {@link OpenWAApiError} subclass for a status code.
  * Falls back to the generic {@link OpenWAApiError} for unmapped statuses.
  */
-export function classifyApiError(status: number, message: string, body: unknown, errorKind?: string): OpenWAApiError {
+export function classifyApiError(
+  status: number,
+  message: string,
+  body: unknown,
+  errorKind?: string,
+  headers?: Headers,
+): OpenWAApiError {
   switch (status) {
     case 401:
-      return new OpenWAAuthError(message, status, body, errorKind);
+      return new OpenWAAuthError(message, status, body, errorKind, headers);
     case 403:
-      return new OpenWAForbiddenError(message, status, body, errorKind);
+      return new OpenWAForbiddenError(message, status, body, errorKind, headers);
     case 404:
-      return new OpenWANotFoundError(message, status, body, errorKind);
+      return new OpenWANotFoundError(message, status, body, errorKind, headers);
     case 409:
-      return new OpenWAConflictError(message, status, body, errorKind);
+      return new OpenWAConflictError(message, status, body, errorKind, headers);
     case 429:
-      return new OpenWARateLimitError(message, status, body, errorKind);
+      return new OpenWARateLimitError(message, status, body, errorKind, headers);
     case 501:
-      return new OpenWANotImplementedError(message, status, body, errorKind);
+      return new OpenWANotImplementedError(message, status, body, errorKind, headers);
     case 503:
-      return new OpenWAServiceUnavailableError(message, status, body, errorKind);
+      return new OpenWAServiceUnavailableError(message, status, body, errorKind, headers);
     default:
-      return new OpenWAApiError(message, status, body, errorKind);
+      return new OpenWAApiError(message, status, body, errorKind, headers);
   }
+}
+
+/**
+ * The body's `retryAfterSeconds` wins: send pacing puts its wait (possibly hours) only there, and a
+ * header added by a proxy must not shorten it. Otherwise read `Retry-After` as seconds or an HTTP
+ * date, clamped at 0.
+ */
+function retryAfterSeconds(fromBody: unknown, header: string | null | undefined): number | undefined {
+  if (typeof fromBody === 'number' && Number.isFinite(fromBody) && fromBody >= 0) return Math.ceil(fromBody);
+  const value = header?.trim();
+  if (!value) return undefined;
+  if (/^\d+$/.test(value)) return Number(value);
+  // Date.parse also accepts '-5' or '1.5' as a past date, which would read as "retry now".
+  if (!/^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) return undefined;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - Date.now()) / 1000));
 }
 
 /**

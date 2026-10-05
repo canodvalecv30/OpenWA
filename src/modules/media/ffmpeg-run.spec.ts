@@ -1,7 +1,14 @@
-import { chmod, mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FfmpegConversionError, probeFfmpeg, runFfmpeg } from './ffmpeg';
+import { FfmpegConversionError, FfmpegSpawnError, killRunningConversions, probeFfmpeg, runFfmpeg } from './ffmpeg';
+
+// The real spawn, wrapped so a test can reach the child process it created.
+jest.mock('node:child_process', () => {
+  const actual = jest.requireActual<typeof import('node:child_process')>('node:child_process');
+  return { ...actual, spawn: jest.fn(actual.spawn) };
+});
 
 /**
  * Exercises the process wrapper itself — the timeout, the output ceiling, and the temp-directory
@@ -34,18 +41,28 @@ if [ "$1" = "-version" ]; then echo "ffmpeg version stub"; exit 0; fi
 mode=ok
 for a in "$@"; do
   case "$a" in MODE=*) mode="\${a#MODE=}" ;; esac
+  [ "$prev" = "-i" ] && in="$a"
+  prev="$a"
   out="$a"
 done
 case "$mode" in
   fail)  echo "Invalid data found when processing input" >&2; exit 1 ;;
-  hang)  sleep 30 ;;
+  badinput) echo "$in: Invalid data found when processing input" >&2; exit 1 ;;
+  hang)  sleep 10 ;;
+  orphan) sleep 10 & echo $! > "$0.pid"; wait ;;
   empty) : > "$out" ;;
   big)   head -c 4096 /dev/zero > "$out" ;;
+  argv)  printf '%s ' "$@" > "$out" ;;
+  capped) head -c 1025 /dev/zero > "$out" ;;
   *)     printf 'converted-output' > "$out" ;;
 esac
 `,
     );
     await chmod(stubPath, 0o755);
+  });
+
+  afterAll(async () => {
+    await rm(workDir, { recursive: true, force: true });
   });
 
   /** Encoder arguments that put the stub into a given mode. */
@@ -92,6 +109,14 @@ esac
     });
   });
 
+  // ffmpeg names its input by the path it was handed, which is this process's own temp directory and
+  // nothing the caller supplied, so it must not reach the reason the caller is shown.
+  it('keeps its temp directory out of the reason it reports', async () => {
+    await expect(runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('badinput'), options())).rejects.toMatchObject({
+      detail: 'in.bin: Invalid data found when processing input',
+    });
+  });
+
   // A codec stuck in a loop is the case this defends against, so the kill has to be unconditional.
   it('kills a process that overruns its timeout, rather than waiting on it', async () => {
     const startedAt = Date.now();
@@ -100,8 +125,83 @@ esac
       runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('hang'), options({ timeoutMs: 200 })),
     ).rejects.toThrow(/timed out after 200ms/);
 
-    // Comfortably below the stub's 30s sleep: proves it was killed, not awaited.
-    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    // Below the stub's 10s sleep: proves it was killed, not awaited.
+    expect(Date.now() - startedAt).toBeLessThan(8_000);
+  }, 15_000);
+
+  // The stub's `sleep` is a child of the killed shell and inherits its stderr, as a process under a
+  // wrapper script would. Unless the parent lets go of the pipe, it stays open until that child exits
+  // and keeps the process from exiting.
+  it('releases the stderr pipe when a timed-out process leaves a descendant holding it', async () => {
+    const spawned = jest.mocked(spawn);
+    spawned.mockClear();
+    await expect(
+      runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('hang'), options({ timeoutMs: 200 })),
+    ).rejects.toThrow(/timed out after 200ms/);
+
+    const child = spawned.mock.results[0].value as ChildProcess;
+    expect(child.stderr?.destroyed).toBe(true);
+  }, 15_000);
+
+  // A wrapper that runs ffmpeg without `exec` leaves the real worker as a grandchild. Killing only the
+  // wrapper would free the concurrency slot while that worker keeps running.
+  it('kills the whole process group on timeout, not just the direct child', async () => {
+    const pidFile = `${stubPath}.pid`;
+    await expect(
+      runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('orphan'), options({ timeoutMs: 300 })),
+    ).rejects.toThrow(/timed out after 300ms/);
+
+    const grandchild = Number((await readFile(pidFile, 'utf8')).trim());
+    const alive = (): boolean => {
+      try {
+        process.kill(grandchild, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 50));
+      expect(alive()).toBe(false);
+    } finally {
+      if (alive()) process.kill(grandchild, 'SIGKILL');
+    }
+  }, 15_000);
+
+  // Each run sits in its own process group, so a signal to the gateway's group never reaches it and its
+  // timeout dies with the gateway. Whatever is still running has to be killed on the way out.
+  it('kills every running conversion group when the gateway exits', async () => {
+    expect(process.listeners('exit')).toContain(killRunningConversions);
+    const pidFile = `${stubPath}.pid`;
+    await rm(pidFile, { force: true });
+    // The run's own timeout is longer than this test may take, so only the kill below can end it.
+    const run = runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('orphan'), options({ timeoutMs: 60_000 }));
+    const settled = run.catch((error: unknown) => error);
+
+    let grandchild = 0;
+    for (let i = 0; i < 40 && !grandchild; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      grandchild = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim());
+    }
+    const alive = (): boolean => {
+      try {
+        process.kill(grandchild, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      // The stub's own sleep ends in 10 s, so the kill has to land well before that to count.
+      const killedAt = Date.now();
+      killRunningConversions();
+      expect(await settled).toBeInstanceOf(FfmpegConversionError);
+      for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 50));
+      expect(alive()).toBe(false);
+      expect(Date.now() - killedAt).toBeLessThan(2_000);
+    } finally {
+      if (alive()) process.kill(grandchild, 'SIGKILL');
+    }
   }, 15_000);
 
   // Transcoding can inflate as well as shrink, so the output needs a ceiling of its own.
@@ -109,6 +209,20 @@ esac
     await expect(
       runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('big'), options({ maxOutputBytes: 1000 })),
     ).rejects.toThrow(/4096 bytes, above the 1000 byte limit/);
+  });
+
+  // The cap has to reach the process, or the output grows unbounded until ffmpeg exits.
+  it('hands ffmpeg the size cap', async () => {
+    const argv = (await runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('argv'), options())).toString();
+
+    expect(argv).toContain('-fs 1025 ');
+  });
+
+  // Where ffmpeg stops at -fs it exits 0 with a cut-off file, which must never be returned as a result.
+  it('refuses the cut-off file ffmpeg leaves when it stops at the cap', async () => {
+    await expect(
+      runFfmpeg(Buffer.from('input'), 'bin', 'ogg', mode('capped'), options({ maxOutputBytes: 1024 })),
+    ).rejects.toThrow(/1025 bytes, above the 1024 byte limit/);
   });
 
   // An empty file is a silent failure: it would otherwise be returned as a valid zero-byte result.
@@ -121,7 +235,7 @@ esac
   it('says plainly when the binary cannot be executed at all', async () => {
     await expect(
       runFfmpeg(Buffer.from('input'), 'bin', 'ogg', [], options({ ffmpegPath: join(workDir, 'not-here') })),
-    ).rejects.toBeInstanceOf(FfmpegConversionError);
+    ).rejects.toBeInstanceOf(FfmpegSpawnError);
     await expect(
       runFfmpeg(Buffer.from('input'), 'bin', 'ogg', [], options({ ffmpegPath: join(workDir, 'not-here') })),
     ).rejects.toThrow(/Could not run ffmpeg/);

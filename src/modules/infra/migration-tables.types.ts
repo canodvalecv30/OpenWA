@@ -12,6 +12,8 @@ export interface SessionRow {
   lastActiveAt: string | null;
   createdAt: string;
   updatedAt: string;
+  // Absent from backups written before the column existed.
+  desiredState?: string | null;
 }
 
 export interface WebhookRow {
@@ -122,6 +124,8 @@ export interface ChatStateRow {
   // boolean on Postgres, 0/1 on SQLite; carried through as-is like PluginInstanceRow.enabled.
   archived: boolean | number;
   pinned: boolean | number;
+  // Absent from an archive taken before the column existed; null reads as its set fields observed.
+  observed?: string | null;
   updatedAt: string;
 }
 
@@ -180,6 +184,8 @@ export interface WebhookDeliveryFailureRow {
   attempts: number;
   lastStatusCode: number | null;
   lastError: string;
+  /** Replay copy of the event; read by `SELECT *` but dropped from the export (see export-tables). */
+  payload?: string | null;
   createdAt: string;
 }
 

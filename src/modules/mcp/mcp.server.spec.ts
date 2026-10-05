@@ -1,13 +1,22 @@
 import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { UnresolvedApiKeyException } from '../auth/auth.service';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { auditMcpAuthFailure, createIpThrottle, mountMcpServer, resolveMcpReadOnly } from './mcp.server';
+import {
+  auditMcpAuthFailure,
+  createIpThrottle,
+  createKeyGate,
+  mountMcpServer,
+  resolveMcpReadOnly,
+  type MountMcpServerOptions,
+} from './mcp.server';
 import { KeyRateLimiter } from './mcp-rate-limit';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import type { AnyToolDescriptor } from '../../core/agent-tools/tool-descriptor';
 import type { ToolRegistryService } from '../../core/agent-tools/tool-registry.service';
 import type { AuthService } from '../auth/auth.service';
 import type { AuditService } from '../audit/audit.service';
+import { LoggerService } from '../../common/services/logger.service';
 
 // The request-handling path news up an McpServer + StreamableHTTPServerTransport per POST. Both SDK
 // classes are mocked so tests can observe the per-request transport (handleRequest args) and invoke
@@ -197,9 +206,9 @@ describe('auditMcpAuthFailure (MCP auth-failure audit trail, mirrors REST ApiKey
     expect(call[1].errorMessage).toBe('API key lacks the required role');
   });
 
-  it('mirrors the REST guard exactly: IP-not-allowed (Unauthorized) is audited', () => {
-    // validateApiKey throws Unauthorized for IP-not-allowed / revoked / expired / session-not-allowed.
-    auditMcpAuthFailure(auditService, new UnauthorizedException('IP address not allowed'), reqContext);
+  it('mirrors the REST guard exactly: IP-not-allowed (Forbidden) is audited', () => {
+    // validateApiKey throws Forbidden for IP-not-allowed / session-not-allowed, Unauthorized for revoked / expired.
+    auditMcpAuthFailure(auditService, new ForbiddenException('IP address not allowed'), reqContext);
     expect(auditService.logWarn).toHaveBeenCalledWith(
       AuditAction.API_KEY_AUTH_FAILED,
       expect.objectContaining({ errorMessage: 'IP address not allowed' }),
@@ -214,22 +223,129 @@ describe('auditMcpAuthFailure (MCP auth-failure audit trail, mirrors REST ApiKey
   it('does nothing when auditService is unavailable (mount without DI)', () => {
     expect(() => auditMcpAuthFailure(undefined, new UnauthorizedException('x'), reqContext)).not.toThrow();
   });
+});
 
-  it('success path never reaches the catch (helper only invoked on thrown auth errors)', () => {
-    // Structural: auditMcpAuthFailure is only called from the tool handler's catch block, so a
-    // successful invokeTool returns a result without auditing. Assert the helper is a no-op on
-    // a non-401/403 throw to confirm the success-equivalent (no auth failure) is not audited.
-    auditMcpAuthFailure(auditService, new BadRequestException('not an auth failure'), reqContext);
-    expect(auditService.logWarn).not.toHaveBeenCalled();
+describe('createKeyGate (every MCP request needs a valid key)', () => {
+  type ResMock = { status: jest.Mock; json: jest.Mock; set: jest.Mock; statusCode?: number; body?: unknown };
+  const makeRes = (): ResMock => {
+    const res: ResMock = { status: jest.fn(), json: jest.fn(), set: jest.fn() };
+    res.status.mockImplementation((code: number) => {
+      res.statusCode = code;
+      return res;
+    });
+    res.json.mockImplementation((b: unknown) => {
+      res.body = b;
+      return res;
+    });
+    res.set.mockReturnValue(res);
+    return res;
+  };
+  const run = async (
+    validateApiKey: jest.Mock,
+    headers: Record<string, string> = {},
+    logWarn: jest.Mock = jest.fn(),
+    ip = '203.0.113.7',
+  ) => {
+    const gate = createKeyGate({ validateApiKey }, { logWarn });
+    const req = {
+      method: 'POST',
+      path: '/mcp',
+      headers,
+      socket: { remoteAddress: ip },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = jest.fn();
+    await gate(req, res as unknown as Response, next);
+    return { res, next, logWarn };
+  };
+
+  it('refuses a request with no key before any lookup: 401, JSON-RPC body, audited within the IP budget', async () => {
+    const validateApiKey = jest.fn();
+    const { res, next, logWarn } = await run(validateApiKey);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(validateApiKey).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
+    expect(res.set).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer');
+    expect(res.body).toEqual({ jsonrpc: '2.0', error: { code: -32000, message: 'Missing API key' }, id: null });
+    expect(logWarn).toHaveBeenCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({ ipAddress: '203.0.113.7', method: 'POST', path: '/mcp' }),
+    );
+  });
+
+  // The unauthenticated-row budget is a module-level singleton shared with the REST guard, so this
+  // test uses an IP no other test in this file uses.
+  it('writes at most 10 keyless rows a minute for one IP, and still records a revoked key after that', async () => {
+    const logWarn = jest.fn();
+    const ip = '198.51.100.91';
+    for (let i = 0; i < 11; i++) {
+      const { res, next } = await run(jest.fn(), {}, logWarn, ip);
+      expect(res.statusCode).toBe(401);
+      expect(next).not.toHaveBeenCalled();
+    }
+    expect(logWarn).toHaveBeenCalledTimes(10);
+
+    const revoked = jest.fn().mockRejectedValue(new UnauthorizedException('API key is revoked'));
+    const { res } = await run(revoked, { 'x-api-key': 'old-key' }, logWarn, ip);
+    expect(res.statusCode).toBe(401);
+    expect(logWarn).toHaveBeenCalledTimes(11);
+    expect(logWarn).toHaveBeenLastCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({ ipAddress: ip, errorMessage: 'API key is revoked' }),
+    );
+  });
+
+  it('refuses an unknown key with 401 and audits it', async () => {
+    const validateApiKey = jest.fn().mockRejectedValue(new UnresolvedApiKeyException('Invalid API key'));
+    const { res, next, logWarn } = await run(validateApiKey, { 'x-api-key': 'bad-key' });
+
+    expect(next).not.toHaveBeenCalled();
+    expect(validateApiKey).toHaveBeenCalledWith('bad-key', undefined, undefined, { recordUsage: false });
+    expect(res.statusCode).toBe(401);
+    expect(logWarn).toHaveBeenCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({ errorMessage: 'Invalid API key' }),
+    );
+  });
+
+  it.each([[{ 'x-api-key': 'good-key' }], [{ authorization: 'Bearer good-key' }]])(
+    'passes a valid key through without a client IP or session (%j)',
+    async headers => {
+      const validateApiKey = jest.fn().mockResolvedValue({ id: 'k1' });
+      const { res, next } = await run(validateApiKey, headers);
+
+      expect(next).toHaveBeenCalledWith();
+      expect(validateApiKey).toHaveBeenCalledWith('good-key', undefined, undefined, { recordUsage: false });
+      expect(res.status).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses a malformed Authorization header without a lookup', async () => {
+    const validateApiKey = jest.fn();
+    const { res, next } = await run(validateApiKey, { authorization: 'Bearer good-key extra' });
+
+    expect(next).not.toHaveBeenCalled();
+    expect(validateApiKey).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('answers 500, unaudited, when the key lookup itself fails', async () => {
+    const validateApiKey = jest.fn().mockRejectedValue(new Error('database is down'));
+    const { res, next, logWarn } = await run(validateApiKey, { 'x-api-key': 'good-key' });
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+    expect(logWarn).not.toHaveBeenCalled();
   });
 });
 
-// mountMcpServer is raw Express: every POST builds a fresh McpServer + transport and dispatches via
-// transport.handleRequest(req, res, req.body). These tests drive that route handler directly with
-// mock req/res. Auth is NOT a mount gate — it runs per tool call inside invokeTool (via the callback
-// registered with the per-request server), so a bad key is refused as a tool error result during the
-// dispatch, not as a rejected POST: transport.handleRequest is always reached once the IP throttle
-// and body parser have passed the request through.
+// mountMcpServer is raw Express: every POST passes the IP throttle and the key gate, then builds a
+// fresh McpServer + transport and dispatches via transport.handleRequest(req, res, req.body). These
+// tests drive the terminal handler directly with mock req/res, past the gate. Role, session and chat
+// scope still run per tool call inside invokeTool (via the callback registered with the per-request
+// server), so a key refused there is answered as a tool error result during the dispatch.
 // mcp.module.ts is pure Nest wiring (module registration + the raw-Express mount call), stays at 0%
 // coverage, and is intentionally not a target.
 describe('mountMcpServer (raw-Express request-handling path)', () => {
@@ -255,9 +371,10 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
     authService: { validateApiKey: jest.Mock; hasPermission: jest.Mock };
     auditService: { logWarn: jest.Mock };
     adapter: { post: jest.Mock; get: jest.Mock; delete: jest.Mock };
+    registry: { list: jest.Mock };
   }
 
-  const mount = (): Harness => {
+  const mount = (options: MountMcpServerOptions = { readOnly: false }): Harness => {
     const tool = {
       name: 'MessageSendText',
       description: 'Send a text message (session-scoped write tool)',
@@ -283,13 +400,13 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
       authService as unknown as AuthService,
       new KeyRateLimiter(1000, 60_000),
       new KeyRateLimiter(1000, 60_000),
-      { readOnly: false },
+      options,
       auditService as unknown as AuditService,
     );
     // adapter.post received [express.json(...), createIpThrottle(...), mcpHandler]; the tests drive
     // the terminal handler directly with a pre-parsed body, as the file's middleware harness does.
     const routeHandler = routeHandlers[routeHandlers.length - 1] as Harness['routeHandler'];
-    return { routeHandler, tool, authService, auditService, adapter };
+    return { routeHandler, tool, authService, auditService, adapter, registry };
   };
 
   type ResMock = { on: jest.Mock; status: jest.Mock; json: jest.Mock; headersSent: boolean };
@@ -342,11 +459,41 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
     }
   });
 
-  it('parses the body before the per-IP throttle so a batch is charged per message', () => {
+  it('parses the body before the per-IP throttle, and checks the key after the throttle', () => {
     const h = mount();
-    const [path, parser] = h.adapter.post.mock.calls[0] as unknown[];
+    const [path, parser, ...rest] = h.adapter.post.mock.calls[0] as unknown[];
     expect(path).toBe('/mcp');
     expect((parser as { name?: string }).name).toBe('jsonParser');
+    expect(rest).toHaveLength(3); // throttle, key gate, handler
+  });
+
+  it('refuses a keyless POST at the gate before any MCP server is built', async () => {
+    const h = mount();
+    const gate = (h.adapter.post.mock.calls[0] as unknown[])[3] as (
+      req: Request,
+      res: Response,
+      next: () => void,
+    ) => Promise<void>;
+    const res = { status: jest.fn(), json: jest.fn(), set: jest.fn() };
+    res.status.mockReturnValue(res);
+    res.set.mockReturnValue(res);
+    const next = jest.fn();
+    const body = { jsonrpc: '2.0', id: 1, method: 'initialize' };
+    await gate(
+      {
+        method: 'POST',
+        path: '/mcp',
+        headers: {},
+        body,
+        socket: { remoteAddress: '203.0.113.7' },
+      } as unknown as Request,
+      res as unknown as Response,
+      next,
+    );
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+    expect(h.auditService.logWarn).toHaveBeenCalledWith(AuditAction.API_KEY_AUTH_FAILED, expect.anything());
   });
 
   it('dispatches the request to transport.handleRequest with the parsed body', async () => {
@@ -363,6 +510,36 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
     expect(mockHandleRequest).toHaveBeenCalledWith(req, res, body);
     expect(res.on).toHaveBeenCalledWith('close', expect.any(Function)); // per-request teardown wired
     expect(res.status).not.toHaveBeenCalled(); // no error fallback
+  });
+
+  it('builds a read-only catalogue on every request when MCP_READONLY is unset', async () => {
+    const prev = process.env.MCP_READONLY;
+    delete process.env.MCP_READONLY;
+    try {
+      const h = mount({});
+      expect(h.registry.list).toHaveBeenCalledWith({ readOnly: true });
+      h.registry.list.mockClear();
+      await post(h, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { 'x-api-key': 'good-key' });
+      expect(h.registry.list).toHaveBeenCalledTimes(1);
+      expect(h.registry.list).toHaveBeenLastCalledWith({ readOnly: true });
+    } finally {
+      if (prev === undefined) delete process.env.MCP_READONLY;
+      else process.env.MCP_READONLY = prev;
+    }
+  });
+
+  it('logs the tool count once at mount, not on every request', async () => {
+    const info = jest.spyOn(LoggerService.prototype, 'log');
+    try {
+      const h = mount();
+      expect(info).toHaveBeenCalledTimes(1);
+      await post(h, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { 'x-api-key': 'good-key' });
+      await post(h, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'x-api-key': 'good-key' });
+      expect(mockServerConnect).toHaveBeenCalledTimes(2);
+      expect(info).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it('refuses an invalid API key inside the dispatch: tool error result, tool handler never runs', async () => {
@@ -396,6 +573,21 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
     );
   });
 
+  it('runs the tool on a valid key without writing an auth-failure record', async () => {
+    const h = mount();
+    h.authService.validateApiKey.mockResolvedValue({ id: 'k1' });
+    await post(h, { jsonrpc: '2.0', id: 1 }, { 'x-api-key': 'good-key' });
+
+    const result = (await toolCallback()(
+      { sessionId: 's1', to: '123', text: 'hi' },
+      { requestInfo: { headers: { 'x-api-key': 'good-key' } } },
+    )) as { isError?: boolean };
+
+    expect(result.isError).toBeFalsy();
+    expect(h.tool.handler).toHaveBeenCalledTimes(1);
+    expect(h.auditService.logWarn).not.toHaveBeenCalled();
+  });
+
   // One parser for every surface that reads Authorization, so a header the REST guard accepts is
   // accepted here too and one it refuses is refused here too.
   it.each([
@@ -414,6 +606,39 @@ describe('mountMcpServer (raw-Express request-handling path)', () => {
 
     if (expected === undefined) expect(h.authService.validateApiKey).not.toHaveBeenCalled();
     else expect(h.authService.validateApiKey).toHaveBeenCalledWith(expected, undefined, 's1');
+  });
+
+  // Node keeps only the first of two Authorization headers, while the SDK's web Request joins them,
+  // so the tool call must reuse the key the gate validated rather than parse its own header copy.
+  it('uses the key the gate validated when the SDK headers carry a joined Authorization', async () => {
+    const h = mount();
+    h.authService.validateApiKey.mockResolvedValue({ id: 'k1' });
+    const gate = (h.adapter.post.mock.calls[0] as unknown[])[3] as (
+      req: Request,
+      res: Response,
+      next: () => void,
+    ) => Promise<void>;
+    const req = {
+      method: 'POST',
+      path: '/mcp',
+      headers: { authorization: 'Bearer good-key' },
+      body: { jsonrpc: '2.0', id: 1 },
+      socket: { remoteAddress: '203.0.113.7' },
+    } as unknown as Request & { auth?: unknown };
+    const next = jest.fn();
+    await gate(req, makeRes() as unknown as Response, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    await h.routeHandler(req, makeRes() as unknown as Response);
+
+    const result = (await toolCallback()(
+      { sessionId: 's1', to: '123', text: 'hi' },
+      { authInfo: req.auth, requestInfo: { headers: { authorization: 'Bearer good-key, Bearer other-key' } } },
+    )) as { isError?: boolean };
+
+    expect(result.isError).toBeFalsy();
+    expect(h.authService.validateApiKey).toHaveBeenLastCalledWith('good-key', undefined, 's1');
+    expect(h.tool.handler).toHaveBeenCalledTimes(1);
+    expect(h.auditService.logWarn).not.toHaveBeenCalled();
   });
 
   it('fails closed on a session-scoped tool call without sessionId (guard fires before the auth lookup)', async () => {

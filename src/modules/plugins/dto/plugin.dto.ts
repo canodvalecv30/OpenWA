@@ -95,7 +95,12 @@ export class InstallFromUrlDto {
       'transit. A pinned digest that does not match the downloaded archive fails the install.',
   })
   @IsString()
-  @IsUrl({ protocols: ['http', 'https'], require_protocol: true }, { message: 'url must be an absolute http(s) URL' })
+  // require_tld:false + allow_underscores:true so single-label hosts (a compose service, `localhost`) reach
+  // the SSRF guard, which admits them only when SSRF_ALLOWED_HOSTS names them.
+  @IsUrl(
+    { protocols: ['http', 'https'], require_protocol: true, require_tld: false, allow_underscores: true },
+    { message: 'url must be an absolute http(s) URL' },
+  )
   url!: string;
 }
 

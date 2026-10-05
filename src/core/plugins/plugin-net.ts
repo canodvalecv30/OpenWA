@@ -37,10 +37,12 @@ export interface PluginNetResponse {
 }
 
 /**
- * The effective outbound-host allowlist for a plugin: its static manifest `net.allow` plus the host of
- * every `net.allowConfigHosts` config key that resolves to an https URL. Lets a marketplace adapter reach
- * an operator-configured host (e.g. a Chatwoot base URL) without `net.allow:['*']`. Credentialed or
- * non-https values are ignored; the SSRF guard still blocks private IPs at connect regardless.
+ * The effective outbound-host allowlist for a plugin: its static manifest `net.allow` plus the https
+ * origin of every `net.allowConfigHosts` config key that resolves to an https URL. Lets a marketplace
+ * adapter reach an operator-configured host (e.g. a Chatwoot base URL) without `net.allow:['*']`. The
+ * origin is pinned as `https://host:port`, so the grant covers that scheme and port only, never plain
+ * http or another port of the host. Credentialed or non-https values are ignored; the SSRF guard still
+ * blocks private IPs at connect regardless.
  */
 export function effectiveNetAllow(
   allow: string[] | undefined,
@@ -55,7 +57,7 @@ export function effectiveNetAllow(
       const u = new URL(raw);
       if (u.protocol !== 'https:' || u.username || u.password) continue;
       if (u.hostname.includes('*')) continue; // never let a config value inject the '*' wildcard sentinel
-      out.push(u.host); // host:port when a port is set, else bare host
+      out.push(`https://${u.hostname}:${u.port || '443'}`);
     } catch {
       // Not a URL — skip.
     }
@@ -64,9 +66,10 @@ export function effectiveNetAllow(
 }
 
 /**
- * Is `url` allowed by a plugin's manifest `net.allow` list? Deny-by-default. `'*'` allows any host
- * (the SSRF guard still blocks internal IPs at connect time); an entry may be `host:port` (exact) or
- * a bare `host` (any port). Only http(s) is ever allowed.
+ * Is `url` allowed by a plugin's effective allowlist? Deny-by-default. `'*'` allows any host (the SSRF
+ * guard still blocks internal IPs at connect time); an entry may be `scheme://host:port` (exact origin,
+ * as {@link effectiveNetAllow} emits for config hosts), `host:port` (exact) or a bare `host` (any port).
+ * Only http(s) is ever allowed.
  */
 export function isNetHostAllowed(allow: string[] | undefined, url: string): boolean {
   let parsed: URL;
@@ -81,7 +84,11 @@ export function isNetHostAllowed(allow: string[] | undefined, url: string): bool
   if (list.includes('*')) return true;
 
   const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
-  return list.includes(`${parsed.hostname}:${port}`) || list.includes(parsed.hostname);
+  return (
+    list.includes(`${parsed.protocol}//${parsed.hostname}:${port}`) ||
+    list.includes(`${parsed.hostname}:${port}`) ||
+    list.includes(parsed.hostname)
+  );
 }
 
 /**
@@ -91,10 +98,19 @@ export function isNetHostAllowed(allow: string[] | undefined, url: string): bool
  */
 export async function performPluginFetch(
   url: string,
-  init: PluginNetRequestInit = {},
+  init: PluginNetRequestInit | null = {},
   deps: { fetch?: typeof withSafeFetch } = {},
 ): Promise<PluginNetResponse> {
   const safeFetch = deps.fetch ?? withSafeFetch;
+  // A worker can send `null` (the default only covers undefined). Everything that reads the options
+  // runs before the slot is reserved: a throw between the increment and the try would leak the slot.
+  const opts = init ?? {};
+  // Coerce a non-finite timeoutMs (a string/object/NaN from the untrusted worker) to the default
+  // instead of letting it flow through as NaN — `Math.max('abc', 1)` is NaN, and AbortSignal.timeout(NaN)
+  // throws a RangeError, silently defeating the documented default + hard-cap clamp.
+  const requested =
+    typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Math.min(Math.max(requested, 1), MAX_TIMEOUT_MS);
   // Reject-when-full BEFORE reserving a slot, so total concurrent host-side buffering stays bounded to
   // MAX_INFLIGHT_FETCHES × MAX_BODY_BYTES. Check + increment are synchronous (single event-loop turn),
   // so no interleaving can overshoot the cap; the slot is released in the finally below.
@@ -102,20 +118,13 @@ export async function performPluginFetch(
     throw new Error(`too many concurrent plugin net.fetch calls (max ${MAX_INFLIGHT_FETCHES}); retry shortly`);
   }
   inFlightFetches++;
-  // Coerce a non-finite timeoutMs (a string/object/NaN from the untrusted worker) to the default
-  // instead of letting it flow through as NaN — `Math.max('abc', 1)` is NaN, and AbortSignal.timeout(NaN)
-  // throws a RangeError, silently defeating the documented default + hard-cap clamp.
-  const requested =
-    typeof init.timeoutMs === 'number' && Number.isFinite(init.timeoutMs) ? init.timeoutMs : DEFAULT_TIMEOUT_MS;
-  const timeoutMs = Math.min(Math.max(requested, 1), MAX_TIMEOUT_MS);
-
   try {
     return await safeFetch<PluginNetResponse>(
       url,
       {
-        method: init.method ?? 'GET',
-        headers: init.headers,
-        body: init.body,
+        method: opts.method ?? 'GET',
+        headers: opts.headers,
+        body: opts.body,
         signal: AbortSignal.timeout(timeoutMs),
       },
       async response => {

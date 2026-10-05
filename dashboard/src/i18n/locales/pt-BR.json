@@ -36,6 +36,7 @@
     "hoursAgo_other": "Há {{count}} horas",
     "hoursAgo_many": "Há {{count}} horas",
     "optional": "opcional",
+    "fieldTooLong": "Limite de {{max}} caracteres (agora {{count}}).",
     "language": "Idioma",
     "back": "Voltar",
     "next": "Próximo",
@@ -93,6 +94,7 @@
     "unreadBadge": "{{count}} mensagem não lida",
     "unreadBadge_other": "{{count}} mensagens não lidas",
     "unreadBadge_many": "{{count}} mensagens não lidas",
+    "markedUnread": "Marcado como não lido",
     "loadingMessages": "Carregando mensagens...",
     "loadingOlderMessages": "Carregando mensagens anteriores...",
     "loadOlderMessagesError": "Não foi possível carregar mensagens anteriores. Role para cima para tentar novamente.",
@@ -124,7 +126,6 @@
       "unknownType": "Tipo desconhecido"
     },
     "you": "Você",
-    "youPrefix": "Você: ",
     "yesterday": "Ontem",
     "attachTitle": "Enviar arquivo / imagem",
     "emojiTitle": "Escolher emoji",
@@ -352,7 +353,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "Nenhum proxy configurado",
       "hasCredentials": "As credenciais estão armazenadas, mas não são exibidas. Digite uma URL completa para alterá-las.",
-      "hint": "As alterações se aplicam no próximo início da sessão, não a uma conexão em andamento. O proxy precisa ser real e acessível: um valor inacessível bloqueia a entrega do QR code e o início retorna 504.",
+      "hint": "As alterações se aplicam no próximo início da sessão, não a uma conexão em andamento. O proxy precisa ser real e acessível: um valor inacessível bloqueia a entrega do QR code. No whatsapp-web.js o início retorna 504; no Baileys o início é concluído e a sessão continua tentando reconectar.",
       "createHint": "Necessário apenas quando sua rede não consegue acessar o WhatsApp diretamente. Precisa ser um proxy real e acessível.",
       "invalidUrl": "Digite uma URL de proxy http, https, socks4 ou socks5 válida.",
       "saveSuccessTitle": "Proxy salvo",
@@ -451,11 +452,13 @@
     "selectSession": "Selecionar sessão...",
     "session": "Sessão",
     "events": "Eventos",
+    "noEvents": "Selecione pelo menos um evento.",
     "available": "Eventos disponíveis",
     "saveChanges": "Salvar alterações",
     "filters": {
       "title": "Filtros (opcional)",
       "hint": "Disparar somente quando todas as condições forem atendidas. Aplica-se a eventos de mensagens.",
+      "incomplete": "Informe um valor para cada condição de filtro e use no máximo 20 condições, 100 valores por condição e 1000 caracteres de texto.",
       "badge": "{{count}} filtro",
       "badge_other": "{{count}} filtros",
       "badge_many": "{{count}} filtros",
@@ -490,11 +493,9 @@
       "valueLabel": "Valor do filtro"
     },
     "columns": {
-      "url": "URL",
       "events": "Eventos",
       "session": "Sessão",
-      "status": "Status",
-      "actions": "Ações"
+      "status": "Status"
     },
     "empty": {
       "title": "Nenhum webhook configurado",
@@ -544,6 +545,33 @@
       "call.missed": "Quando uma chamada não é atendida",
       "status.received": "Quando um contato publica um status",
       "all": "Todos os eventos"
+    },
+    "auth": {
+      "title": "Autenticação de entrega",
+      "hint": "Opcional. Os valores salvos nunca mais são exibidos.",
+      "editHint": "O segredo e os cabeçalhos salvos nunca são exibidos. Deixe esta seção inalterada para mantê-los.",
+      "secret": "Segredo de assinatura",
+      "secretHint": "De 16 a 255 caracteres. Cada entrega leva uma assinatura HMAC-SHA256 no cabeçalho X-OpenWA-Signature.",
+      "secretKeepPlaceholder": "Deixe em branco para manter o segredo atual",
+      "generateSecret": "Gerar",
+      "copySecret": "Copiar",
+      "secretCopied": "Segredo de assinatura copiado",
+      "removeSecret": "Parar de assinar as entregas (remover o segredo)",
+      "headers": "Cabeçalhos personalizados",
+      "headerName": "Nome do cabeçalho",
+      "headerValue": "Valor do cabeçalho",
+      "addHeader": "Adicionar cabeçalho",
+      "removeHeader": "Remover cabeçalho",
+      "replaceHeaders": "Substituir os cabeçalhos personalizados",
+      "replaceHint": "Estas linhas substituem todos os cabeçalhos salvos. Sem linhas, os cabeçalhos salvos são removidos.",
+      "errors": {
+        "headerName": "Nomes de cabeçalho podem conter apenas letras, dígitos e hifens.",
+        "headerValue": "Valores de cabeçalho são limitados a 1024 caracteres, sem caracteres de controle nem caracteres fora do Latin-1.",
+        "headerReserved": "Content-Type, User-Agent, X-OpenWA-* e cabeçalhos de conexão são definidos pelo gateway e não podem ser usados.",
+        "headerDuplicate": "Cada nome de cabeçalho pode ser usado apenas uma vez.",
+        "tooMany": "São permitidos no máximo 50 cabeçalhos personalizados.",
+        "secretLength": "O segredo de assinatura deve ter de 16 a 255 caracteres."
+      }
     }
   },
   "apiKeys": {
@@ -554,6 +582,7 @@
     "createdTitle": "Chave API criada",
     "createdHint": "Copie esta chave agora. Você não poderá vê-la novamente.",
     "namePlaceholder": "ex.: Chave de produção",
+    "nameTooShort": "Use pelo menos 3 caracteres.",
     "rolesTitle": "Referência de funções",
     "roles": {
       "admin": "Administrador",
@@ -572,11 +601,13 @@
       "status": "Status",
       "lastUsed": "Último uso",
       "actions": "Ações",
-      "sessions": "Sessões"
+      "sessions": "Sessões",
+      "restrictions": "Restrições"
     },
     "statuses": {
       "active": "Ativa",
-      "revoked": "Revogada"
+      "revoked": "Revogada",
+      "expired": "Expirada"
     },
     "empty": {
       "title": "Nenhuma chave API criada",
@@ -594,10 +625,9 @@
       "revoke": "Revogar"
     },
     "actions": {
-      "copy": "Copiar",
       "revoke": "Revogar",
       "delete": "Excluir",
-      "editSessions": "Editar sessões"
+      "edit": "Editar acesso"
     },
     "sessions": {
       "label": "Acesso às sessões",
@@ -605,10 +635,36 @@
       "all": "Todas as sessões",
       "empty": "Ainda não há sessões. Esta chave poderá acessar todas quando existirem.",
       "restricted": "{{count}} selecionadas",
-      "editTitle": "Editar acesso às sessões",
       "save": "Salvar",
       "choose": "Escolher sessões",
       "leaveAll": "Deixar para todas as sessões"
+    },
+    "edit": {
+      "title": "Editar acesso da chave",
+      "signedIn": "Este painel está conectado com esta chave. Alterar a função, os endereços IP, os chats ou a expiração pode desconectar você."
+    },
+    "restrictions": {
+      "none": "Nenhuma",
+      "ips": "IPs: {{count}}",
+      "chats": "Chats: {{count}}",
+      "expires": "Expira em {{date}}",
+      "expired": "Expirou em {{date}}"
+    },
+    "ips": {
+      "label": "Endereços IP permitidos (opcional)",
+      "hint": "Um endereço IP ou intervalo CIDR por linha. Deixe em branco para aceitar qualquer endereço.",
+      "invalid": "Não é um endereço IPv4 nem um intervalo CIDR: {{value}}"
+    },
+    "chats": {
+      "label": "Acesso a chats (opcional)",
+      "hint": "Um chat por linha: um ID de grupo terminado em @g.us, um ID de contato terminado em @c.us ou @lid, ou um número de telefone. Deixe em branco para todos os chats. Uma chave restrita a chats só pode usar as rotas abertas a esse tipo de chave; o WebSocket de eventos e o MCP a recusam.",
+      "invalid": "Não é um ID de chat nem um número de telefone: {{value}}"
+    },
+    "expiry": {
+      "label": "Expira em (opcional)",
+      "hint": "No fuso horário deste navegador. Deixe em branco para uma chave que nunca expira.",
+      "clear": "Remover expiração",
+      "invalid": "Informe data e hora completas, até o ano 9999, ou limpe o campo para uma chave que nunca expira."
     }
   },
   "logs": {
@@ -792,6 +848,7 @@
     },
     "empty": {
       "title": "Nenhum modelo salvo",
+      "noMatch": "Nenhum modelo corresponde à sua pesquisa.",
       "description": "Crie um modelo reutilizável para agilizar respostas e notificações habituais.",
       "noSessionsTitle": "Nenhuma sessão disponível",
       "noSessionsDesc": "Crie uma sessão do WhatsApp antes de adicionar modelos.",
@@ -832,7 +889,7 @@
       "sslRejectUnauthorized": "Verificar certificado SSL",
       "sslRejectUnauthorizedDesc": "Rejeitar certificados autoassinados ou inválidos. Desative para Postgres gerenciado com certificados autoassinados (Supabase, Heroku, Render, Railway).",
       "migrationsTitle": "Migrações do banco de dados",
-      "migrationsStatus": "O esquema é sincronizado automaticamente com TypeORM",
+      "migrationsStatus": "Migrações pendentes são aplicadas automaticamente na inicialização",
       "migrationsHint": "As migrações são gerenciadas automaticamente. Use a CLI para migrações manuais."
     },
     "engine": {
@@ -855,7 +912,7 @@
     "redis": {
       "title": "Redis",
       "enable": "Habilitar Redis",
-      "enableDesc": "Necessário para cache, armazenamento de sessões e filas BullMQ",
+      "enableDesc": "Usado para cache, filas BullMQ, contadores de limite de taxa e distribuição de WebSocket entre vários nós",
       "useBuiltIn": "Usar contêiner Redis integrado",
       "builtInDesc": "OpenWA gerenciará um contêiner Redis para você",
       "queueTitle": "Habilitar sistema de filas BullMQ",
@@ -867,7 +924,7 @@
       "failed": "Falhou",
       "viewBullMq": "Ver painel BullMQ",
       "disabledTitle": "Redis está desabilitado",
-      "disabledDesc": "Habilite o Redis para cache, armazenamento de sessões e filas de mensagens BullMQ.",
+      "disabledDesc": "Habilite o Redis para cache, filas de mensagens BullMQ, contadores de limite de taxa e distribuição de WebSocket entre vários nós.",
       "passwordOptional": "(opcional)",
       "bullMqUrlCopied": "URL do painel do Bull MQ copiada",
       "bullMqUrlHint": "Abra com uma chave de API ADMIN — uma aba do navegador não consegue autenticar."
@@ -907,8 +964,8 @@
       "checking": "Verificando status do servidor...",
       "dontClose": "Por favor, não feche esta janela",
       "successMsg": "O servidor voltou a ficar online! A página será recarregada automaticamente.",
-      "errorMsg": "O servidor não respondeu após 30 segundos. Verifique os logs do Docker e reinicie manualmente.",
-      "outcomeUnknown": "O proxy atingiu o tempo limite antes de o servidor responder. A reinicialização ainda pode estar em andamento; recarregue a página em um minuto para verificar.",
+      "errorMsg": "O servidor não respondeu. Verifique os logs do Docker e reinicie manualmente.",
+      "outcomeUnknown": "O proxy retornou um erro antes de o servidor responder, então não é possível saber se a reinicialização está em andamento. Recarregue a página em um minuto para verificar.",
       "reload": "Recarregar página"
     },
     "toasts": {
@@ -922,7 +979,7 @@
       "storageWarning": "Os arquivos de mídia existentes não são transferidos automaticamente para o novo backend de armazenamento; eles permanecerão no local anterior.",
       "downloadBackup": "Baixar backup primeiro",
       "backupTitle": "Backup e restauração de dados",
-      "backupHint": "Exporte todos os dados como JSON antes de trocar o banco de dados e importe-os após a troca. O backup contém segredos de webhook e credenciais de proxy em texto simples: guarde-o com segurança e exclua-o após restaurar.",
+      "backupHint": "Exporte todos os dados como JSON antes de trocar o banco de dados e importe-os após a troca. Segredos de assinatura de webhook, cabeçalhos personalizados de webhook e credenciais de proxy não são incluídos; informe-os novamente após restaurar. Segredos e configurações das instâncias de integração são incluídos em texto simples: guarde o arquivo com segurança e exclua-o após restaurar.",
       "export": "Exportar dados",
       "import": "Importar dados",
       "exportFailed": "Não foi possível exportar os dados",
@@ -970,7 +1027,7 @@
     "config": {
       "title": "Configurar {{name}}",
       "noOptions": "Não há opções de configuração disponíveis para este plugin",
-      "uiHandshakeError": "A interface de configuração do plugin não foi iniciada. Use o formulário abaixo, se disponível.",
+      "uiHandshakeError": "A interface de configuração do plugin não foi iniciada.",
       "save": "Salvar configuração",
       "addItem": "Adicionar",
       "tabConfig": "Configuração",
@@ -1001,7 +1058,7 @@
       "healthFail": "Verificação de saúde falhou",
       "healthError": "Erro na verificação de saúde",
       "savedTitle": "Configuração salva",
-      "savedDesc": "É necessário reiniciar o servidor para aplicar as alterações.",
+      "savedDesc": "As alterações entram em vigor sem reiniciar o servidor.",
       "saveFailed": "Erro ao salvar",
       "installed": "Plugin instalado",
       "installFailed": "Erro na instalação",
@@ -1106,7 +1163,7 @@
   },
   "search": {
     "placeholder": "Pesquisar mensagens…",
-    "results": "{{count}} resultados",
+    "loadMore": "Mostrar mais ({{shown}} de {{total}})",
     "empty": "Nenhuma mensagem encontrada.",
     "error": "Falha na pesquisa. Tente novamente.",
     "unavailable": "A pesquisa não está configurada.",

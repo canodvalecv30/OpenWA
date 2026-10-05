@@ -17,6 +17,7 @@ import { AppModule } from '../src/app.module';
 import { applyGlobalValidation } from '../src/config/app-validation';
 import { PluginLoaderService } from '../src/core/plugins/plugin-loader.service';
 import { AuthService } from '../src/modules/auth/auth.service';
+import { AuditAction, AuditLog } from '../src/modules/audit/entities/audit-log.entity';
 import { ApiKeyRole } from '../src/modules/auth/entities/api-key.entity';
 import { IntegrationDeliveryFailure } from '../src/modules/integration/entities/integration-delivery-failure.entity';
 import { InfraDataService } from '../src/modules/infra/infra-data.service';
@@ -248,6 +249,16 @@ describe('IntegrationInstanceController (e2e)', () => {
   it('deletes the instance (204) and audits it', async () => {
     await request(app.getHttpServer()).delete(`${base}/chatwoot/instances/acct1`).set('X-API-Key', key).expect(204);
     await request(app.getHttpServer()).get(`${base}/chatwoot/instances/acct1`).set('X-API-Key', key).expect(404);
+
+    // The audit write is fire-and-forget, so poll briefly for the row.
+    const auditRepo: Repository<AuditLog> = app.get(getRepositoryToken(AuditLog, 'main'));
+    let row: AuditLog | undefined;
+    for (let i = 0; i < 50 && !row; i++) {
+      const rows = await auditRepo.find({ where: { action: AuditAction.INTEGRATION_INSTANCE_DELETED } });
+      row = rows.find(r => r.metadata?.pluginId === 'chatwoot' && r.metadata?.instanceId === 'acct1');
+      if (!row) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(row?.metadata).toEqual({ pluginId: 'chatwoot', instanceId: 'acct1' });
   });
 
   /**

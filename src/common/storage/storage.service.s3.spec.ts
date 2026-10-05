@@ -26,7 +26,7 @@ jest.mock('@aws-sdk/client-s3', () => {
 
 import { S3Client } from '@aws-sdk/client-s3';
 import { LoggerService } from '../services/logger.service';
-import { StorageService } from './storage.service';
+import { S3_CONNECT_TIMEOUT_MS, S3_SOCKET_TIMEOUT_MS, StorageService } from './storage.service';
 
 // The subset of the AWS SDK's S3Client config this service sets — used purely to type the mock's call
 // args so the assertions below are type-checked instead of `any`.
@@ -35,6 +35,7 @@ type S3ClientConfig = {
   region: string;
   forcePathStyle?: boolean;
   credentials: { accessKeyId: string; secretAccessKey: string };
+  requestHandler?: { connectionTimeout?: number; socketTimeout?: number; requestTimeout?: number };
 };
 
 const mockedS3Client = S3Client as unknown as jest.Mock<unknown, [S3ClientConfig]>;
@@ -116,6 +117,18 @@ describe('StorageService (s3) client init', () => {
     expect(cfg.endpoint).toBe('http://minio:9000');
     expect(cfg.forcePathStyle).toBe(true);
     expect(svc.isS3Available()).toBe(true);
+  });
+
+  // A store that accepts the connection and never answers would otherwise leave every request (the
+  // availability probe, media reads and archive writes) pending forever.
+  it('bounds every request with a connect and an idle-socket timeout', async () => {
+    new StorageService(makeConfig({ accessKeyId: 'minio', secretAccessKey: 'minio123', region: 'us-east-1' }));
+    await flush();
+
+    expect(lastConfig().requestHandler).toEqual({
+      connectionTimeout: S3_CONNECT_TIMEOUT_MS,
+      socketTimeout: S3_SOCKET_TIMEOUT_MS,
+    });
   });
 
   it('falls back to local (no client) when credentials are missing, and says so', async () => {

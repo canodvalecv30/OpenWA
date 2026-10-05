@@ -18,7 +18,7 @@ class SearchTest extends TestCase
             'body' => 'hello world',
             'snippet' => '<mark>hello</mark> world',
             'timestamp' => 1717900000,
-            'type' => 'chat',
+            'type' => 'text',
             'direction' => 'incoming',
             'from' => '628123456789@c.us',
             'score' => 1.5,
@@ -68,14 +68,14 @@ class SearchTest extends TestCase
         $client->search->search([
             'q' => 'term',
             'chatId' => null,
-            'type' => 'chat',
+            'type' => 'text',
             'dateFrom' => null,
         ]);
 
         $query = $backend->lastCall()['query'];
         // `q` and a present `type` are sent; null `chatId`/`dateFrom` are omitted.
         $this->assertStringContainsString('q=term', $query);
-        $this->assertStringContainsString('type=chat', $query);
+        $this->assertStringContainsString('type=text', $query);
         $this->assertStringNotContainsString('chatId=', $query);
         $this->assertStringNotContainsString('dateFrom=', $query);
     }

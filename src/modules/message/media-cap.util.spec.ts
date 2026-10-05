@@ -27,7 +27,7 @@ describe('assertBase64WithinMediaCap', () => {
     expect(() => assertBase64WithinMediaCap(base64OfBytes(1024))).not.toThrow();
   });
 
-  it('rejects a base64 payload over the cap with a 400', () => {
+  it('rejects a base64 payload over the cap with a 413', () => {
     process.env.MEDIA_DOWNLOAD_MAX_BYTES = '1024';
     expect(() => assertBase64WithinMediaCap(base64OfBytes(1025))).toThrow(PayloadTooLargeException);
   });

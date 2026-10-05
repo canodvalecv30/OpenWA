@@ -108,8 +108,9 @@ describe('LabelService label editing', () => {
     expect(upsertLabel).toHaveBeenCalledWith({ id: 'l1', name: 'VIP' });
   });
 
-  // Omitted fields must stay omitted rather than becoming undefined-valued keys: the adapter drops
-  // undefined before it reaches app-state, and sending an explicit blank would clear the field.
+  // Omitted fields must stay omitted rather than becoming undefined-valued keys. The service sends
+  // only the fields the caller set, and the adapter forwards them unchanged; the write replaces the
+  // whole label.
   it('passes through only the fields the caller set', async () => {
     const upsertLabel = jest.fn().mockResolvedValue(undefined);
     await makeService({ upsertLabel }).upsertLabel('s1', 'l1', { color: 3 });
@@ -129,11 +130,12 @@ describe('LabelService label editing', () => {
   });
 
   it.each([
-    ['upsertLabel', (svc: LabelService) => svc.upsertLabel('s1', 'l1', {})],
+    ['upsertLabel', (svc: LabelService) => svc.upsertLabel('s1', 'l1', { name: 'VIP' })],
     ['deleteLabel', (svc: LabelService) => svc.deleteLabel('s1', 'l1')],
     ['getChatsByLabel', (svc: LabelService) => svc.getChatsByLabel('s1', 'l1')],
   ])('throws 400 for %s when the session is not started', (_name, call) => {
     const engines = new EngineRegistry();
     expect(() => call(new LabelService(engines))).toThrow(BadRequestException);
+    expect(() => call(new LabelService(engines))).toThrow('Session is not started');
   });
 });

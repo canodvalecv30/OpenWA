@@ -31,6 +31,16 @@ describe('CallController', () => {
     );
   });
 
+  // The mint is not idempotent, so an unconfirmed link_create answers 500 on both engines: a
+  // retryable 503 would invite a replay that creates a second link.
+  it('POST link declares no retryable 503', () => {
+    const responses = (Reflect.getMetadata(
+      'swagger/apiResponse',
+      Object.getOwnPropertyDescriptor(CallController.prototype, 'createLink')?.value as object,
+    ) ?? {}) as Record<string, unknown>;
+    expect(Object.keys(responses)).not.toContain('503');
+  });
+
   it('POST :callId/reject returns the success envelope', async () => {
     const { controller, service } = build({ rejectCall: jest.fn().mockResolvedValue(undefined) });
     await expect(controller.reject('s1', 'CALL1')).resolves.toEqual({ success: true });

@@ -2,6 +2,8 @@
 // Centralized API client with TypeScript types
 
 import { warnIfInsecureHttpUrl } from '../utils/urlSecurity';
+import { isKeyUnusable } from '../utils/authLifecycle';
+import { fetchAllPages } from '../utils/fetchAllPages';
 
 // Resolve the API base URL. By default this is the same-origin relative path '/api',
 // correct when the dashboard and API are served from the same origin (the default
@@ -74,8 +76,10 @@ export interface Session {
   lastActive?: string | null;
   createdAt: string;
   updatedAt: string;
-  /** Human-readable reason carried while the status is 'failed' (terminal failure) or
-   * 'action_required' (operator must intervene, e.g. acknowledge an onboarding modal). */
+  /** Human-readable reason carried while the status is 'failed' (terminal failure),
+   * 'action_required' (operator must intervene, e.g. acknowledge an onboarding modal), or
+   * 'initializing' during an engine-internal reconnect (from the fifth consecutive attempt, or while a
+   * retry waits after a failed relaunch). */
   lastError?: string | null;
   /**
    * A limit WhatsApp itself has placed on the account, or null when there is none. Distinct from
@@ -152,6 +156,26 @@ export interface Webhook {
   lastTriggeredAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// Request bodies for webhook writes. `secret` and `headers` are write-only: no webhook read returns them.
+export interface CreateWebhookRequest {
+  url: string;
+  events: string[];
+  filters?: WebhookFilters | null;
+  secret?: string;
+  headers?: Record<string, string>;
+}
+
+export interface UpdateWebhookRequest {
+  url?: string;
+  events?: string[];
+  active?: boolean;
+  filters?: WebhookFilters | null;
+  /** An empty string removes the stored secret. */
+  secret?: string;
+  /** Replaces the stored map wholesale; `{}` removes every custom header. */
+  headers?: Record<string, string>;
 }
 
 export interface MessageTemplate {
@@ -292,7 +316,15 @@ export interface ChatMessage {
   timestamp?: number;
   createdAt: string;
   metadata?: {
-    media?: { mimetype: string; filename?: string; data?: string; omitted?: boolean; sizeBytes?: number };
+    media?: {
+      mimetype: string;
+      filename?: string;
+      data?: string;
+      omitted?: boolean;
+      sizeBytes?: number;
+      /** With `omitted`: the inline copy was dropped because the chat-media archive holds the bytes. */
+      archived?: boolean;
+    };
     quotedMessage?: { id: string; body: string };
     reactions?: Record<string, string>;
     call?: { video: boolean; missed: boolean };
@@ -354,6 +386,7 @@ export interface EngineHistoryMessage {
     data?: string;
     omitted?: boolean;
     sizeBytes?: number;
+    archived?: boolean;
   };
   quotedMessage?: { id: string; body: string };
   location?: { latitude: number; longitude: number; description?: string; address?: string; url?: string };
@@ -514,7 +547,7 @@ export interface BatchMessageResult {
   sentAt?: string;
 }
 
-/** GET batch/:batchId shape; the cancel endpoint returns the same minus results/timestamps. */
+/** GET batch/:batchId shape. */
 export interface BatchStatusResponse {
   batchId: string;
   status: BatchStatus;
@@ -523,6 +556,13 @@ export interface BatchStatusResponse {
   results: BatchMessageResult[];
   startedAt?: string | null;
   completedAt?: string | null;
+}
+
+/** POST batch/:batchId/cancel shape: the batch state without per-recipient results or timestamps. */
+export interface BatchCancelResponse {
+  batchId: string;
+  status: BatchStatus;
+  progress: BatchProgress;
 }
 
 export interface HealthStatus {
@@ -691,24 +731,24 @@ export interface SearchResults {
 // API Client
 // =============================================================================
 
-// Shared failure handling for every response shape (json/text/blob). On 401 the stored API key is
-// invalid/expired/revoked — clear it and return to login so the user isn't stuck on a dashboard that
-// 401s every request; the never-settling promise halts this request's chain so callers neither flash
-// a generic error toast nor receive an undefined payload while the page navigates away. Otherwise
-// throw an Error carrying the HTTP status and, when the gateway supplied one, its machine code.
+// Shared failure handling for every response shape (json/text/blob). When the stored API key is
+// unusable (a 401 for an invalid/expired/revoked key, or a 403 because its allowedIps refuse this
+// client) clear it and return to login so the user isn't stuck on a dashboard where every request
+// fails; the never-settling promise halts this request's chain so callers neither flash a generic
+// error toast nor receive an undefined payload while the page navigates away. Otherwise throw an
+// Error carrying the HTTP status and, when the gateway supplied one, its machine code.
 async function handleErrorResponse<T>(response: Response): Promise<T> {
-  if (response.status === 401) {
+  // On a non-JSON body (e.g. a reverse-proxy 502/503/504 HTML page) fall through to `HTTP <status>`
+  // rather than statusText: the toast folds an exact `HTTP 502`/`HTTP 503` into its connection-lost
+  // toast (a 504 keeps its own), and statusText is empty over HTTP/2 anyway.
+  const error = await response.json().catch(() => ({}));
+  if (isKeyUnusable(response.status, error.message)) {
     sessionStorage.removeItem('openwa_api_key');
     if (typeof window !== 'undefined') {
       window.location.assign('/');
       return new Promise<T>(() => {});
     }
   }
-
-  // On a non-JSON body (e.g. a reverse-proxy 502/503/504 HTML page) fall through to `HTTP <status>`
-  // rather than statusText: the status code is what the toast connection-lost de-dup matches on,
-  // and statusText is empty over HTTP/2 anyway.
-  const error = await response.json().catch(() => ({}));
   // Carry the HTTP status on the Error (message unchanged, so the toast de-dup still matches) so
   // callers can tell apart a permission 403 from a real server 5xx instead of guessing from text.
   // Carry the machine `code` too: the gateway's stable codes (SESSION_LOGOUT_INCOMPLETE,
@@ -892,12 +932,12 @@ export const sessionApi = {
 export const webhookApi = {
   listBySession: (sessionId: string) => request<Webhook[]>(`/sessions/${sessionId}/webhooks`),
   listAll: () => request<Webhook[]>('/webhooks'),
-  create: (sessionId: string, data: { url: string; events: string[]; filters?: WebhookFilters | null }) =>
+  create: (sessionId: string, data: CreateWebhookRequest) =>
     request<Webhook>(`/sessions/${sessionId}/webhooks`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  update: (sessionId: string, id: string, data: Partial<Webhook>) =>
+  update: (sessionId: string, id: string, data: UpdateWebhookRequest) =>
     request<Webhook>(`/sessions/${sessionId}/webhooks/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -947,7 +987,28 @@ export interface ProfilePictureResponse {
 }
 
 export const contactApi = {
-  list: (sessionId: string) => request<Contact[]>(`/sessions/${sessionId}/contacts`),
+  // The route caps a response at 1000 contacts; walk the pages so an address book past that is complete.
+  // No item cap: the status recipient picker needs every contact, and the server's short page ends the walk.
+  list: async (sessionId: string) => {
+    let lastError: unknown;
+    const { items, throttled } = await fetchAllPages(
+      async (limit, offset) => {
+        try {
+          const data = await request<Contact[]>(`/sessions/${sessionId}/contacts?limit=${limit}&offset=${offset}`);
+          // The route answers a bare array with no total: a short page is the last one.
+          return { data, total: data.length < limit ? offset + data.length : Infinity };
+        } catch (err) {
+          lastError = err;
+          throw err;
+        }
+      },
+      { pageSize: 1000, maxItems: Infinity },
+    );
+    // A page still throttled after the retries would leave the picker silently short; fail the whole
+    // load with that page's 429, as a throttled first page already does.
+    if (throttled) throw lastError;
+    return items;
+  },
   checkNumber: (sessionId: string, number: string) =>
     request<CheckNumberResponse>(`/sessions/${sessionId}/contacts/check/${encodeURIComponent(number)}`),
   // Returns the contact/group profile picture URL. Both engines return null when the user hid their
@@ -962,7 +1023,7 @@ export const contactApi = {
       `/sessions/${sessionId}/contacts/${encodeURIComponent(contactId)}/phone`,
     ),
   // Batch-resolve profile picture URLs for a whole sidebar in ONE request — the per-chat burst of
-  // parallel single fetches exhausts the per-IP throttle (429s). Engine lookups run 3 at a time
+  // parallel single fetches exhausts the per-IP throttle (429s). Engine lookups run 5 at a time
   // server-side; ids beyond the backend's 50-id cap are dropped client-side too.
   profilePictures: (sessionId: string, contactIds: string[]) =>
     request<{ pictures: Record<string, string | null> }>(
@@ -998,7 +1059,8 @@ export const apiKeyApi = {
       role?: string;
       allowedIps?: string[];
       allowedSessions?: string[];
-      expiresAt?: string;
+      /** null removes the expiry. */
+      expiresAt?: string | null;
       allowedChats?: string[];
     },
   ) =>
@@ -1081,7 +1143,7 @@ export const messageApi = {
   getBatchStatus: (sessionId: string, batchId: string) =>
     request<BatchStatusResponse>(`/sessions/${sessionId}/messages/batch/${encodeURIComponent(batchId)}`),
   cancelBatch: (sessionId: string, batchId: string) =>
-    request<BatchStatusResponse>(`/sessions/${sessionId}/messages/batch/${encodeURIComponent(batchId)}/cancel`, {
+    request<BatchCancelResponse>(`/sessions/${sessionId}/messages/batch/${encodeURIComponent(batchId)}/cancel`, {
       method: 'POST',
     }),
   reply: (sessionId: string, data: { chatId: string; quotedMessageId: string; text: string }) =>

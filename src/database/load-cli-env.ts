@@ -15,6 +15,6 @@ export function loadCliEnv(cwd: string = process.cwd()): void {
   clearBlankEnv(process.env, BLANK_SHADOWED_ENV_KEYS);
   const userEnvPath = path.resolve(cwd, '.env');
   const generatedEnvPath = path.resolve(cwd, 'data', '.env.generated');
-  if (fs.existsSync(userEnvPath)) config({ path: userEnvPath, override: false });
-  if (fs.existsSync(generatedEnvPath)) config({ path: generatedEnvPath, override: false });
+  if (fs.existsSync(userEnvPath)) config({ path: userEnvPath, override: false, quiet: true });
+  if (fs.existsSync(generatedEnvPath)) config({ path: generatedEnvPath, override: false, quiet: true });
 }

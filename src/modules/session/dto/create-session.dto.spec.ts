@@ -1,5 +1,8 @@
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { DECORATORS } from '@nestjs/swagger';
 import { validateSync } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
+import { GLOBAL_VALIDATION_OPTIONS } from '../../../config/app-validation';
 import { CreateSessionDto } from './create-session.dto';
 
 describe('CreateSessionDto proxyUrl validation', () => {
@@ -33,6 +36,13 @@ describe('CreateSessionDto proxyUrl validation', () => {
   it('allows an omitted proxyUrl (optional)', () => {
     expect(validateSync(plainToInstance(CreateSessionDto, { name: 'my-bot' }))).toHaveLength(0);
   });
+
+  // @nestjs/swagger derives no bound from @MaxCodePoints, so the decorator has to state it.
+  it('publishes the 255 code point cap', () => {
+    const published = Reflect.getMetadata(DECORATORS.API_MODEL_PROPERTIES, CreateSessionDto.prototype, 'proxyUrl') as
+      { maxLength?: number } | undefined;
+    expect(published?.maxLength).toBe(255);
+  });
 });
 
 describe('CreateSessionDto config validation', () => {
@@ -45,5 +55,46 @@ describe('CreateSessionDto config validation', () => {
 
   it('accepts an object, unknown keys included (they are stored but ignored)', () => {
     expect(errs({ maxReconnectAttempts: 5, custom: 'x' })).toHaveLength(0);
+  });
+});
+
+/**
+ * The three keys the session reads are held to the same rules as PATCH /config. Stored unvalidated, an
+ * out-of-range value was clamped at start time without a word: -1 or 0.5 became 0 and disabled
+ * reconnect, and the string "true" left autoRejectCalls off.
+ */
+describe('CreateSessionDto config keys through the global pipe', () => {
+  const pipe = new ValidationPipe(GLOBAL_VALIDATION_OPTIONS);
+  const create = (config: Record<string, unknown>): Promise<CreateSessionDto> =>
+    pipe.transform(
+      { name: 'my-bot', config },
+      { type: 'body', metatype: CreateSessionDto },
+    ) as Promise<CreateSessionDto>;
+
+  it.each([
+    [{ maxReconnectAttempts: -1 }, 'config.maxReconnectAttempts must not be less than 0'],
+    [{ maxReconnectAttempts: 0.5 }, 'config.maxReconnectAttempts must be an integer number'],
+    [{ maxReconnectAttempts: 50 }, 'config.maxReconnectAttempts must not be greater than 20'],
+    [{ reconnectBaseDelay: 500 }, 'config.reconnectBaseDelay must not be less than 1000'],
+    [{ autoRejectCalls: 'yes' }, 'config.autoRejectCalls must be a boolean value'],
+  ])('refuses %j with a 400 naming the key', async (config, message) => {
+    const error = await create(config).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect(((error as BadRequestException).getResponse() as { message: string[] }).message).toEqual([
+      expect.stringContaining(message),
+    ]);
+  });
+
+  it('stores the strict spellings PATCH /config accepts as their typed values', async () => {
+    const dto = await create({ autoRejectCalls: 'true', maxReconnectAttempts: '5', reconnectBaseDelay: 2000 });
+    expect(dto.config).toEqual({ autoRejectCalls: true, maxReconnectAttempts: 5, reconnectBaseDelay: 2000 });
+  });
+
+  it('keeps unknown keys and leaves absent ones absent', async () => {
+    const dto = await create({ custom: 'x', maxReconnectAttempts: null });
+    expect(dto.config).toEqual({ custom: 'x', maxReconnectAttempts: null });
   });
 });

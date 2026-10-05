@@ -1,15 +1,14 @@
 import { Module } from '@nestjs/common';
 import { SessionModule } from '../session/session.module';
-import { MessageModule } from '../message/message.module';
 import { SessionTakeoverService } from './session-takeover.service';
 
 /**
- * Sits ABOVE both SessionModule and MessageModule on purpose: the takeover sweep starts sessions
- * (SessionService) and reconciles their bulk batches (BulkMessageService), and MessageModule
- * already imports SessionModule — so this is the lowest place both are reachable without a cycle.
+ * The takeover sweep starts sessions through SessionService. A claim on that path has the lapsed
+ * holder's unfinished bulk batches failed through the ownership adoption handler, so nothing here
+ * needs MessageModule.
  */
 @Module({
-  imports: [SessionModule, MessageModule],
+  imports: [SessionModule],
   providers: [SessionTakeoverService],
 })
 export class TakeoverModule {}

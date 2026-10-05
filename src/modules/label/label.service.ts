@@ -37,9 +37,9 @@ export class LabelService {
    * already exists — which is also why the caller chooses the id rather than being handed one.
    */
   upsertLabel(sessionId: string, labelId: string, body: { name?: string; color?: number }) {
-    // Both fields are individually optional (either alone is a valid partial update), but a body
-    // that sets neither has nothing to write — on an unused id it would even create a nameless
-    // label — so it is refused like the group-settings PUT refuses an empty patch. `null` counts as
+    // Both fields are individually optional, but the write replaces the whole label, so an omitted
+    // field is not kept (a colour-only write clears the name). A body that sets neither has nothing to
+    // write, so it is refused like the group-settings PUT refuses an empty patch. `null` counts as
     // "not set": class-validator's @IsOptional skips validation for it and class-transformer keeps
     // it, so {"name": null} reached here as an explicit nothing.
     const name = body.name ?? undefined;

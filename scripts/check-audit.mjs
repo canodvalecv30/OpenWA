@@ -22,7 +22,7 @@
  * Run locally: `npm run check:audit`.
  */
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -70,7 +70,8 @@ function runAuditOnce() {
 /**
  * Runs the audit, retrying once when the endpoint does not answer. A transient blip clears on the
  * retry; a retired or persistently-down endpoint returns the last error report, which the caller
- * turns into a loud skip rather than a false "stale allowlist" failure.
+ * turns into a loud skip (or, on a required path, a failure) rather than a false "stale allowlist"
+ * failure.
  */
 function runAudit() {
   const ATTEMPTS = 2;
@@ -107,6 +108,35 @@ export function collectAdvisories(report) {
   return found;
 }
 
+/**
+ * What to do when npm audit could not answer at all. On PR and push CI only this root-tree check
+ * skips, and the skip is raised as a warning annotation on GitHub Actions rather than a log line
+ * inside a green step. It does not keep the audit job green: the dashboard's plain `npm audit` step
+ * in ci.yml fails closed on the same outage. A path that sets CHECK_AUDIT_REQUIRED=1 (the release
+ * gate and the weekly scan) fails instead: publishing, or reporting a week clean, with no advisory
+ * checked is not a skip those paths may take. A re-run clears a transient outage.
+ */
+export function unavailableOutcome(summary, env = process.env) {
+  const required = env.CHECK_AUDIT_REQUIRED === '1';
+  const text = `npm audit endpoint is unavailable after a retry (${summary}); advisories were not checked this run.`;
+  const lines = [];
+  if (env.GITHUB_ACTIONS === 'true') {
+    // A workflow command ends at the first newline, and npm's summary can span several lines.
+    const message = text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    lines.push(
+      required
+        ? `::error title=check:audit could not run::${message}`
+        : `::warning title=check:audit skipped::${message}`,
+    );
+  }
+  lines.push(
+    required
+      ? `check:audit FAILED: ${text} The audit is required on this path (CHECK_AUDIT_REQUIRED=1).`
+      : `check:audit SKIPPED: ${text}`,
+  );
+  return { exitCode: required ? 1 : 0, lines };
+}
+
 /** The gate's verdict, split out so a spec can drive it without shelling out to npm. */
 export function evaluate(report, allowlist = ALLOWLIST) {
   const advisories = collectAdvisories(report);
@@ -138,25 +168,23 @@ export function evaluate(report, allowlist = ALLOWLIST) {
 
 // Guarded so the spec can import the two functions above without running a real audit.
 //
-// Compare RESOLVED PATHS, not a hand-built file URL. `import.meta.url` is percent-encoded, so any
+// Compare REAL PATHS, not a hand-built file URL. `import.meta.url` is percent-encoded, so any
 // checkout path needing escaping (a space, a `#`, non-ASCII) made `file://${process.argv[1]}`
 // differ and the gate exited 0 having run no audit at all. On Windows it never matched: argv[1] is
 // a native path with backslashes and a drive letter. `fileURLToPath` decodes the URL to a native
-// path and `resolve` normalises argv[1], which is the comparison check-sdk-docs.mjs and
-// check-upstream-surface.mjs already use.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// path and `realpathSync` resolves argv[1], symlinks included (Node realpaths the main module URL,
+// so an unresolved path through a symlink never matched).
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const report = runAudit();
 
-  // A registry that cannot answer the audit request must not be read as a clean tree, and blocking
-  // every merge while npm's audit endpoint is down (or being retired) is worse than the risk of a
-  // missed advisory for the duration. Skip loudly instead: the gate resumes the moment the endpoint
-  // answers, and a working audit still fails on any unexcused high or critical.
+  // A registry that cannot answer the audit request must not be read as a clean tree. On a merge
+  // path this step skips loudly rather than failing while npm's audit endpoint is down (or being
+  // retired). That keeps the root step from failing, not the audit job green: the dashboard audit
+  // step fails closed on the same outage. A required path fails. See unavailableOutcome.
   if (auditUnavailable(report)) {
-    console.warn(
-      `check:audit SKIPPED: npm audit endpoint is unavailable after a retry (${report?.error?.summary ?? 'no report'}). ` +
-        'Advisories were not checked this run.',
-    );
-    process.exit(0);
+    const outcome = unavailableOutcome(report?.error?.summary ?? 'no report');
+    for (const line of outcome.lines) console.log(line);
+    process.exit(outcome.exitCode);
   }
 
   const errors = evaluate(report);

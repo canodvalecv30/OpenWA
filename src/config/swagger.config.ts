@@ -1,4 +1,11 @@
-import { DocumentBuilder, OpenAPIObject } from '@nestjs/swagger';
+import {
+  DocumentBuilder,
+  type OpenAPIObject,
+  type OperationObject,
+  type ReferenceObject,
+  type ResponseObject,
+  type SchemaObject,
+} from '@nestjs/swagger';
 
 /**
  * Security scheme name for the API key, used both when defining the scheme and
@@ -91,6 +98,94 @@ export function exemptPublicOperations(document: OpenAPIObject): OpenAPIObject {
   return document;
 }
 
+/** Component name of the error body every API-key operation answers with. */
+export const ERROR_RESPONSE_SCHEMA = 'ErrorResponse';
+
+const ERROR_RESPONSE: SchemaObject = {
+  type: 'object',
+  required: ['statusCode', 'message'],
+  properties: {
+    statusCode: { type: 'integer', description: 'The HTTP status, mirrored from the status line.' },
+    message: {
+      oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+      description: 'What went wrong. A detailed validation 400 carries one string per rejected field.',
+    },
+    error: {
+      type: 'string',
+      description:
+        'The status reason phrase, e.g. "Not Found". Not always present: a body built from a bare message ' +
+        'omits it, including an unexpected 500, an oversized-body 413, the throttler 429, ' +
+        'a production validation 400, and some errors raised with a plain message, such as the session start 504.',
+    },
+    code: {
+      type: 'string',
+      description:
+        'A stable machine-readable reason, on some errors only: SESSION_NAME_TEARDOWN_PENDING (409), ' +
+        'SESSION_STOP_INCOMPLETE, SESSION_LOGOUT_INCOMPLETE and SESSION_FORCE_KILL_INCOMPLETE (502), ' +
+        'SEND_PACING_LIMITED (429), ' +
+        'ENGINE_PAGE_ERROR (500, whatsapp-web.js: WhatsApp Web threw inside the page during a send or status post), ' +
+        'IMPORT_ALREADY_RUNNING, EXPORT_IN_PROGRESS, IMPORT_WOULD_ORPHAN_ENGINES and IMPORT_NESTED_TRANSACTION (409).',
+    },
+    retryAfterSeconds: {
+      type: 'integer',
+      description: 'With SEND_PACING_LIMITED: seconds until the session accepts sends again.',
+    },
+    pageError: {
+      type: 'object',
+      required: ['name', 'message'],
+      properties: { name: { type: 'string' }, message: { type: 'string' } },
+      description: 'With ENGINE_PAGE_ERROR: the name and message WhatsApp Web threw.',
+    },
+    build: {
+      type: 'string',
+      description: 'With ENGINE_PAGE_ERROR, when the page could read it: the running WhatsApp Web build.',
+    },
+  },
+};
+
+/** The auth guard's 403, answered before any handler runs. */
+const AUTH_FORBIDDEN = "API key's role, session or chat scope, or IP allow-list does not allow this operation";
+
+/**
+ * Give every API-key operation its auth refusals, a 400 when it takes a body (the JSON parser and the
+ * global ValidationPipe refuse one before the handler runs), and a schema for its error bodies. An
+ * operation with its own `security` (the @Public routes and the metrics scrape) is skipped: those
+ * answer their own shapes, such as the health probe's 503. Existing responses keep their descriptions,
+ * except that an operation's own 403 also gets the auth refusal, which the guard can answer there
+ * too. Idempotent. Mutates and returns the document.
+ */
+export function documentErrorResponses(document: OpenAPIObject): OpenAPIObject {
+  document.components ??= {};
+  document.components.schemas ??= {};
+  document.components.schemas[ERROR_RESPONSE_SCHEMA] = ERROR_RESPONSE;
+  for (const item of Object.values(document.paths ?? {})) {
+    for (const method of HTTP_METHODS) {
+      const op = (item as Record<string, OperationObject | undefined>)[method];
+      if (!op || op.security !== undefined) continue;
+      op.responses['401'] ??= { description: 'The API key is missing, unknown, revoked, or expired' };
+      if (op.requestBody) {
+        op.responses['400'] ??= {
+          description: 'The body is malformed, fails validation, or carries a field the DTO does not declare',
+        };
+      }
+      const forbidden = op.responses['403'];
+      if (!forbidden) {
+        op.responses['403'] = { description: `The ${AUTH_FORBIDDEN}` };
+      } else if (!('$ref' in forbidden) && !forbidden.description.includes(AUTH_FORBIDDEN)) {
+        forbidden.description = `${forbidden.description.replace(/\.?$/, '.')} Also returned when the ${AUTH_FORBIDDEN}.`;
+      }
+      for (const [status, response] of Object.entries(op.responses) as [string, ResponseObject | ReferenceObject][]) {
+        if (Number(status) >= 400 && !('$ref' in response) && !response.content) {
+          response.content = {
+            'application/json': { schema: { $ref: `#/components/schemas/${ERROR_RESPONSE_SCHEMA}` } },
+          };
+        }
+      }
+    }
+  }
+  return document;
+}
+
 /**
  * Builds the OpenAPI document configuration for the OpenWA API.
  */
@@ -101,20 +196,28 @@ export function createSwaggerConfig(): Omit<OpenAPIObject, 'paths'> {
   return (
     new DocumentBuilder()
       .setTitle('OpenWA API')
-      // Two refusals are issued by middleware BEFORE routing, so they apply to every operation
+      // Three refusals are issued by middleware BEFORE routing, so they apply to every operation
       // below and cannot be expressed as a per-operation @ApiResponse without repeating them 187
       // times. Documenting them here keeps the contract honest for clients that would otherwise
       // meet an undocumented status.
       .setDescription(
         'Open Source WhatsApp API Gateway - Free, Self-Hosted HTTP API\n\n' +
-          '**Gateway-wide responses.** Two statuses are returned by middleware before routing, ' +
+          '**Gateway-wide responses.** Three statuses are returned by middleware before routing, ' +
           'so any operation can emit them:\n\n' +
           '- `415 Unsupported Media Type` — the request body carries a `Content-Encoding` other ' +
           'than `identity`. The aggregate in-flight body cap counts wire bytes, so a compressed ' +
           'body would be admitted on its compressed size and then inflated past the memory it is ' +
           'meant to bound. Send the body uncompressed.\n' +
+          '- `413 Payload Too Large`: the declared `Content-Length` is more than the gateway could ' +
+          'hold in flight for this caller even when idle. The body is not read; retrying it unchanged ' +
+          'cannot succeed.\n' +
           '- `503 Service Unavailable` with `Retry-After` — the gateway already has too much ' +
-          'request body data in flight. The body is not read; retry after the given delay.',
+          'request body data in flight. The body is not read; retry after the given delay.\n\n' +
+          'Every operation that takes an API key can also answer `429 Too Many Requests` (the per-IP ' +
+          'rate-limit windows; with send pacing on, a send can also be refused with `code: ' +
+          'SEND_PACING_LIMITED` and `retryAfterSeconds`) and `500 Internal Server Error` (an ' +
+          'unexpected failure, or `code: ENGINE_PAGE_ERROR` when WhatsApp Web threw inside the page ' +
+          'during a whatsapp-web.js send or status post). Error bodies follow the `ErrorResponse` schema.',
       )
       .setVersion(version)
       .addApiKey({ type: 'apiKey', name: 'X-API-Key', in: 'header' }, API_KEY_SECURITY_SCHEME)

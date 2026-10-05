@@ -83,12 +83,12 @@ func loggingMiddleware(log Logger) Middleware {
 			dur := time.Since(start)
 			if err != nil {
 				log.Log(req.Context(), LevelError, "openwa request failed",
-					"method", req.Method, "url", req.URL.String(),
+					"method", req.Method, "url", req.URL.Redacted(),
 					"duration_ms", dur.Milliseconds(), "error", err.Error())
 				return resp, err
 			}
 			log.Log(req.Context(), LevelDebug, "openwa request",
-				"method", req.Method, "url", req.URL.String(),
+				"method", req.Method, "url", req.URL.Redacted(),
 				"status", resp.StatusCode, "duration_ms", dur.Milliseconds())
 			return resp, nil
 		})

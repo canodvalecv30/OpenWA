@@ -29,6 +29,10 @@ export class RedriveController {
     type: RedriveResultDto,
   })
   @ApiResponse({
+    status: 404,
+    description: "Session-restricted key: the instance does not exist or is bound outside the key's allowedSessions.",
+  })
+  @ApiResponse({
     status: 409,
     description: 'The instance is disabled or deleted; its dead-lettered deliveries cannot be re-dispatched.',
   })

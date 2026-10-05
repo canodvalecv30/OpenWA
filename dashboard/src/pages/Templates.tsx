@@ -91,10 +91,17 @@ export function Templates() {
   }, [searchTerm, templates]);
   const isSaving = createMutation.isPending || updateMutation.isPending;
 
+  // Select the first session, and again once the selected one is gone (deleted elsewhere): a stale id
+  // matches no option, so the select would show another session while every read and write still
+  // went to the deleted one.
   useEffect(() => {
-    if (!selectedSessionId && sessions.length > 0) {
-      setSelectedSessionId(sessions[0].id);
-    }
+    if (sessions.some(session => session.id === selectedSessionId)) return;
+    const next = sessions[0]?.id ?? '';
+    if (next === selectedSessionId) return;
+    setSelectedSessionId(next);
+    setForm(emptyForm);
+    setEditingTemplate(null);
+    setPreviewValues({});
   }, [selectedSessionId, sessions]);
 
   useEffect(() => {
@@ -244,7 +251,8 @@ export function Templates() {
               />
             </div>
 
-            {loadingTemplates ? (
+            {/* No session selected yet means the first-session effect has not run: the read is still to start. */}
+            {loadingTemplates || !selectedSessionId ? (
               <div className="templates-loading-inline">
                 <Loader2 className="animate-spin" size={24} />
               </div>
@@ -274,7 +282,7 @@ export function Templates() {
             ) : filteredTemplates.length === 0 ? (
               <div className="templates-empty-list compact">
                 <Search size={32} strokeWidth={1.5} />
-                <h3>{t('templates.empty.title')}</h3>
+                <h3>{t('templates.empty.noMatch', 'No templates match your search.')}</h3>
               </div>
             ) : (
               <div className="template-list" role="list">

@@ -105,7 +105,8 @@ class GroupsResource
 
     /**
      * Get group settings. Only the settings the active engine supports are
-     * present — any of {announce, locked, ephemeralSeconds} may be absent.
+     * present: any of {announce, locked, ephemeralSeconds, memberAddMode} may
+     * be absent. memberAddMode is 'all' or 'admins'.
      *
      * @return array<string,mixed>
      */

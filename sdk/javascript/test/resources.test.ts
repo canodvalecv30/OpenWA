@@ -281,6 +281,16 @@ describe('WebhooksResource — exact paths', () => {
     await client(t).webhooks.create('s', { url: 'u', events: ['message.received'], filters });
     expect(t.lastCall!.body).toEqual({ url: 'u', events: ['message.received'], filters });
   });
+
+  it('redriveDeliveryFailures POSTs the filter (or an empty body) to the redrive route', async () => {
+    const result = { redriven: 1, delivered: 1, enqueued: 0, failed: 0, skipped: 0, remaining: 0 };
+    const t = new MockTransport().on('POST', /\/api\/webhooks\/delivery-failures\/redrive$/, { body: result });
+    const c = client(t);
+    await expect(c.webhooks.redriveDeliveryFailures({ sessionId: 's', limit: 10 })).resolves.toEqual(result);
+    expect(t.lastCall!.body).toEqual({ sessionId: 's', limit: 10 });
+    await c.webhooks.redriveDeliveryFailures();
+    expect(t.lastCall!.body).toEqual({});
+  });
 });
 
 describe('StatusResource — nested media bodies', () => {
@@ -461,13 +471,13 @@ describe('HealthResource + auth — exact paths', () => {
       .on('GET', /\/health$/, { body: { status: 'ok', version: '0.7.2' } })
       .on('GET', /\/health\/live$/, { body: { status: 'ok' } })
       .on('GET', /\/health\/ready$/, { body: { status: 'ok', details: {} } })
-      .on('POST', /\/auth\/validate$/, { body: { valid: true, role: 'admin' } });
+      .on('POST', /\/auth\/validate$/, { body: { valid: true, role: 'admin', scoped: true } });
     const c = client(t);
     await c.health.check();
     expect(t.lastCall!.url).toBe('http://x/api/health');
     await c.health.live();
     await c.health.ready();
-    await c.auth();
+    expect((await c.auth()).scoped).toBe(true);
     expect(t.lastCall!.method).toBe('POST');
     expect(t.lastCall!.url).toBe('http://x/api/auth/validate');
   });

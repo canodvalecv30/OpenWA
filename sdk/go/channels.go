@@ -38,7 +38,10 @@ func (s *ChannelsService) Messages(ctx context.Context, sessionID, channelID str
 func (s *ChannelsService) Create(ctx context.Context, sessionID string, body CreateChannelRequest) (*ChannelRecord, error) {
 	var out ChannelRecord
 	err := s.client.do(ctx, "POST", s.base(sessionID), nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Delete destroys a channel this account owns. Irreversible, and every subscriber loses it.
@@ -48,14 +51,20 @@ func (s *ChannelsService) Create(ctx context.Context, sessionID string, body Cre
 func (s *ChannelsService) Delete(ctx context.Context, sessionID, channelID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/delete", nil, nil, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Mute mutes or unmutes a channel's notifications. The subscription is untouched either way.
 func (s *ChannelsService) Mute(ctx context.Context, sessionID, channelID string, body MuteChannelRequest) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/mute", nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Subscribe subscribes to a channel by invite code. Requires an OPERATOR-level key.

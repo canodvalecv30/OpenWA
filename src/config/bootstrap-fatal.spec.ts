@@ -22,16 +22,28 @@ describe('runBootstrapOrExit', () => {
     const err = Object.assign(new Error('listen EADDRINUSE: address already in use 0.0.0.0:2785'), {
       code: 'EADDRINUSE',
     });
-    const closeApp = jest.fn().mockResolvedValue(undefined);
+    const order: string[] = [];
+    const closeApp = jest.fn(async () => {
+      // A macrotask, not a microtask: an exit that does not await the teardown would land first.
+      await new Promise(resolve => setImmediate(resolve));
+      order.push('close');
+    });
 
-    await runBootstrapOrExit(() => Promise.reject(err), { ...deps, closeApp });
+    await runBootstrapOrExit(() => Promise.reject(err), {
+      ...deps,
+      closeApp,
+      exit: code => {
+        order.push('exit');
+        exitCalls.push(code);
+      },
+    });
 
     expect(exitCalls).toEqual([1]);
     expect(logs).toHaveLength(1);
     expect(logs[0][0]).toMatch(/Fatal error during bootstrap/);
     expect(logs[0][1]).toContain('EADDRINUSE'); // err.stack
     // Teardown ran BEFORE the exit so sessions/connections don't outlive the process.
-    expect(closeApp).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['close', 'exit']);
   });
 
   it('never logs, tears down, or exits on a successful boot', async () => {
@@ -56,7 +68,8 @@ describe('runBootstrapOrExit', () => {
 
   it('still exits(1) when the teardown hangs past the bound', async () => {
     const { deps, exitCalls } = makeDeps();
-    const closeApp = jest.fn(() => new Promise<void>(resolve => setTimeout(resolve, 250)));
+    // Never settles: without the bound the await below would hang until Jest's own timeout.
+    const closeApp = jest.fn(() => new Promise<void>(() => {}));
 
     await runBootstrapOrExit(() => Promise.reject(new Error('boom')), { ...deps, closeApp, closeTimeoutMs: 5 });
 

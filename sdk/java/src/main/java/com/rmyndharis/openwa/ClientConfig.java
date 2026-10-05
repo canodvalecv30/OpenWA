@@ -40,7 +40,13 @@ public final class ClientConfig {
         this.baseUrl = url;
         this.apiKey = key;
         this.timeout = b.timeout != null ? b.timeout : Duration.ofSeconds(30);
-        this.defaultHeaders = b.defaultHeaders != null ? b.defaultHeaders : Map.of();
+        // Copied so a later change to the caller's map cannot alter the headers of this client, and so
+        // a null key or value fails here instead of as a raw NullPointerException on the first request.
+        try {
+            this.defaultHeaders = b.defaultHeaders != null ? Map.copyOf(b.defaultHeaders) : Map.of();
+        } catch (NullPointerException e) {
+            throw new IllegalArgumentException("OpenWAClient: defaultHeaders must not contain null keys or values");
+        }
         this.transport = b.transport;
     }
 

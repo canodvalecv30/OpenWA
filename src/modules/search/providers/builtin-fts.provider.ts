@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotImplementedException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, NotImplementedException, OnModuleInit } from '@nestjs/common';
+import { createLogger } from '../../../common/services/logger.service';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import type { MessageType } from '../../../engine/interfaces/whatsapp-engine.interface';
@@ -38,7 +39,7 @@ type PlaceholderFn = () => string;
 export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
   readonly id = 'builtin-fts';
   readonly label = 'Built-in database full-text search';
-  private readonly logger = new Logger('BuiltInFtsProvider');
+  private readonly logger = createLogger('BuiltInFtsProvider');
 
   // OpenWA has two TypeORM connections (main: auth/audit SQLite, data: messages). Bind explicitly to
   // 'data' so the provider queries the connection that owns the `messages` table + the FTS migration,
@@ -46,10 +47,10 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
   constructor(@InjectDataSource('data') private readonly dataSource: DataSource) {}
 
   /**
-   * Self-heals the FTS schema at bootstrap so search works under DATABASE_SYNCHRONIZE=true (the dev
-   * compose and the zero-config first-boot default), where TypeORM creates the `messages` table from
-   * the entity but NEVER runs migrations — so the migration that establishes `messages_fts` /
-   * `body_ts` is skipped and search would 501 on a fresh SQLite box. This re-applies the same
+   * Self-heals the FTS schema at bootstrap so search works under an opted-in DATABASE_SYNCHRONIZE=true
+   * on SQLite (docker-compose.dev.yml sets it; the default is migrations), where TypeORM creates the
+   * `messages` table from the entity but NEVER runs migrations — so the migration that establishes
+   * `messages_fts` is skipped and search would 501 on a fresh SQLite box. This re-applies the same
    * idempotent DDL as the migration (1782400000000-AddMessagesFts); `IF NOT EXISTS` / `IF NOT` guards
    * make it a no-op once the schema exists, and on Postgres no DDL is issued at all when the catalog
    * already holds the column and index, so migrations-based deployments take no table lock. Probes the
@@ -137,9 +138,10 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
    *     and Postgres reads the catalog and issues no DDL, because `ALTER TABLE ... IF NOT EXISTS`
    *     still queues for ACCESS EXCLUSIVE on `messages` before it finds the column, stalling every
    *     message read and write behind any open transaction.
-   *   - synchronize-based deployments (dev compose / zero-config first boot): migrations are skipped,
-   *     so this is what actually brings the index up at boot. Without it search 501s on every fresh
-   *     SQLite box, contradicting docs/26's "zero-config, on by default" promise.
+   *   - synchronize-based SQLite deployments (DATABASE_SYNCHRONIZE=true, e.g. the dev compose):
+   *     migrations are skipped, so this is what actually brings the index up at boot. Without it
+   *     search 501s on every such box. Postgres refuses synchronize at boot, so the Postgres
+   *     branch only repairs a schema whose FTS migration objects are missing.
    * Returns true when the index is usable, false when the SQLite build lacks FTS5 (no schema left
    * behind — the route 501s cleanly via ensureFts).
    */
@@ -183,6 +185,21 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     // were never added, and SQLite rejects the whole statement — so ordinary edits and deletes on
     // them fail, not merely searches. Reads `d."rowid"` rather than `d."id"`: same query plan,
     // without depending on the shadow table's column naming.
+    //
+    // A rowid-level gap check cannot see a renumbered table. TypeORM synchronize rebuilds `messages`
+    // on SQLite by copying the rows without their implicit rowid, so after any delete the survivors
+    // get new rowids and the index entries under them describe other messages. The triggers keep
+    // `docsize` in step with `messages`, so an index row with no message behind it only appears after
+    // such a rebuild, and any rebuild that renumbered a row leaves the old highest rowid behind. Drop
+    // the whole index then and let the gap repair below re-add every row.
+    const orphanRow: unknown[] = await this.dataSource.query(
+      `SELECT EXISTS(SELECT 1 FROM "messages_fts_docsize" d
+         WHERE NOT EXISTS (SELECT 1 FROM "messages" m WHERE m."rowid" = d."rowid")) AS orphan`,
+    );
+    if (Number((orphanRow as Array<{ orphan: number }>)[0]?.orphan)) {
+      this.logger.warn('FTS index holds rows the messages table no longer has; re-indexing every message');
+      await this.dataSource.query(`INSERT INTO "messages_fts"("messages_fts") VALUES ('delete-all')`);
+    }
     const gapRow: unknown[] = await this.dataSource.query(
       `SELECT EXISTS(SELECT 1 FROM "messages" m WHERE m."body" IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM "messages_fts_docsize" d WHERE d."rowid" = m."rowid")) AS missing`,
@@ -251,7 +268,7 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
     // Reflects FTS availability (not just raw connectivity): a non-FTS5 build reports unhealthy here
-    // so /health and the registry surface the true state. DB errors still map to { ok: false }.
+    // for callers of health(). DB errors still map to { ok: false }.
     try {
       const ok = await this.probeFts();
       return { ok, detail: ok ? undefined : 'full-text index absent' };
@@ -376,11 +393,11 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     // (WhatsApp messageTimestamp — see the inbound mappers in the engine adapters). Bind ms→seconds
     // at the boundary, otherwise `seconds >= ms` is false for every modern row and dateFrom/dateTo
     // silently exclude all results.
-    if (q.dateFrom) {
+    if (q.dateFrom != null) {
       where.push(`${prefix}"timestamp" >= ${ph()}`);
       params.push(Math.floor(q.dateFrom / 1000));
     }
-    if (q.dateTo) {
+    if (q.dateTo != null) {
       where.push(`${prefix}"timestamp" <= ${ph()}`);
       params.push(Math.floor(q.dateTo / 1000));
     }

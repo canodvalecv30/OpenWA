@@ -275,8 +275,8 @@ describe('ScopeBindingService.onApplicationBootstrap reconciliation', () => {
         list: jest.fn().mockResolvedValue([]),
       } as unknown as PluginInstanceService;
       await new ScopeBindingService(instances, loader, audit, sessionRows).onApplicationBootstrap();
-      // The wildcard activation must survive in both row orders ('*' subsumes the concrete scope).
-      expect(plugin.activeSessions).toContain('*');
+      // Both row orders end at exactly ['*'] ('*' subsumes the concrete scope).
+      expect(plugin.activeSessions).toEqual(['*']);
     }
   });
 });
@@ -360,6 +360,19 @@ describe('ScopeBindingService.applyScopeBinding retires an instance without leak
     const { svc, setPluginSessions } = build();
     await svc([row('a', true, 'sess-2')]).applyScopeBinding('chatwoot', 'sess-1', {}, false);
     expect(setPluginSessions).toHaveBeenCalledWith('chatwoot', []);
+  });
+
+  // Activating a wildcard overwrote activeSessions with ['*'], so the concrete scopes still-enabled
+  // siblings bind are gone from it; retiring the wildcard must put them back, not leave the plugin on [].
+  it('restores the scopes of enabled concrete siblings when the last wildcard is retired', async () => {
+    const { svc, setPluginSessions } = build(['*']);
+    await svc([row('a', true, 'sess-1'), row('b', false, null), row('c', false, 'sess-3')]).applyScopeBinding(
+      'chatwoot',
+      null,
+      {},
+      false,
+    );
+    expect(setPluginSessions).toHaveBeenCalledWith('chatwoot', ['sess-1']);
   });
 
   // Activation is untouched: it must still write the instance's config, not an empty slice.

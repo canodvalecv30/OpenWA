@@ -142,6 +142,19 @@ describe('AutomationRulesService', () => {
       expect(sends).toEqual([{ sessionId: 'sessA', chatId: '628111@c.us', text: 'welcome!' }]);
     });
 
+    // The chat id is a third party's number: the reply line carries it as debug metadata only.
+    it('logs the reply at debug and keeps the chat id out of info-level lines', async () => {
+      await service.create('sessA', { name: 'any', replyText: 'hi' });
+      const logger = (service as unknown as { logger: { log: () => void; debug: () => void } }).logger;
+      const log = jest.spyOn(logger, 'log');
+      const debug = jest.spyOn(logger, 'debug').mockImplementation(() => undefined);
+
+      await service.evaluateInbound('sessA', inbound());
+
+      expect(debug).toHaveBeenCalledWith('Automation rule replied', expect.objectContaining({ chatId: '628111@c.us' }));
+      expect(JSON.stringify(log.mock.calls)).not.toContain('628111');
+    });
+
     it('a rule without conditions matches every inbound message', async () => {
       await service.create('sessA', { name: 'all', replyText: 'ack' });
 
@@ -223,6 +236,31 @@ describe('AutomationRulesService', () => {
       expect(sends.map(s => s.text)).toEqual(['first-reply']);
     });
 
+    it.each([
+      ['a null condition', { conditions: [null] }, inbound()],
+      ['a non-list conditions value on a broadcast message', { conditions: 'x' }, inbound({ kind: 'broadcast' })],
+      ['a non-list conditions value', { conditions: 'x' }, inbound()],
+      ['an object as the conditions value', { conditions: {} }, inbound()],
+      ['a string as the conditions object', 'x', inbound()],
+      ['an array as the conditions object', [], inbound()],
+    ])('a rule with %s is skipped on its own; later rules still answer', async (_label, conditions, message) => {
+      const broken = await service.create('sessA', { name: 'broken', replyText: 'broken-reply', cooldownSeconds: 0 });
+      // Stored the way a restore writes it: the DTO would refuse this value.
+      await ds
+        .getRepository(AutomationRule)
+        .update(broken.id, { conditions: conditions as never, createdAt: new Date('2026-01-01T00:00:00Z') });
+      await service.create('sessA', {
+        name: 'valid',
+        replyText: 'valid-reply',
+        cooldownSeconds: 0,
+        conditions: { conditions: [{ field: 'kind', operator: 'is', value: ['individual', 'broadcast'] }] },
+      });
+
+      await expect(service.evaluateInbound('sessA', message)).resolves.toBeUndefined();
+
+      expect(sends.map(s => s.text)).toEqual(['valid-reply']);
+    });
+
     it('cooldown: the same rule stays quiet in the same chat, other chats unaffected', async () => {
       await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 300 });
 
@@ -231,6 +269,66 @@ describe('AutomationRulesService', () => {
       await service.evaluateInbound('sessA', inbound({ id: 'wamid.3', chatId: '628333@c.us', from: '628333@c.us' }));
 
       expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '628333@c.us']);
+    });
+
+    it('cooldown: an edited cooldownSeconds governs a quiet period that is already running', async () => {
+      const rule = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 300 });
+      const start = Date.now();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      try {
+        await service.evaluateInbound('sessA', inbound());
+        await service.update('sessA', rule.id, { cooldownSeconds: 1 });
+        now.mockReturnValue(start + 2_000);
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.2' }));
+      } finally {
+        now.mockRestore();
+      }
+
+      expect(sends).toHaveLength(2);
+    });
+
+    it('cooldown: a raised cooldownSeconds survives the sweep of a large cooldown map', async () => {
+      const rule = await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 60 });
+      const start = Date.now();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      try {
+        await service.evaluateInbound('sessA', inbound());
+        await service.update('sessA', rule.id, { cooldownSeconds: 3600 });
+        // Pad the map past the sweep threshold with copies of the live entry.
+        const cooldowns = (service as unknown as { cooldowns: Map<string, unknown> }).cooldowns;
+        const entry = cooldowns.values().next().value;
+        for (let i = 0; i < 10_000; i++) cooldowns.set(`pad:${i}`, entry);
+        now.mockReturnValue(start + 120_000);
+        // Another chat fires, which sweeps the map before it enters its own cooldown.
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.2', chatId: '628333@c.us', from: '628333@c.us' }));
+        await service.evaluateInbound('sessA', inbound({ id: 'wamid.3' }));
+      } finally {
+        now.mockRestore();
+      }
+
+      expect(sends.map(s => s.chatId)).toEqual(['628111@c.us', '628333@c.us']);
+    });
+
+    it('cooldown: a sweep that frees nothing is not repeated on the next reply', async () => {
+      await service.create('sessA', { name: 'all', replyText: 'ack', cooldownSeconds: 60 });
+      const cooldowns = (service as unknown as { cooldowns: Map<string, number> }).cooldowns;
+      for (let i = 0; i < 10_000; i++) cooldowns.set(`pad:${i}`, Date.now());
+      const entries = cooldowns[Symbol.iterator].bind(cooldowns);
+      let scans = 0;
+      cooldowns[Symbol.iterator] = () => {
+        scans++;
+        return entries();
+      };
+
+      for (let i = 0; i < 5; i++) {
+        await service.evaluateInbound(
+          'sessA',
+          inbound({ id: `wamid.${i}`, chatId: `62800${i}@c.us`, from: `62800${i}@c.us` }),
+        );
+      }
+
+      expect(sends).toHaveLength(5);
+      expect(scans).toBe(1);
     });
 
     it('cooldownSeconds 0 disables the quiet period', async () => {

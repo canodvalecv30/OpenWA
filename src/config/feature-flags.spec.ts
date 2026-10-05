@@ -89,12 +89,13 @@ describe('feature-flags', () => {
   // service, never on a datastore/proxy service.
   describe('bundled compose forwards the plugin redirect policy', () => {
     // Extract the body of one top-level service block. Compose indents a service's keys two spaces
-    // under the `name:` key, so the block runs from `  serviceName:` to the next top-level key.
+    // under the `name:` key, so the block runs from `  serviceName:` to the next sibling service or
+    // top-level key, whichever comes first.
     function extractTopLevelService(compose: string, serviceName: string): string {
       const start = compose.indexOf(`\n  ${serviceName}:\n`);
       if (start === -1) throw new Error(`service ${serviceName} not found`);
       const rest = compose.slice(start + 1);
-      const next = rest.search(/\n[a-z]/);
+      const next = rest.search(/\n(?: {2})?[a-z]/);
       return next === -1 ? rest : rest.slice(0, next);
     }
 
@@ -104,6 +105,8 @@ describe('feature-flags', () => {
     ])('%s forwards the redirect flag on service %s', (file, serviceName) => {
       const compose = fs.readFileSync(path.join(__dirname, '../../', file), 'utf8');
       const service = extractTopLevelService(compose, serviceName);
+      // The block holds only this service: no sibling service header may follow its own.
+      expect(service.split('\n').filter(line => /^ {2}[a-z]/.test(line))).toEqual([`  ${serviceName}:`]);
       expect(service).toContain(
         'PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS=${PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS:-false}',
       );

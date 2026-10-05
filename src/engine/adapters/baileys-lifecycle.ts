@@ -15,6 +15,7 @@ import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error'
 import { createProxyDispatcher, hasUnauthenticatableSocks4Credentials } from '../../common/security/proxy-dispatcher';
 import { type createLogger } from '../../common/services/logger.service';
 import { BaileysAdapterConfig } from '../types/baileys.types';
+import { useAtomicMultiFileAuthState } from './baileys-auth-store';
 import { createBaileysLogger } from './baileys-logger';
 import { BaileysVersionResolver } from './baileys-version-resolver';
 import { unappliedPatches, unappliedPatchesMessage } from './engine-patch-status';
@@ -153,6 +154,8 @@ export interface BaileysLifecycleHost {
   handleGroupJoinRequest: BaileysEvents['handleGroupJoinRequest'];
   handleCallEvents: BaileysEvents['handleCallEvents'];
   handlePresenceUpdate: BaileysEvents['handlePresenceUpdate'];
+  /** Drop the store writes of messages still being processed; called before an unlink wipes the store. */
+  fenceStoredWrites: BaileysEvents['fenceStoredWrites'];
   captureHistoryMessages: BaileysHistory['captureHistoryMessages'];
   /** Backfill names the initial sync skipped (runs on connection 'open'). */
   hydrateNames: BaileysHistory['hydrateNames'];
@@ -296,7 +299,7 @@ export class BaileysLifecycle {
       }
     }
     const b = await this.loadLib();
-    const { state, saveCreds } = await b.useMultiFileAuthState(this.host.authPath);
+    const { state, saveCreds } = await useAtomicMultiFileAuthState(this.host.authPath, b, this.host.logger);
     const version = await this.versionResolver.resolve(b, { dispatcher: this.fetchDispatcher() });
     // BaileysLogger matches ILogger exactly; cast needed because the module resolves the type
     // through a deep import path that TypeScript does not auto-unify here. Shared by the key
@@ -889,6 +892,7 @@ export class BaileysLifecycle {
       // Acknowledged. End/null the captured socket, clear live call handles, and drop to
       // DISCONNECTED before the awaited cleanup so no send/path observes a half-torn-down socket.
       this.localSocketShutdown(sourceSock);
+      this.host.fenceStoredWrites();
       await this.host.config.messageStore?.clearSession(this.host.config.dbSessionId).catch(() => undefined);
       await this.host.config.chatStateStore?.clearSession(this.host.config.sessionId).catch(() => undefined);
       // Wipe the multi-file auth dir so a fresh link starts clean — stale creds would otherwise be
@@ -954,6 +958,8 @@ export class BaileysLifecycle {
     // Cached call handles die with the connection — drop them so a later rejectCall() reports
     // not-found (404) instead of acting on a dead socket (mirrors disconnect/logout/destroy).
     this.host.liveCalls.clear();
+    // A message still being processed must not recreate a row of the unlinked account after the wipe below.
+    this.host.fenceStoredWrites();
     void dead?.end(undefined);
 
     const cleanup = (async (): Promise<void> => {

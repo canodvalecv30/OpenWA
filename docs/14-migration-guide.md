@@ -125,6 +125,28 @@ curl -X POST 'http://localhost:2785/api/infra/import-data' \
 > (`EXPORT_INLINE_MEDIA_BUDGET_BYTES`, 8 MiB by default); for a byte-exact copy including media, use
 > `scripts/backup.sh`, which snapshots the database file itself.
 
+> [!IMPORTANT]
+> **The import is one request, bounded by the target's `BODY_SIZE_LIMIT`** (default `25mb`); a larger
+> file is refused with `413`, as is one above half the in-flight body budget (twice `BODY_SIZE_LIMIT`
+> at the default budget). Retrying does not help either way; raise the limit as below, which clears
+> both because the default budget scales with it. Compare
+> `ls -l data-backup.json` with that limit before Step 4. If the file is bigger, set `BODY_SIZE_LIMIT`
+> on the target to at least its size (for example `50mb`) and restart, since the value is read at
+> boot; put it back afterwards, because it applies to every route.
+> An explicit `INFLIGHT_BODY_BUDGET_BYTES` must stay at least twice the file size, because one caller
+> may hold only half of it; a body above that share is refused with `413`. `EXPORT_INLINE_MEDIA_BUDGET_BYTES`
+> bounds inline media only, so a long text history can still pass the limit and needs the memory to
+> parse it on both ends.
+>
+> **Webhook and proxy credentials do not travel.** Webhooks are restored without their `secret` and
+> custom `headers`, so deliveries go unsigned until you set them again with
+> `PUT /api/sessions/:sessionId/webhooks/:id`. A session `proxyUrl` keeps its host but loses its
+> `user:pass`, so a proxy that needs authentication fails the session's next start until you re-enter
+> it with `PATCH /api/sessions/:sessionId/proxy`.
+> Plugin instances are the exception: their ingress `secret`, `verifyToken` and `config` (API tokens
+> included) are exported and restored in plaintext, so treat `data-backup.json` as a secret and delete
+> it after the import.
+
 > [!NOTE]
 > **Session statuses in the backup describe the source host.** An active status (`ready`,
 > `initializing`, ...) is restored as `disconnected` (the import response counts them in a notice),
@@ -206,8 +228,11 @@ curl -X POST 'http://localhost:2785/api/infra/import-data' \
 OpenWA v0.2+ supports migrating media files between storage backends:
 
 On an S3/MinIO backend, confirm `GET /api/infra/status` reports `storage.s3Available: true` before the
-export (S3 to Local) and before the import (Local to S3). While the bucket is unusable these routes
-answer `503` instead of running against the local fallback directory.
+export (S3 to Local) and before the import (Local to S3). Until the bucket has been reachable once since
+boot, these routes answer `503` instead of running against the local fallback directory. `s3Available`
+does not go back to `false` until a restart, so it shows the bucket came up, not that it is still up: an
+outage after that makes the count and the export fail with `500`, and the import answer `imported: false`
+with the entries counted in `failed`.
 
 ```bash
 # Step 1: Check current storage file count
@@ -251,9 +276,23 @@ curl -X POST 'http://localhost:2785/api/infra/storage/import' \
 | Built-in MinIO → External S3 | ✅      | Export → Config → Import |
 | S3 → Local                   | ✅      | Export → Config → Import |
 
+The built-in storage (the compose `minio` profile and the dashboard's built-in option) runs
+`pgsty/silo`, a maintained MinIO fork, on the same `openwa_minio-data` volume. An `openwa-minio`
+container created from the older `minio/minio` image keeps running it until it is recreated: on the
+compose route run `docker compose --profile minio pull minio && docker compose --profile minio up -d minio`;
+for the dashboard built-in run `docker rm -f openwa-minio`, then restart OpenWA or re-save the
+built-in storage. The recreated dashboard built-in container publishes no host ports: the older one
+published the S3 API and console on `127.0.0.1:9000` and `127.0.0.1:9001`, and OpenWA reaches the new
+one over the Docker network alone. For host access to either, run storage through the compose `minio`
+profile, which still publishes both on loopback. The compose `minio` service no longer starts without `S3_ACCESS_KEY_ID` and
+`S3_SECRET_ACCESS_KEY` in the `.env` next to `docker-compose.yml`: a container that ran with neither
+set used `minioadmin`/`minioadmin`, so set them to the pair OpenWA uses before recreating it. If
+OpenWA uses the dashboard built-in storage, drop the `minio`/`full` profile and take the dashboard
+route instead. The volume and its media are kept either way.
+
 ### Redis Migration (Cache)
 
-Redis in OpenWA holds only **ephemeral** state: TTL-based cache entries, BullMQ jobs (see below), and — when `REDIS_ENABLED` — the rate-limit hit counters. Cache data automatically regenerates from the database.
+Redis in OpenWA holds only **ephemeral** state: TTL-based cache entries, BullMQ jobs (see below), and — when `REDIS_ENABLED` — the rate-limit hit counters. No request reads the cache, so there is nothing to migrate.
 
 **No migration API needed** - just change configuration:
 
@@ -265,6 +304,7 @@ REDIS_HOST=your-redis-host.com
 REDIS_PORT=6379
 REDIS_USERNAME=optional
 REDIS_PASSWORD=optional
+REDIS_TLS=false          # true for a managed Redis that requires TLS
 ```
 
 > Setting `REDIS_BUILTIN` in `.env` **pins** it: the env value wins, so the dashboard's built-in
@@ -272,16 +312,20 @@ REDIS_PASSWORD=optional
 > whose configuration lives in `.env` — but if you manage datastores from the dashboard, leave the
 > key unset (as the shipped templates do) and set only the connection details above. The same holds
 > for `POSTGRES_BUILTIN` and `MINIO_BUILTIN`.
+>
+> This applies to a bare-metal install that reads the project `.env`. Compose does not forward
+> `REDIS_BUILTIN` (nor `POSTGRES_BUILTIN` or `MINIO_BUILTIN`), so on compose clear "Use Built-in Redis
+> Container" in Dashboard > Infrastructure (or set `REDIS_BUILTIN=false` in `data/.env.generated`), and
+> put only the forwarded `REDIS_ENABLED`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`,
+> `REDIS_PASSWORD`, `REDIS_TLS`, `REDIS_CONNECT_TIMEOUT_MS` and `REDIS_CACHE_DB` in the `.env` next
+> to `docker-compose.yml`.
 
-| Scenario                  | Support | Notes                                      |
-| ------------------------- | ------- | ------------------------------------------ |
-| Built-in → External Redis | ✅      | Config change only                         |
-| External → Built-in Redis | ✅      | Config change only                         |
-| Enable → Disable Redis    | ✅      | Cache no-ops; reads fall through to the DB |
-| Disable → Enable Redis    | ✅      | Cache rebuilds automatically               |
-
-> [!TIP]
-> **Cache Warm-up**: After switching Redis instances, the cache will automatically rebuild as requests come in. No data migration is necessary.
+| Scenario                  | Support | Notes                              |
+| ------------------------- | ------- | ---------------------------------- |
+| Built-in → External Redis | ✅      | Config change only                 |
+| External → Built-in Redis | ✅      | Config change only                 |
+| Enable → Disable Redis    | ✅      | Cache no-ops (no request reads it) |
+| Disable → Enable Redis    | ✅      | Config change only                 |
 
 ### BullMQ Migration (Queue System)
 
@@ -325,7 +369,7 @@ docker compose up -d
 | ------------ | -------------------- | -------------------------------------------------------- |
 | **Database** | Export/Import JSON   | `/api/infra/export-data`, `/api/infra/import-data`       |
 | **Storage**  | Export/Import tar.gz | `/api/infra/storage/export`, `/api/infra/storage/import` |
-| **Redis**    | Config change only   | N/A (cache auto-rebuilds)                                |
+| **Redis**    | Config change only   | N/A (no request reads the cache)                         |
 | **BullMQ**   | Drain then config    | N/A (wait for empty queues)                              |
 
 ### Migration Script (Legacy)
@@ -664,10 +708,11 @@ ssh new-server "cd $APP_DIR && docker compose stop openwa-api"
 # 2. Copy the auth profile out of the source container, to the target host, and back in.
 #    whatsapp-web.js: /app/data/sessions/session-<id>.
 #    Baileys:         /app/data/baileys/<id> (no "session-" prefix).
+#    rsync refuses two remote ends, so the copy goes through this workstation in two hops.
 ssh old-server "cd $APP_DIR && docker compose cp \
     openwa-api:/app/data/sessions/session-$OLD_ID ./session-$OLD_ID"
-rsync -avz --progress "old-server:$APP_DIR/session-$OLD_ID/" \
-    "new-server:$APP_DIR/session-$NEW_ID/"
+rsync -avz --progress "old-server:$APP_DIR/session-$OLD_ID/" "./session-$OLD_ID/"
+rsync -avz --progress "./session-$OLD_ID/" "new-server:$APP_DIR/session-$NEW_ID/"
 ssh new-server "cd $APP_DIR && docker compose cp \
     ./session-$NEW_ID openwa-api:/app/data/sessions/session-$NEW_ID"
 
@@ -675,7 +720,8 @@ ssh new-server "cd $APP_DIR && docker compose cp \
 ssh new-server "cd $APP_DIR && docker compose start openwa-api"
 ```
 
-Delete the staging copies (`$APP_DIR/session-$OLD_ID` and `$APP_DIR/session-$NEW_ID`) afterwards — they hold
+Delete the staging copies (`$APP_DIR/session-$OLD_ID` and `$APP_DIR/session-$NEW_ID` on the hosts, and
+`./session-$OLD_ID` on the workstation) afterwards — they hold
 live WhatsApp credentials.
 
 #### Method 2: Records via the Infra API + auth state by file copy
@@ -713,25 +759,29 @@ fresh QR code.
 ### Upgrade Matrix
 
 OpenWA is pre-1.0 — every release to date is on the `0.x` line. Under the project's SemVer 0.x policy a
-breaking change bumps the **minor** (`0.10.x` → `0.11.0`) and everything else is a patch, so a minor bump
-is the one that warrants reading the release notes closely.
+breaking change, or anything the CHANGELOG files under **Upgrade notes (behavior changes)**, bumps the
+**minor** (`0.10.x` → `0.11.0`) and everything else is a patch, so a minor bump is the
+one that warrants reading the release notes closely. The rule holds from `0.24.0`: earlier patches did not
+always follow it (`0.23.3` and `0.23.5` to `0.23.7` carried Upgrade notes; section 15.2 of docs/15 lists
+every exception), so an upgrade across one of them needs its CHANGELOG notes read.
 
-| From                  | To                  | Migration Type                                 | Downtime  |
-| --------------------- | ------------------- | ---------------------------------------------- | --------- |
-| `0.x.y`               | `0.x.z` (patch)     | Pending migrations only                        | < 5 min   |
-| `0.x.y`               | `0.(x+1).0` (minor) | Pending migrations + review the breaking notes | 5-15 min  |
-| Several releases back | Current             | Same — the migration chain replays in order    | 10-15 min |
+| From                  | To                  | Migration Type                                                   | Downtime  |
+| --------------------- | ------------------- | ---------------------------------------------------------------- | --------- |
+| `0.x.y`               | `0.x.z` (patch)     | Pending migrations only                                          | < 5 min   |
+| `0.x.y`               | `0.(x+1).0` (minor) | Pending migrations + review the breaking notes and Upgrade notes | 5-15 min  |
+| Several releases back | Current             | Same — the migration chain replays in order                      | 10-15 min |
 
 Upgrades are cumulative: migrations apply in order from wherever the schema currently sits, so jumping
 straight to the current release is supported. There is no required intermediate stop — but read every
 intervening `CHANGELOG.md` entry, because behavior changes are not replayed by migrations.
 
-Schema migrations run automatically at boot on the **data** connection only — always on PostgreSQL,
-and on SQLite unless `DATABASE_SYNCHRONIZE=true` puts the data store in synchronize mode. The Main
-(auth/audit) connection defaults to synchronize instead, and under that default runs no migrations at
-boot. Setting `MAIN_DATABASE_SYNCHRONIZE=false` switches it to its own migration chain, which then
-also runs at boot (`migrationsRun` is the inverse of `synchronize` on both connections); run that
-chain by hand with `npm run migration:run:main`.
+Schema migrations run automatically at boot on both connections. The **data** connection always runs
+them on PostgreSQL, and on SQLite unless `DATABASE_SYNCHRONIZE=true` puts the data store in synchronize
+mode. The Main (auth/audit) connection runs its own `migrations-main/` chain at every boot. The chain is
+idempotent, so a `main.sqlite` that an earlier release built with synchronize is adopted in place (rows
+kept, missing columns added, the ledger written). `MAIN_DATABASE_SYNCHRONIZE=true` only adds a
+synchronize pass after the chain. Run the main chain by hand with `npm run migration:run:main` on a
+source checkout, or `docker compose run --rm openwa-api npm run migration:run:main:prod` in the image.
 
 ### Upgrade Steps
 
@@ -763,7 +813,8 @@ docker compose down
 #    The repo's compose file BUILDS the API image from source:
 git pull && docker compose up -d --build
 #    Deployments pinned to a published image instead (ghcr.io/rmyndharis/openwa:<version>)
-#    bump the tag in their compose file, then: docker compose pull && docker compose up -d
+#    bump the tag and bring the compose file up to the release (git pull for the repo checkout),
+#    then: docker compose pull openwa-api && docker compose up -d --no-build
 
 # 4. Wait for health — every route lives under the /api prefix
 for i in {1..30}; do
@@ -795,41 +846,50 @@ docker compose run --rm openwa-api npm run migration:run:prod
 
 > [!WARNING]
 > Use `migration:run:prod` inside the production image. Plain `npm run migration:run` needs `ts-node` and
-> the TypeScript sources, both stripped by `npm ci --omit=dev` in the released image.
+> the TypeScript sources, both stripped by `npm ci --omit=dev` in the released image. The same holds for
+> the main chain: use `migration:run:main:prod`, not `migration:run:main`.
 
 ### Known Upgrade Hazards
 
-| Release  | Change                                                                                                                                                                                                                                                                                                                       | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `0.23.8` | `POST /api/sessions/:sessionId/messages/send-product` passes the `message:sending` plugin gate (type `product`, input `{ chatId, productId, body }`); a rewritten `chatId` is ignored                                                                                                                                        | Branch on `source`/`type` before reading send-DTO fields; a veto now answers `400`                                                                                                                                                                                                                                                                                                                                                                                             |
-| `0.23.6` | A media URL passed to a send route or to `POST /media/convert/voice` or `.../convert/video`, and the link preview of a text send, are fetched through the egress proxy of the session named in the request instead of leaving from the gateway's own address                                                                 | Set `SESSION_PROXY_URL_FETCH=false` if a session proxy is a WhatsApp-only route that cannot reach arbitrary media hosts                                                                                                                                                                                                                                                                                                                                                        |
-| `0.23.0` | Typed SDK clients: `markRead` and `subscribePresence` each take their own request type instead of the shared `MarkChatRequest`, which now serves `markUnread` alone                                                                                                                                                          | Go and Java: swap the type at both call sites. Typed Python: only at `markRead`, its `subscribePresence` body being structurally identical. JavaScript and PHP need no change; the wire body is unchanged                                                                                                                                                                                                                                                                      |
-| `0.22.0` | Baileys refuses a reply whose quoted id, or a forward whose `fromChatId`, does not name the addressed chat, with the `404` whatsapp-web.js already answered; leaving a group, unsubscribing from a channel and labelling a channel surface WhatsApp's refusal; membership requests for an id that is not a group are refused | Handle a refusal on those six calls, which previously answered `200` whatever happened                                                                                                                                                                                                                                                                                                                                                                                         |
-| `0.22.0` | Typed SDK clients narrow their request bodies: 19 Python request types mark the fields the server requires, and Go and Java type the proxy scheme, call kind, membership method, chat state, pin window and status font as enums                                                                                             | Pass the named constants instead of bare strings or numbers and supply every required field; untyped callers are unaffected                                                                                                                                                                                                                                                                                                                                                    |
-| `0.22.0` | `isReadOnly` on a group answers for the calling account rather than repeating the group setting, and `isMyContact` reflects whether the contact is actually saved                                                                                                                                                            | Re-read either field wherever logic branched on the old value                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `0.22.0` | Images 0.19.0 to 0.21.x ship `scripts/backup.sh` but no PostgreSQL client, so with `DATABASE_TYPE=postgres` step 1 of the upgrade script fails (`pg_dump is not installed`) before anything is stopped, and writes no archive at all                                                                                         | Dump the data store while the database still runs: `docker exec openwa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backups/database.sql` for the built-in service, or `pg_dump` from the host against `DATABASE_HOST` for an external server. Then stop the app and archive the volume as the `0.19.0` row below does. To roll back, extract that archive into the emptied volume and load `database.sql` as 11 - Runbook: Restore from Backup, step 3 shows |
-| `0.21.0` | The ingress route gained a per-client-IP rate bound (`INGRESS_IP_LIMIT`, default 1200 per window) alongside its per-instance one; previously the route had no bound a caller could not walk around by varying the path                                                                                                       | Raise `INGRESS_IP_LIMIT` if one provider IP legitimately drives more than 1200 ingress requests per window                                                                                                                                                                                                                                                                                                                                                                     |
-| `0.20.0` | With `WEBHOOK_SSRF_PROTECT=false`, deliveries no longer follow redirects, and `SSRF_ALLOWED_HOSTS` entries pin to their resolved addresses (must resolve at registration)                                                                                                                                                    | Set `WEBHOOK_SSRF_REDIRECTS=true` for a receiver legitimately behind a 3xx; ensure allowlisted hostnames resolve when the webhook is saved                                                                                                                                                                                                                                                                                                                                     |
-| `0.20.0` | Plugin installs from a URL require a `#sha256=<64 hex>` pin under `NODE_ENV=production` (the compose default)                                                                                                                                                                                                                | Pin catalog URLs, or set `PLUGIN_INSTALL_REQUIRE_PIN=false` to lift the requirement                                                                                                                                                                                                                                                                                                                                                                                            |
-| `0.19.0` | Older images ship no `scripts/backup.sh`, so step 1 of the upgrade script fails on a 0.18.x or earlier container, before anything is stopped                                                                                                                                                                                 | Stop the app and archive the volume: `docker run --rm -v openwa_openwa-data:/data:ro -v "$PWD/backups:/o" alpine tar czf /o/data.tgz -C /data .`, with a `pg_dump` of a PostgreSQL data store. To roll back, extract it into the emptied volume                                                                                                                                                                                                                                |
-| `0.19.0` | Production boot refuses a set `API_MASTER_KEY` shorter than 32 characters                                                                                                                                                                                                                                                    | Strengthen a short key before upgrading; unset stays allowed (first boot generates one)                                                                                                                                                                                                                                                                                                                                                                                        |
-| `0.19.0` | `POST /sessions/:id/messages/send-catalog` and `PUT /api/settings` are removed (both always answered `501`)                                                                                                                                                                                                                  | Drop calls to either; catalog reads and `GET /api/settings` are unchanged                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `0.18.0` | `NODE_ENV` outside `production`/`development`/`test` fails boot with a named error                                                                                                                                                                                                                                           | Set a legal value or unset it (unset remains valid)                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `0.18.0` | Go SDK: `UpdateWebhookRequest.Secret`/`.Headers` and `UpdateTemplateRequest.Header`/`.Footer` become pointers, plus a `ClearFilters` flag                                                                                                                                                                                    | Take the address of a variable to send a clearing value, or leave nil to keep the stored one                                                                                                                                                                                                                                                                                                                                                                                   |
-| `0.18.0` | Two enabled instances of one plugin sharing a session scope no longer collapse onto a single config                                                                                                                                                                                                                          | Move shared keys onto each instance when provisioning a second one on the same session                                                                                                                                                                                                                                                                                                                                                                                         |
-| `0.17.0` | `AUDIT_RETENTION_DAYS` is validated at boot as a plain integer                                                                                                                                                                                                                                                               | Replace `30d`-style values with plain integers (`0`/negatives keep their documented meaning)                                                                                                                                                                                                                                                                                                                                                                                   |
-| `0.17.0` | Plugins must declare a `storage:use` permission to reach `ctx.storage`                                                                                                                                                                                                                                                       | Upgrade the official plugins to the floors listed in the 0.17.0 changelog BEFORE upgrading the gateway                                                                                                                                                                                                                                                                                                                                                                         |
-| `0.16.0` | `POST /sessions/:id/groups` answers `501` on the whatsapp-web.js engine (the page code it used no longer exists)                                                                                                                                                                                                             | Create groups through the Baileys engine                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `0.15.0` | Engine calls during a WhatsApp Web page reload answer a retryable `409` naming the reload (previously `500`, or `200 {success:false}` on six chat-write routes); typed 4xx no longer latch the send breaker                                                                                                                  | Retry the named-reload `409` after the session re-emits `ready`                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `0.14.6` | `POST /groups` returns the summary shape (`participantsCount`, not the detail type), and three SDK response shapes were retyped (`ParticipantsResult`, `ContactRecord.pushName`/fields, `sendProduct` → `{id}`)                                                                                                              | Adjust typed SDK reads; untyped JSON consumers are unaffected                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `0.14.5` | Baileys transport failures (dead socket) propagate as 5xx instead of misclassified `403`/`400`/`404`                                                                                                                                                                                                                         | Treat 5xx as retryable transport failure; keep 4xx handling for genuine refusals                                                                                                                                                                                                                                                                                                                                                                                               |
-| `0.14.0` | Eager status backfill on session ready is opt-in (`STATUS_SEED_ON_READY`, default off)                                                                                                                                                                                                                                       | Set the flag only after validating the account; live status events are unaffected                                                                                                                                                                                                                                                                                                                                                                                              |
-| `0.14.0` | Link previews are opt-in on the Baileys engine                                                                                                                                                                                                                                                                               | Pass `linkPreview: true` or a `customLinkPreview` where a card is wanted                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `0.12.0` | `PUT /api/plugins/:id/sessions` is a full replacement of the global activation set and now requires an **unrestricted ADMIN** key; a session-scoped key is rejected with `403` whatever it sends                                                                                                                             | Switch any automation that drives global plugin activation from a scoped key to an unrestricted ADMIN key. The per-session config override route `PUT /api/plugins/:id/config/:sessionId` is unaffected and stays scoped to the addressed session                                                                                                                                                                                                                              |
-| `0.8.15` | PostgreSQL schemas bootstrapped with `DATABASE_SYNCHRONIZE=true` crash-loop on boot                                                                                                                                                                                                                                          | Self-healing guard migration; see [14.9](#149-troubleshooting-migration-issues) for the large-table window                                                                                                                                                                                                                                                                                                                                                                     |
-| `0.9.0`  | `GET /api/settings` no longer returns the always-zero `general.sessionTimeout`                                                                                                                                                                                                                                               | Remove reads of that field — there is no replacement                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `0.10.3` | Boolean/numeric request fields are parsed strictly (`1`, `yes`, `""` now `400`)                                                                                                                                                                                                                                              | Send canonical JSON values; JSON clients and the SDKs are unaffected                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `0.10.3` | Status posts pass the `message:sending` plugin gate, with no `chatId` in the input                                                                                                                                                                                                                                           | Branch on `source`/`type` before reading `input.chatId`                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Release  | Change                                                                                                                                                                                                                                                                                                                         | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0.24.0` | A live key refused by its `allowedIps` (including an undeterminable client IP) or its `allowedSessions` answers `403` instead of `401`; `401` now means only a missing, unknown, revoked or expired key                                                                                                                        | Handle `403` for these refusals: SDK callers catch the forbidden error (Go `ErrForbidden`) instead of the auth error                                                                                                                                                                                                                                                                                                                                                           |
+| `0.24.0` | Every `POST /mcp` request needs a valid API key: `initialize` and `tools/list` without one answer `401`, a tool call with a missing or invalid key gets `401` instead of an `isError` result, and a key with `allowedIps` is refused with `403` on every request                                                               | Configure the API key in every MCP client, including one that only lists tools, and use a key without `allowedIps` for MCP                                                                                                                                                                                                                                                                                                                                                     |
+| `0.24.0` | `GET /api/sessions/:sessionId/contacts/check/:number` and the MCP `ContactCheckNumber` tool require an OPERATOR key; a VIEWER key gets `403`                                                                                                                                                                                   | Give number-check integrations an OPERATOR key                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `0.24.0` | Setting or clearing a session proxy, through `PATCH /api/sessions/:sessionId/proxy` or `proxyUrl` on `POST /api/sessions`, requires an unscoped ADMIN key; any other key gets `403`, and a create carrying `proxyUrl` is refused before the session exists                                                                     | Use an ADMIN key for proxy changes; reading the proxy is unchanged                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `0.24.0` | `DELETE /api/sessions/:sessionId/chats/:chatId/messages` and `POST /api/sessions/:sessionId/chats/delete` also remove the gateway's stored copies of the chat's messages (rows, inline and archived media, search entries) once the engine reports success                                                                     | Export whatever must be kept from a chat's stored messages and media before clearing or deleting the chat                                                                                                                                                                                                                                                                                                                                                                      |
+| `0.24.0` | `main.sqlite` (API keys and audit log) runs its `migrations-main/` chain at every boot instead of defaulting to synchronize, adopting an older file in place; boot stops with a `MainSchemaMismatchError` when the ledger records a migration this release does not ship, or an entity column is still missing after the chain | Back up `main.sqlite` before upgrading. The refusal names the migration or column; [05 - Database Design, section 5.6](./05-database-design.md#56-migration-strategy) gives the recovery for each                                                                                                                                                                                                                                                                              |
+| `0.24.0` | The built-in storage runs `pgsty/silo` in place of the withdrawn `minio/minio` image; the compose `minio` service no longer starts without `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`, and a recreated dashboard built-in `openwa-minio` publishes no host ports                                                            | Recreate the container and set the credentials as the Storage Migration part of section 14.3 describes                                                                                                                                                                                                                                                                                                                                                                         |
+| `0.24.0` | `POST /api/sessions/:sessionId/messages/send-product` passes the `message:sending` plugin gate (type `product`, input `{ chatId, productId, body }`); a rewritten `chatId` is ignored                                                                                                                                          | Branch on `source`/`type` before reading send-DTO fields; a veto now answers `400`                                                                                                                                                                                                                                                                                                                                                                                             |
+| `0.24.0` | Typed SDK clients: batch cancel (JavaScript `cancelBatch`, Go `CancelBatch`, Java `cancelBatch`, Python `cancel_batch`) returns `BatchCancelResponse` (`batchId`, `status`, `progress`) instead of `BatchStatusResponse`, whose `results` and timestamps the route never sent                                                  | TypeScript, Go and Java: change the declared result type to `BatchCancelResponse`. Typed Python: update annotations. Read per-recipient results from `batchStatus` / `BatchStatus` / `batch_status`. PHP needs no change; the wire response is unchanged                                                                                                                                                                                                                       |
+| `0.23.6` | A media URL passed to a send route or to `POST /media/convert/voice` or `.../convert/video`, and the link preview of a text send, are fetched through the egress proxy of the session named in the request instead of leaving from the gateway's own address                                                                   | Set `SESSION_PROXY_URL_FETCH=false` if a session proxy is a WhatsApp-only route that cannot reach arbitrary media hosts                                                                                                                                                                                                                                                                                                                                                        |
+| `0.23.0` | Typed SDK clients: `markRead` and `subscribePresence` each take their own request type instead of the shared `MarkChatRequest`, which now serves `markUnread` alone                                                                                                                                                            | Go and Java: swap the type at both call sites. Typed Python: only at `markRead`, its `subscribePresence` body being structurally identical. JavaScript and PHP need no change; the wire body is unchanged                                                                                                                                                                                                                                                                      |
+| `0.22.0` | Baileys refuses a reply whose quoted id, or a forward whose `fromChatId`, does not name the addressed chat, with the `404` whatsapp-web.js already answered; leaving a group, unsubscribing from a channel and labelling a channel surface WhatsApp's refusal; membership requests for an id that is not a group are refused   | Handle a refusal on those six calls, which previously answered `200` whatever happened                                                                                                                                                                                                                                                                                                                                                                                         |
+| `0.22.0` | Typed SDK clients narrow their request bodies: 19 Python request types mark the fields the server requires, and Go and Java type the proxy scheme, call kind, membership method, chat state, pin window and status font as enums                                                                                               | Pass the named constants instead of bare strings or numbers and supply every required field; untyped callers are unaffected                                                                                                                                                                                                                                                                                                                                                    |
+| `0.22.0` | `isReadOnly` on a group answers for the calling account rather than repeating the group setting, and `isMyContact` reflects whether the contact is actually saved                                                                                                                                                              | Re-read either field wherever logic branched on the old value                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `0.22.0` | Images 0.19.0 to 0.21.x ship `scripts/backup.sh` but no PostgreSQL client, so with `DATABASE_TYPE=postgres` step 1 of the upgrade script fails (`pg_dump is not installed`) before anything is stopped, and writes no archive at all                                                                                           | Dump the data store while the database still runs: `docker exec openwa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backups/database.sql` for the built-in service, or `pg_dump` from the host against `DATABASE_HOST` for an external server. Then stop the app and archive the volume as the `0.19.0` row below does. To roll back, extract that archive into the emptied volume and load `database.sql` as 11 - Runbook: Restore from Backup, step 3 shows |
+| `0.21.0` | The ingress route gained a per-client-IP rate bound (`INGRESS_IP_LIMIT`, default 1200 per window) alongside its per-instance one; previously the route had no bound a caller could not walk around by varying the path                                                                                                         | Raise `INGRESS_IP_LIMIT` if one provider IP legitimately drives more than 1200 ingress requests per window                                                                                                                                                                                                                                                                                                                                                                     |
+| `0.20.0` | With `WEBHOOK_SSRF_PROTECT=false`, deliveries no longer follow redirects, and `SSRF_ALLOWED_HOSTS` entries pin to their resolved addresses (must resolve at registration)                                                                                                                                                      | Set `WEBHOOK_SSRF_REDIRECTS=true` for a receiver legitimately behind a 3xx; ensure allowlisted hostnames resolve when the webhook is saved                                                                                                                                                                                                                                                                                                                                     |
+| `0.20.0` | Plugin installs from a URL require a `#sha256=<64 hex>` pin under `NODE_ENV=production` (the compose default)                                                                                                                                                                                                                  | Pin catalog URLs, or set `PLUGIN_INSTALL_REQUIRE_PIN=false` to lift the requirement                                                                                                                                                                                                                                                                                                                                                                                            |
+| `0.19.0` | Older images ship no `scripts/backup.sh`, so step 1 of the upgrade script fails on a 0.18.x or earlier container, before anything is stopped                                                                                                                                                                                   | Stop the app and archive the volume: `docker run --rm -v openwa_openwa-data:/data:ro -v "$PWD/backups:/o" alpine tar czf /o/data.tgz -C /data .`, with a `pg_dump` of a PostgreSQL data store. To roll back, extract it into the emptied volume                                                                                                                                                                                                                                |
+| `0.19.0` | Production boot refuses a set `API_MASTER_KEY` shorter than 32 characters                                                                                                                                                                                                                                                      | Strengthen a short key before upgrading; unset stays allowed (first boot generates one)                                                                                                                                                                                                                                                                                                                                                                                        |
+| `0.19.0` | `POST /sessions/:id/messages/send-catalog` and `PUT /api/settings` are removed (both always answered `501`)                                                                                                                                                                                                                    | Drop calls to either; catalog reads and `GET /api/settings` are unchanged                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `0.18.0` | `NODE_ENV` outside `production`/`development`/`test` fails boot with a named error                                                                                                                                                                                                                                             | Set a legal value or unset it (unset remains valid)                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `0.18.0` | Go SDK: `UpdateWebhookRequest.Secret`/`.Headers` and `UpdateTemplateRequest.Header`/`.Footer` become pointers, plus a `ClearFilters` flag                                                                                                                                                                                      | Take the address of a variable to send a clearing value, or leave nil to keep the stored one                                                                                                                                                                                                                                                                                                                                                                                   |
+| `0.18.0` | Two enabled instances of one plugin sharing a session scope no longer collapse onto a single config                                                                                                                                                                                                                            | Move shared keys onto each instance when provisioning a second one on the same session                                                                                                                                                                                                                                                                                                                                                                                         |
+| `0.17.0` | `AUDIT_RETENTION_DAYS` is validated at boot as a plain integer                                                                                                                                                                                                                                                                 | Replace `30d`-style values with plain integers (`0`/negatives keep their documented meaning)                                                                                                                                                                                                                                                                                                                                                                                   |
+| `0.17.0` | Plugins must declare a `storage:use` permission to reach `ctx.storage`                                                                                                                                                                                                                                                         | Upgrade the official plugins to the floors listed in the 0.17.0 changelog BEFORE upgrading the gateway                                                                                                                                                                                                                                                                                                                                                                         |
+| `0.16.0` | `POST /sessions/:id/groups` answers `501` on the whatsapp-web.js engine (the page code it used no longer exists)                                                                                                                                                                                                               | Create groups through the Baileys engine                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `0.15.0` | Engine calls during a WhatsApp Web page reload answer a retryable `409` naming the reload (previously `500`, or `200 {success:false}` on six chat-write routes); typed 4xx no longer latch the send breaker                                                                                                                    | Retry the named-reload `409` after the session re-emits `ready`                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `0.14.6` | `POST /groups` returns the summary shape (`participantsCount`, not the detail type), and three SDK response shapes were retyped (`ParticipantsResult`, `ContactRecord.pushName`/fields, `sendProduct` → `{id}`)                                                                                                                | Adjust typed SDK reads; untyped JSON consumers are unaffected                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `0.14.5` | Baileys transport failures (dead socket) propagate as 5xx instead of misclassified `403`/`400`/`404`                                                                                                                                                                                                                           | Treat 5xx as retryable transport failure; keep 4xx handling for genuine refusals                                                                                                                                                                                                                                                                                                                                                                                               |
+| `0.14.0` | Eager status backfill on session ready is opt-in (`STATUS_SEED_ON_READY`, default off)                                                                                                                                                                                                                                         | Set the flag only after validating the account; live status events are unaffected                                                                                                                                                                                                                                                                                                                                                                                              |
+| `0.14.0` | Link previews are opt-in on the Baileys engine                                                                                                                                                                                                                                                                                 | Pass `linkPreview: true` or a `customLinkPreview` where a card is wanted                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `0.12.0` | `PUT /api/plugins/:id/sessions` is a full replacement of the global activation set and now requires an **unrestricted ADMIN** key; a session-scoped key is rejected with `403` whatever it sends                                                                                                                               | Switch any automation that drives global plugin activation from a scoped key to an unrestricted ADMIN key. The per-session config override route `PUT /api/plugins/:id/config/:sessionId` is unaffected and stays scoped to the addressed session                                                                                                                                                                                                                              |
+| `0.8.15` | PostgreSQL schemas bootstrapped with `DATABASE_SYNCHRONIZE=true` crash-loop on boot                                                                                                                                                                                                                                            | Self-healing guard migration; see [14.9](#149-troubleshooting-migration-issues) for the large-table window                                                                                                                                                                                                                                                                                                                                                                     |
+| `0.9.0`  | `GET /api/settings` no longer returns the always-zero `general.sessionTimeout`                                                                                                                                                                                                                                                 | Remove reads of that field; there is no replacement                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `0.10.3` | Boolean/numeric request fields are parsed strictly (`1`, `yes`, `""` now `400`)                                                                                                                                                                                                                                                | Send canonical JSON values; JSON clients and the SDKs are unaffected                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `0.10.3` | Status posts pass the `message:sending` plugin gate, with no `chatId` in the input                                                                                                                                                                                                                                             | Branch on `source`/`type` before reading `input.chatId`                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 The authoritative list is `CHANGELOG.md`; breaking items are flagged there with ⚠️ **Breaking**.
 
@@ -840,10 +900,11 @@ The authoritative list is `CHANGELOG.md`; breaking items are flagged there with 
 ```bash
 #!/bin/bash
 # rollback.sh
+set -euo pipefail
 
 # A DIRECTORY of restored files — not the tar.gz that scripts/backup.sh writes (see the TIP below).
-BACKUP_DIR=$1
-TARGET_VERSION=$2
+BACKUP_DIR=${1:-}
+TARGET_VERSION=${2:-}
 
 if [ -z "$BACKUP_DIR" ] || [ -z "$TARGET_VERSION" ]; then
     echo "Usage: ./rollback.sh <backup-dir> <target-version>"
@@ -856,18 +917,48 @@ echo "🔄 Rolling back to v${TARGET_VERSION}..."
 # Started with docker-compose.dev.yml (the README Quick Start)? Add `-f docker-compose.dev.yml` to
 # every docker compose command below, and write `openwa` wherever one names the `openwa-api` service.
 
-# 1. Stop current
+# 1. Stop current and check out the target version. The checkout comes before step 4: a restored
+#    docker-compose.yml that differs from the checked-out one makes git refuse the checkout.
 docker compose down
+git checkout "v${TARGET_VERSION}"
 
-# 2. Restore database
+# 2. Restore the databases, both from the same backup. The main DB (API keys, audit log) is always
+#    SQLite, whatever the data store is. Stale journal files go first, as scripts/restore.sh does,
+#    so SQLite cannot replay them into the restored file.
 echo "📥 Restoring database..."
 if [ -f "$BACKUP_DIR/database.sql" ]; then
-    # PostgreSQL
-    psql -h "$DATABASE_HOST" -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" < "$BACKUP_DIR/database.sql"
+    # PostgreSQL: load the dump into an empty database. Replayed over the upgraded tables, its CREATE
+    # statements fail and its rows mix with theirs. This is the built-in PostgreSQL (the compose
+    # `postgres` service, or the openwa-postgres container Dashboard > Infrastructure created, which
+    # carries no compose labels, so step 1 left it running). docker start covers a leftover or
+    # dashboard-created container; compose creates the service only when none exists and .env points
+    # at it. For an external server the script stops: rename the database and load the dump as step 3
+    # of 11 - Runbook: Restore from Backup shows, then run steps 2-6 below by hand without this
+    # PostgreSQL block: nothing after step 1 is restored yet. The upgraded database is kept under a
+    # _pre_restore_ name, and sed drops the pg_dump 17 line PostgreSQL 16 rejects.
+    if ! docker start openwa-postgres 2>/dev/null; then
+        grep -qE '^DATABASE_HOST=(postgres|openwa-postgres)$' .env || {
+            echo "External PostgreSQL: rollback INCOMPLETE, nothing after step 1 has been restored."
+            echo "Load $BACKUP_DIR/database.sql by hand (11 - Runbook: Restore from Backup, step 3),"
+            echo "then run steps 2-6 of this script by hand without the PostgreSQL block."
+            exit 1
+        }
+        docker compose --profile postgres up -d postgres
+    fi
+    docker exec openwa-postgres sh -c 'until pg_isready -q -U "$POSTGRES_USER"; do sleep 1; done'
+    docker exec openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+      -c "ALTER DATABASE \"$POSTGRES_DB\" RENAME TO \"${POSTGRES_DB}_pre_restore_$(date +%Y%m%d%H%M%S)\"" \
+      -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\""'
+    sed '/^SET transaction_timeout = 0;$/d' "$BACKUP_DIR/database.sql" |
+      docker exec -i openwa-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 else
     # SQLite
+    rm -f ./data/openwa.sqlite-{wal,shm,journal}
     cp "$BACKUP_DIR/openwa.sqlite" ./data/
 fi
+rm -f ./data/main.sqlite-{wal,shm,journal}
+cp "$BACKUP_DIR/main.sqlite" ./data/
+[ -f "$BACKUP_DIR/.api-key" ] && cp "$BACKUP_DIR/.api-key" ./data/
 
 # 3. Restore auth sessions (SESSION_DATA_PATH + BAILEYS_AUTH_DIR)
 echo "📥 Restoring auth sessions..."
@@ -880,10 +971,10 @@ echo "📥 Restoring configuration..."
 cp "$BACKUP_DIR/.env" .
 cp "$BACKUP_DIR/docker-compose.yml" .
 
-# 5. Start the target version. The repo compose BUILDS the image, so check out the tag and rebuild;
-#    a deployment pinned to a published image bumps the tag and runs `docker compose pull` instead.
+# 5. Start the target version. The repo compose BUILDS the image, so rebuild from the tag checked
+#    out in step 1; a deployment pinned to a published image bumps the tag and runs
+#    `docker compose pull openwa-api && docker compose up -d --no-build` instead.
 echo "▶️ Starting v${TARGET_VERSION}..."
-git checkout "v${TARGET_VERSION}"
 docker compose up -d --build
 
 # 6. Verify
@@ -891,10 +982,15 @@ sleep 10
 curl -f http://localhost:2785/api/health && echo "✅ Rollback successful"
 ```
 
+The main DB and `.api-key` must come from the same backup as the data store. Restoring `main.sqlite`
+returns every API key to its state at backup time: keys created since then are gone, and keys revoked
+since then work again, so revoke those again after the rollback.
+
 > [!TIP]
 > For an archive produced by `scripts/backup.sh`, follow
 > [11 - Runbook: Restore from Backup](./11-operational-runbooks.md#runbook-restore-from-backup)
-> instead. It also restores the Main DB (`main.sqlite`), which the script above does not touch, and
+> instead. It restores the databases, `.api-key`, the auth state, media and plugin state from the
+> archive, but not the host `.env` or compose file, which step 4 above covers, and
 > it runs `scripts/restore.sh` from the image against the production compose named volume
 > (`openwa-data`) or the Helm PVC. A host run of `./scripts/restore.sh`, like the copies into `./data`
 > above, reaches only a bare-metal install or `docker-compose.dev.yml`, which bind-mounts `./data`;
@@ -936,6 +1032,28 @@ flowchart TD
 > back.
 > A session first paired on the newer image is not in that backup and must be paired again either way.
 > Baileys sessions are unaffected.
+
+> [!WARNING]
+> A rollback to a release older than 0.23.6 loses API key chat scopes. Those images do not know
+> `allowedChats`, so while one runs, a chat-scoped key reaches every chat of the sessions it is
+> allowed. Restoring `main.sqlite` from a backup taken before the upgrade, as the script above and
+> [11 - Runbook: Version Upgrade](./11-operational-runbooks.md#runbook-version-upgrade) do, avoids the
+> rest of this. Keeping the current `main.sqlite` (changing only the image tag, or `helm rollback`,
+> which keeps the volume) does not: at its first boot the older image's schema sync drops the
+> `allowedChats` column. Upgrading again then stops boot with a `MainSchemaMismatchError` naming
+> `api_keys.allowedChats`, because the migrations ledger that 0.24.0 and later write still records the
+> column's migration. To recover, restore `main.sqlite` from the backup taken before the rollback,
+> which brings the chat scopes back with it, or delete that ledger row as
+> [05 - Database Design, section 5.6](./05-database-design.md#56-migration-strategy) shows, after which
+> the column comes back empty, which means every chat. Section 5.6 gives the source and compose forms;
+> on the Helm chart, scale the StatefulSet to 0, start the helper pod on the release's data PVC as
+> [11 - Runbook: Restore from Backup](./11-operational-runbooks.md#runbook-restore-from-backup) does,
+> run the same `sqlite3 /app/data/main.sqlite` command there with `kubectl exec openwa-restore --`,
+> then delete the pod and scale back to 1. Before such a rollback, revoke every key that has
+> `allowedChats` (`POST /api/auth/api-keys/:id/revoke`) and issue new ones after upgrading again.
+> Starting the older image with `MAIN_DATABASE_SYNCHRONIZE=false` keeps the column and its values for
+> the next upgrade (the compose file forwards it since 0.14.5), but the older image still does not
+> enforce them.
 
 ## 14.7 Environment Migration
 

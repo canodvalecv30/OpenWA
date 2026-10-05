@@ -48,6 +48,8 @@ interface EntityFile {
   file: string;
   connection: Connection;
   tables: string[];
+  /** Of those, the tables carrying an FK to sessions. */
+  sessionFkTables: string[];
 }
 
 function findEntityFiles(dir: string, found: string[] = []): string[] {
@@ -92,12 +94,23 @@ async function loadEntityFiles(): Promise<EntityFile[]> {
   });
   await ds.initialize();
   const tableOf = new Map<unknown, string>(ds.entityMetadatas.map(metadata => [metadata.target, metadata.tableName]));
+  const sessionFkTables = new Set(
+    ds.entityMetadatas
+      .filter(metadata => metadata.foreignKeys.some(fk => fk.referencedTablePath === 'sessions'))
+      .map(metadata => metadata.tableName),
+  );
   await ds.destroy();
-  return discovered.map(entry => ({
-    file: entry.file,
-    connection: classify(entry.file),
-    tables: entry.classes.map(cls => tableOf.get(cls)).filter((table): table is string => typeof table === 'string'),
-  }));
+  return discovered.map(entry => {
+    const tables = entry.classes
+      .map(cls => tableOf.get(cls))
+      .filter((table): table is string => typeof table === 'string');
+    return {
+      file: entry.file,
+      connection: classify(entry.file),
+      tables,
+      sessionFkTables: tables.filter(table => sessionFkTables.has(table)),
+    };
+  });
 }
 
 /** Top-level property names of a published schema, read from the committed OpenAPI contract. */
@@ -153,6 +166,13 @@ describe('export-tables registry: every data-DB entity table has a backup decisi
     expect(stale).toEqual([]);
   });
 
+  it('flags exactly the tables with an FK to sessions, so the export drops their orphaned rows', () => {
+    const flagged = EXPORT_TABLES.filter(entry => entry.sessionFk).map(entry => entry.table);
+    const withFk = entityFiles.filter(f => f.connection === 'data').flatMap(f => f.sessionFkTables);
+    expect(flagged.sort()).toEqual(withFk.sort());
+    expect(flagged.length).toBeGreaterThan(0);
+  });
+
   it('exports and imports the same tables in the same FK-safe order', () => {
     expect(EXPORT_TABLES.map(entry => entry.key)).toEqual(TABLE_IMPORTERS.map(importer => importer.key));
   });
@@ -201,14 +221,23 @@ describe('InfraDataService.exportData validates the registry against live entity
 });
 
 describe('the import clears every re-inserted table that DELETE FROM sessions cannot cascade', () => {
-  it('clears the (sessionId, *) provenance tables (lid_mappings, chat_states) before the sessions delete', () => {
-    const src = readFileSync(join(__dirname, 'infra-data.service.ts'), 'utf8');
-    const cleared = new Set([...src.matchAll(/clearTable\('([a-z_]+)'\)/g)].map(m => m[1]));
-    // These tables carry no FK to sessions (the sessionId is provenance, not a foreign key), so the
-    // import's `DELETE FROM sessions` never reaches them. They are re-inserted from the archive, so
-    // without an explicit clear a restore onto an instance that already holds their rows collides on
-    // PK and the all-or-nothing gate rolls the whole import back (the exact restore-onto-self flow).
-    expect(cleared).toContain('lid_mappings');
-    expect(cleared).toContain('chat_states');
+  const src = readFileSync(join(__dirname, 'infra-data.service.ts'), 'utf8');
+  const sessionsDelete = src.indexOf("'DELETE FROM sessions'");
+  // These tables carry no FK to sessions (a sessionId, where present, is provenance, not a foreign
+  // key), so the import's `DELETE FROM sessions` never reaches them. They are re-inserted from the
+  // archive, so without an explicit clear a restore onto an instance that already holds their rows
+  // collides on PK and the all-or-nothing gate rolls the whole import back (the exact restore-onto-self
+  // flow). The set is derived from the registry, so a new table is covered without editing this spec.
+  const uncascaded = EXPORT_TABLES.filter(entry => !entry.sessionFk && entry.table !== 'sessions').map(e => e.table);
+
+  it('finds the sessions delete and at least one uncascaded table', () => {
+    expect(sessionsDelete).toBeGreaterThan(-1);
+    expect(uncascaded).toContain('lid_mappings');
+  });
+
+  it.each(uncascaded)('clears %s before the sessions delete', table => {
+    const clear = src.indexOf(`clearTable('${table}')`);
+    expect(clear).toBeGreaterThan(-1);
+    expect(clear).toBeLessThan(sessionsDelete);
   });
 });

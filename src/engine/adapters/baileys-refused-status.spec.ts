@@ -1,6 +1,9 @@
 import { Boom } from '@hapi/boom';
 import { refusedStatusCode, mapServerRefusal } from './baileys-groups';
+import { wmexRefusalCode } from './baileys-channels';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
 
 /**
  * `refusedStatusCode` decides whether a Baileys failure was a SERVER refusal (map to 403/404) or a
@@ -69,5 +72,25 @@ describe('mapServerRefusal', () => {
   it('lets an unanswered query through untouched', async () => {
     const noAnswer = new Boom('Invalid group metadata response: missing <group> node', { data: undefined });
     await expect(mapServerRefusal('Setting the group subject', () => Promise.reject(noAnswer))).rejects.toBe(noAnswer);
+  });
+
+  it('answers a rate limit or a server timeout as 503, not a permissions refusal', async () => {
+    const graphQl = (code: number) =>
+      new Boom('GraphQL server error: rate limited', { statusCode: code, data: { extensions: { error_code: code } } });
+    for (const code of [408, 429]) {
+      await expect(
+        mapServerRefusal('Adding participants', () => Promise.reject(new Boom('rate-overlimit', { data: code }))),
+      ).rejects.toBeInstanceOf(EngineTransportError);
+      await expect(
+        mapServerRefusal('Deleting the channel', () => Promise.reject(graphQl(code)), wmexRefusalCode),
+      ).rejects.toBeInstanceOf(EngineTransportError);
+    }
+  });
+
+  it('marks only a rate limit as throttled, so a pre-charged budget can be given back', async () => {
+    const reject = (code: number) => () => Promise.reject(new Boom('refused', { data: code }));
+    await expect(mapServerRefusal('Creating the group', reject(429))).rejects.toBeInstanceOf(EngineThrottledError);
+    // A server timeout leaves the outcome unknown: it stays a plain transport error.
+    await expect(mapServerRefusal('Creating the group', reject(408))).rejects.not.toBeInstanceOf(EngineThrottledError);
   });
 });

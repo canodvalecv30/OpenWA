@@ -15,40 +15,56 @@
 # database left at a default path from BEFORE the operator switched is archived instead, and the run
 # exits 0. A backup that captured an abandoned database only reveals itself during a restore.
 #
-# Deliberately conservative: only a plain `KEY=value` line is honoured. Blanks around the `=` and the
-# value, and CRLF line endings, are tolerated as dotenv tolerates them. A value carrying quotes or a
-# `#`, and a `KEY: value` line, are reported and skipped rather than guessed at, because a silently
-# mis-parsed path is the exact failure this exists to prevent. Nothing here exports anything: each
-# key is looked up by name, so a stray entry in an operator's .env can never reach the script's own
-# environment.
+# Deliberately conservative: only the `KEY=value` forms dotenv reads plainly are honoured. Blanks
+# around the `=` and the value, CRLF line endings, a value wrapped in one pair of quotes and a comment
+# after an unquoted value are read as dotenv reads them. Anything else (a quoted value followed by a
+# comment, a double-quoted value with escapes, a `KEY: value` line) is reported rather than guessed
+# at, because a silently mis-parsed path is the exact failure this exists to prevent. Nothing here
+# exports anything: each key is looked up by name, so a stray entry in an operator's .env can never
+# reach the script's own environment.
 
-# openwa_env_file_value <file> <key> — print the value from one env-file layer, or nothing.
+# openwa_env_file_value <file> <key> - print the value from one env-file layer. Returns 1 when the layer
+# does not set the key and 2 when it sets it in a form reported below; a blank value succeeds and prints
+# nothing.
 openwa_env_file_value() {
   local file="$1" key="$2" line value
-  [ -f "$file" ] || return 0
+  [ -f "$file" ] || return 1
   # The last line naming the key wins, as in dotenv. `KEY: value` is matched only to be reported.
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*[=:]" "$file" 2>/dev/null | tail -n 1)" || true
-  [ -n "$line" ] || return 0
+  [ -n "$line" ] || return 1
   value="${line#*"$key"}"
   value="${value#"${value%%[![:space:]]*}"}"
   case "$value" in
-    =*) value="${value#=}" ;;
-    *) value='#' ;; # the colon form: fall into the report below
-  esac
-  # Trim both ends, which also drops the CR of a CRLF line.
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  case "$value" in
-    '')
-      return 0
+    =*)
+      value="${value#=}"
+      # Trim both ends, which also drops the CR of a CRLF line.
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      case "$value" in
+        \"*\\*) ;; # dotenv expands \n and \r inside double quotes
+        \"*\" | \'*\' | \`*\`)
+          # A quote inside means the pair does not wrap the whole value: a comment ending in one follows it.
+          case "${value:1:${#value}-2}" in
+            *"${value:0:1}"*) ;;
+            *)
+              printf '%s' "${value:1:${#value}-2}"
+              return 0
+              ;;
+          esac
+          ;;
+        \"* | \'* | \`*) ;; # the quote does not close the value, as with a trailing comment
+        *)
+          # An unquoted value ends at a `#`, as in dotenv.
+          value="${value%%#*}"
+          printf '%s' "${value%"${value##*[![:space:]]}"}"
+          return 0
+          ;;
+      esac
       ;;
-    *\"* | *\'* | *'#'*)
-      echo "[config] WARN: $file sets $key in a form these scripts do not parse (quotes, a trailing" >&2
-      echo "[config]       comment or KEY: value); ignoring it. Pass $key in the environment if it matters here." >&2
-      return 0
-      ;;
   esac
-  printf '%s' "$value"
+  echo "[config] WARN: $file sets $key in a form these scripts do not parse (a quoted value with a trailing" >&2
+  echo "[config]       comment or escapes, or KEY: value); using the default. Pass $key in the environment if it matters here." >&2
+  return 2
 }
 
 # openwa_writable <path> - whether <path> can be written, or created when it does not exist yet (its
@@ -91,18 +107,28 @@ OPENWA_GENERATED_ENV="${DATA_DIR:-./data}/.env.generated"
 # openwa_resolve <key> <default> - the application's precedence: environment, then ./.env, then
 # $OPENWA_GENERATED_ENV, then the built-in default. Requires DATA_DIR to be set before sourcing.
 openwa_resolve() {
-  local key="$1" fallback="$2" current value layer
+  local key="$1" fallback="$2" current value layer rc
   current="$(printenv "$key" 2>/dev/null || true)"
   if [ -n "$current" ]; then
     printf '%s' "$current"
     return 0
   fi
+  # The first layer that sets the key ends the lookup, even with a blank value: dotenv sets a blank
+  # line to '' and never overwrites a key already set, so the app reads its built-in default. A line
+  # these scripts cannot parse still sets the key for the app, so it ends the lookup too.
   for layer in "./.env" "$OPENWA_GENERATED_ENV"; do
-    value="$(openwa_env_file_value "$layer" "$key")"
-    if [ -n "$value" ]; then
-      printf '%s' "$value"
-      return 0
-    fi
+    rc=0
+    value="$(openwa_env_file_value "$layer" "$key")" || rc=$?
+    case "$rc" in
+      0)
+        printf '%s' "${value:-$fallback}"
+        return 0
+        ;;
+      2)
+        printf '%s' "$fallback"
+        return 0
+        ;;
+    esac
   done
   printf '%s' "$fallback"
 }

@@ -56,11 +56,8 @@ test('reconcileSessionCache: invalidates the sessions prefix (list + stats) but 
   const updated = makeSession({ id: 'a', status: 'disconnected', phone: null });
   await reconcileSessionCache(queryClient, ['sessions'], updated);
 
-  // The invalidate call targets the sessions prefix (matches list AND stats/groups/chats/templates).
-  assert.ok(
-    invalidated.some(k => k === '["sessions"]'),
-    `sessions prefix not invalidated; got ${JSON.stringify(invalidated)}`,
-  );
+  // One invalidate call, on the sessions prefix (matches list AND stats/groups/chats/templates).
+  assert.deepEqual(invalidated, ['["sessions"]']);
 });
 
 // The sessions list cache is shared with the Dashboard, so an update must NOT seed a row list into a
@@ -103,8 +100,5 @@ test('invalidateSessionQueries: with the stats key only the stats cache family i
 
   await invalidateSessionQueries(queryClient, ['sessions', 'stats']);
 
-  assert.ok(
-    invalidated.some(k => JSON.stringify(k) === '["sessions","stats"]'),
-    `stats key not invalidated; got ${JSON.stringify(invalidated)}`,
-  );
+  assert.deepEqual(invalidated, [['sessions', 'stats']]);
 });

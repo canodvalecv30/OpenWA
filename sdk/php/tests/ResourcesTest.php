@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OpenWA\Tests;
 
+use OpenWA\Client;
 use OpenWA\Exceptions\OpenWANotFoundException;
 use PHPUnit\Framework\TestCase;
 
@@ -27,11 +28,13 @@ class ResourcesTest extends TestCase
         $client->sessions->list();
         $this->assertSame('/api/sessions', $backend->calls()[0]['path']);
         $client->sessions->get('s1');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s1');
         $client->sessions->create(['name' => 'n']);
         $this->assertSame(['name' => 'n'], $backend->lastCall()['body']);
         $client->sessions->start('s1');
         $this->assertStringContainsString('/sessions/s1/start', $backend->lastCall()['path']);
         $client->sessions->stop('s1');
+        $this->assertRequest($backend, 'POST', '/api/sessions/s1/stop');
         $client->sessions->logout('s1');
         $this->assertStringContainsString('/sessions/s1/logout', $backend->lastCall()['path']);
         $client->sessions->forceKill('s1');
@@ -86,6 +89,7 @@ class ResourcesTest extends TestCase
         $backend->on(201, ['id' => 'g1@g.us', 'subject' => 'G', 'participants' => []]);
         $client = $backend->makeClient();
         $client->groups->list('s');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/groups');
         $client->groups->get('s', 'g1@g.us');
         $this->assertStringContainsString('/groups/g1@g.us', $backend->calls()[1]['url']);
         $client->groups->create('s', ['name' => 'G', 'participants' => ['a@c.us']]);
@@ -126,7 +130,9 @@ class ResourcesTest extends TestCase
         $client->groups->setDescription('s', 'g', 'desc');
         $this->assertSame(['description' => 'desc'], $backend->calls()[1]['body']);
         $client->groups->leave('s', 'g');
+        $this->assertRequest($backend, 'POST', '/api/sessions/s/groups/g/leave');
         $client->groups->inviteCode('s', 'g');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/groups/g/invite-code');
         $client->groups->revokeInviteCode('s', 'g');
         $this->assertStringContainsString('/revoke', $backend->calls()[4]['url']);
     }
@@ -165,10 +171,13 @@ class ResourcesTest extends TestCase
         $client->contacts->list('s', ['limit' => 10]);
         $this->assertStringContainsString('limit=10', $backend->calls()[0]['url']);
         $client->contacts->get('s', 'a@c.us');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/contacts/a@c.us');
         $client->contacts->check('s', '628123');
         $this->assertStringContainsString('/check/628123', $backend->calls()[2]['url']);
         $client->contacts->profilePicture('s', 'a@c.us');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/contacts/a@c.us/profile-picture');
         $client->contacts->phone('s', 'x@lid');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/contacts/x@lid/phone');
     }
 
     public function testBlockUnblock(): void
@@ -222,12 +231,15 @@ class ResourcesTest extends TestCase
         $backend->on(200, ['success' => true]);
         $client = $backend->makeClient();
         $client->webhooks->list('s');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/webhooks');
         $client->webhooks->get('s', 'w1');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/webhooks/w1');
         $client->webhooks->create('s', ['url' => 'u', 'events' => ['*']]);
         $this->assertSame(['url' => 'u', 'events' => ['*']], $backend->calls()[2]['body']);
         $client->webhooks->update('s', 'w1', ['active' => false]);
         $this->assertSame('PUT', $backend->calls()[3]['method']);
         $client->webhooks->delete('s', 'w1');
+        $this->assertRequest($backend, 'DELETE', '/api/sessions/s/webhooks/w1');
         $client->webhooks->test('s', 'w1');
         $this->assertStringContainsString('/webhooks/w1/test', $backend->calls()[5]['url']);
     }
@@ -303,10 +315,13 @@ class ResourcesTest extends TestCase
         $backend->on(200, ['success' => true]);
         $client = $backend->makeClient();
         $client->chats->list('s');
+        $this->assertRequest($backend, 'GET', '/api/sessions/s/chats');
         $client->chats->markRead('s', ['chatId' => 'a@c.us']);
         $this->assertStringContainsString('/chats/read', $backend->calls()[1]['url']);
         $client->chats->markUnread('s', ['chatId' => 'a@c.us']);
+        $this->assertRequest($backend, 'POST', '/api/sessions/s/chats/unread');
         $client->chats->delete('s', ['chatId' => 'a@c.us']);
+        $this->assertRequest($backend, 'POST', '/api/sessions/s/chats/delete');
         $client->chats->sendState('s', ['chatId' => 'a@c.us', 'state' => 'typing']);
         $this->assertStringContainsString('/chats/typing', $backend->calls()[4]['url']);
     }
@@ -403,7 +418,7 @@ class ResourcesTest extends TestCase
 
     // ── Status (Stories) ──────────────────────────────────────────────
 
-    public function testStatusSendForwardsRequiredRecipientsAndNestedMedia(): void
+    public function testStatusSendForwardsRecipientsAndNestedMedia(): void
     {
         $backend = new MockBackend();
         $backend->on(200, ['statusId' => 's1', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
@@ -411,17 +426,18 @@ class ResourcesTest extends TestCase
         $backend->on(200, ['statusId' => 's3', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
         $backend->on(200, ['statusId' => 's4', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
         $client = $backend->makeClient();
-        // Server requires `recipients` on every status post; media posts use a nested {image|video:{...}} body.
-        $client->status->sendText('s', ['text' => 'hi', 'recipients' => ['a@c.us']]);
-        $this->assertSame(['text' => 'hi', 'recipients' => ['a@c.us']], $backend->lastCall()['body']);
-        $client->status->sendImage('s', ['image' => ['url' => 'http://img'], 'recipients' => ['a@c.us'], 'caption' => 'c']);
-        $this->assertSame(['image' => ['url' => 'http://img'], 'recipients' => ['a@c.us'], 'caption' => 'c'], $backend->lastCall()['body']);
-        $client->status->sendVideo('s', ['video' => ['url' => 'http://vid'], 'recipients' => ['a@c.us']]);
-        $this->assertSame(['video' => ['url' => 'http://vid'], 'recipients' => ['a@c.us']], $backend->lastCall()['body']);
+        // `recipients` is forwarded verbatim (required on Baileys, ignored by whatsapp-web.js); media posts
+        // use a nested {image|video|audio:{...}} body.
+        $client->status->sendText('s', ['text' => 'hi', 'recipients' => ['628123456789@c.us']]);
+        $this->assertSame(['text' => 'hi', 'recipients' => ['628123456789@c.us']], $backend->lastCall()['body']);
+        $client->status->sendImage('s', ['image' => ['url' => 'http://img'], 'recipients' => ['628123456789@c.us'], 'caption' => 'c']);
+        $this->assertSame(['image' => ['url' => 'http://img'], 'recipients' => ['628123456789@c.us'], 'caption' => 'c'], $backend->lastCall()['body']);
+        $client->status->sendVideo('s', ['video' => ['url' => 'http://vid'], 'recipients' => ['628123456789@c.us']]);
+        $this->assertSame(['video' => ['url' => 'http://vid'], 'recipients' => ['628123456789@c.us']], $backend->lastCall()['body']);
         // A voice status wraps its media under `audio` and carries no caption.
-        $client->status->sendVoice('s', ['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['a@c.us']]);
+        $client->status->sendVoice('s', ['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['628123456789@c.us']]);
         $this->assertSame('/api/sessions/s/status/send-voice', $backend->lastCall()['path']);
-        $this->assertSame(['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['a@c.us']], $backend->lastCall()['body']);
+        $this->assertSame(['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['628123456789@c.us']], $backend->lastCall()['body']);
     }
 
     public function testVotePollPostsOptionTexts(): void
@@ -504,7 +520,9 @@ class ResourcesTest extends TestCase
         $client->health->check();
         $this->assertSame('/api/health', $backend->calls()[0]['path']);
         $client->health->live();
+        $this->assertRequest($backend, 'GET', '/api/health/live');
         $client->health->ready();
+        $this->assertRequest($backend, 'GET', '/api/health/ready');
         $client->auth();
         $this->assertSame('POST', $backend->calls()[3]['method']);
         $this->assertStringContainsString('/auth/validate', $backend->calls()[3]['url']);
@@ -545,4 +563,124 @@ class ResourcesTest extends TestCase
         $this->assertStringContainsString('call.whatsapp.com', $res['link']);
     }
 
+    public function testRedriveDeliveryFailuresPostsTheFilterOrAnEmptyObject(): void
+    {
+        $result = ['redriven' => 1, 'delivered' => 1, 'enqueued' => 0, 'failed' => 0, 'skipped' => 0, 'remaining' => 0];
+        $backend = new MockBackend();
+        $backend->on(200, $result);
+        $backend->on(200, $result);
+        $client = $backend->makeClient();
+
+        $this->assertSame($result, $client->webhooks->redriveDeliveryFailures(['sessionId' => 's', 'limit' => 10]));
+        $this->assertRequest($backend, 'POST', '/api/webhooks/delivery-failures/redrive');
+        $this->assertSame('{"sessionId":"s","limit":10}', $backend->rawBody(0));
+
+        // An empty filter must go out as a JSON object: `[]` is not a valid body for the DTO.
+        $client->webhooks->redriveDeliveryFailures();
+        $this->assertSame('{}', $backend->rawBody(1));
+    }
+
+    public function testSendMethodsForwardIdempotencyKeysWithoutChangingJson(): void
+    {
+        $cases = [
+            ['sendText', 'send-text', ['chatId' => 'a@c.us', 'text' => 'hello', 'quotedMessageId' => 'q']],
+            ['sendImage', 'send-image', ['chatId' => 'a@c.us', 'url' => 'https://media/image', 'caption' => 'image']],
+            ['sendVideo', 'send-video', ['chatId' => 'a@c.us', 'url' => 'https://media/video']],
+            ['sendAudio', 'send-audio', ['chatId' => 'a@c.us', 'url' => 'https://media/audio', 'ptt' => true]],
+            ['sendDocument', 'send-document', ['chatId' => 'a@c.us', 'url' => 'https://media/doc', 'filename' => 'doc.pdf']],
+            ['sendSticker', 'send-sticker', ['chatId' => 'a@c.us', 'url' => 'https://media/sticker']],
+            ['sendLocation', 'send-location', ['chatId' => 'a@c.us', 'latitude' => -6.2, 'longitude' => 106.8]],
+            ['sendContact', 'send-contact', ['chatId' => 'a@c.us', 'contactName' => 'A', 'contactNumber' => '628']],
+            ['sendTemplate', 'send-template', ['chatId' => 'a@c.us', 'templateId' => 't', 'vars' => []]],
+            ['sendPoll', 'send-poll', ['chatId' => 'a@c.us', 'name' => 'Q', 'options' => ['A', 'B']]],
+            ['reply', 'reply', ['chatId' => 'a@c.us', 'quotedMessageId' => 'q', 'text' => 'reply']],
+            ['forward', 'forward', ['fromChatId' => 'a@c.us', 'toChatId' => 'b@c.us', 'messageId' => 'm']],
+        ];
+        foreach ([null, '!', str_repeat('a', 255)] as $key) {
+            $backend = new MockBackend();
+            $client = $backend->makeClient();
+            foreach ($cases as $index => [$method, $segment, $body]) {
+                $backend->on(200, ['messageId' => 'm', 'timestamp' => 1]);
+                if ($key === null) {
+                    $client->messages->{$method}('s', $body);
+                } else {
+                    $client->messages->{$method}('s', $body, $key);
+                }
+                $call = $backend->lastCall();
+                $this->assertSame('POST', $call['method'], $method);
+                $this->assertSame('/api/sessions/s/messages/' . $segment, $call['path'], $method);
+                $this->assertSame($body, $call['body'], $method);
+                $expected = $body;
+                if ($method === 'sendTemplate') {
+                    $expected['vars'] = new \stdClass();
+                }
+                $this->assertSame(json_encode($expected), $backend->rawBody($index), $method);
+                if ($key === null) {
+                    $this->assertArrayNotHasKey('idempotency-key', $call['headers'], $method);
+                } else {
+                    $this->assertSame($key, $call['headers']['idempotency-key'], $method);
+                }
+            }
+        }
+    }
+
+    public function testSendKeysStayLocalToEachRequest(): void
+    {
+        $backend = new MockBackend();
+        $client = $backend->makeClient();
+        $body = ['chatId' => 'a@c.us', 'text' => 'hello'];
+        foreach (['first-key', 'second-key', null] as $key) {
+            $backend->on(200, ['messageId' => 'm', 'timestamp' => 1]);
+            if ($key === null) {
+                $client->messages->sendText('s', $body);
+                $this->assertArrayNotHasKey('idempotency-key', $backend->lastCall()['headers']);
+            } else {
+                $client->messages->sendText('s', $body, $key);
+                $this->assertSame($key, $backend->lastCall()['headers']['idempotency-key']);
+            }
+            $this->assertSame($body, $backend->lastCall()['body']);
+        }
+    }
+
+    public function testSendKeyOverridesDefaultHeaderWithoutChangingDefaults(): void
+    {
+        $backend = new MockBackend();
+        $defaults = ['iDeMpOtEnCy-KeY' => 'default-key', 'X-Trace' => 'trace'];
+        $client = new Client([
+            'baseUrl' => 'http://localhost:2785',
+            'apiKey' => 'owa_k1_test',
+            'httpClient' => $backend->httpClient(),
+            'defaultHeaders' => $defaults,
+        ]);
+        $body = ['chatId' => 'a@c.us', 'text' => 'hello'];
+        $backend->on(200, ['messageId' => 'm', 'timestamp' => 1]);
+        $client->messages->sendText('s', $body, 'request-key');
+        $this->assertSame('request-key', $backend->lastCall()['headers']['idempotency-key']);
+        $this->assertSame('trace', $backend->lastCall()['headers']['x-trace']);
+        $backend->on(200, ['messageId' => 'm', 'timestamp' => 1]);
+        $client->messages->sendText('s', $body);
+        $this->assertSame('default-key', $backend->lastCall()['headers']['idempotency-key']);
+        $this->assertSame(['iDeMpOtEnCy-KeY' => 'default-key', 'X-Trace' => 'trace'], $defaults);
+    }
+
+    public function testInvalidSendKeysAreRefusedBeforeTransport(): void
+    {
+        $backend = new MockBackend();
+        $client = $backend->makeClient();
+        foreach (['', ' ', 'contains space', "key\n", "\xC3\xA9", str_repeat('a', 256)] as $key) {
+            try {
+                $client->messages->sendText('s', ['chatId' => 'a@c.us', 'text' => 'hello'], $key);
+                $this->fail('Expected invalid key to be refused');
+            } catch (\InvalidArgumentException $error) {
+                $this->assertStringContainsString('1-255 visible ASCII', $error->getMessage());
+                $this->assertSame([], $backend->calls());
+            }
+        }
+    }
+
+    private function assertRequest(MockBackend $backend, string $method, string $path): void
+    {
+        $this->assertSame($method, $backend->lastCall()['method']);
+        $this->assertSame($path, $backend->lastCall()['path']);
+    }
 }

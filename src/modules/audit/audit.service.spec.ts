@@ -120,8 +120,11 @@ describe('AuditService', () => {
     expect(removed).toBe(7);
     const arg = (repo.delete.mock.calls as unknown[][])[0][0] as { createdAt: unknown };
     const cutoff = (arg.createdAt as { value: Date }).value; // LessThan(cutoff)
-    const expected = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    expect(Math.abs(cutoff.getTime() - expected)).toBeLessThan(10_000);
+    // Calendar days in local time, as the service counts them: a fixed 30 * 24h span is an hour off
+    // whenever the window crosses a DST change.
+    const expected = new Date();
+    expected.setDate(expected.getDate() - 30);
+    expect(Math.abs(cutoff.getTime() - expected.getTime())).toBeLessThan(10_000);
   });
 
   it('cleanup returns 0 when the driver reports a null affected count', async () => {

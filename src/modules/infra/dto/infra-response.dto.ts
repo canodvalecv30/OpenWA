@@ -71,7 +71,12 @@ export class InfraStorageStatusDto {
   @ApiProperty({ enum: ['local', 's3'], example: 'local' })
   type!: string;
 
-  @ApiPropertyOptional({ description: 'Local storage root. Present only for `local`.', example: './data/storage' })
+  @ApiPropertyOptional({
+    description:
+      'Local storage root. Also reported for `s3`, where it is the fallback directory used while the bucket ' +
+      'is unreachable.',
+    example: './data/media',
+  })
   path?: string;
 
   @ApiPropertyOptional({ description: 'Bucket name. Present only for `s3`.', example: 'openwa-media' })
@@ -94,7 +99,12 @@ export class InfraEngineStatusDto {
   @ApiProperty({ example: './data/sessions' })
   sessionDataPath!: string;
 
-  @ApiProperty({ description: 'Extra Chromium arguments, as configured.', example: '' })
+  @ApiProperty({
+    description:
+      'Effective Chromium launch arguments: PUPPETEER_ARGS or the defaults, with --lang=en-US appended unless a ' +
+      '--lang flag is already present.',
+    example: '--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --lang=en-US',
+  })
   browserArgs!: string;
 
   @ApiPropertyOptional({
@@ -135,7 +145,7 @@ export class InfraStatusResponseDto {
   @ApiProperty({
     type: [String],
     description:
-      'Which of the four settings the dashboard can edit are supplied by a layer ABOVE ' +
+      'Which dashboard-editable settings are supplied by a layer ABOVE ' +
       '`data/.env.generated` — the container environment or a project `.env` — and so cannot be ' +
       'changed from the dashboard until that layer is. Reported, not inferred from a running-vs-saved ' +
       'mismatch: a save that has not been restarted yet looks identical and needs the opposite advice.',
@@ -491,13 +501,27 @@ export class InfraImportDataResponseDto {
   @ApiProperty({ type: TableCountsDto, description: 'Rows written per table.' })
   counts!: TableCountsDto;
 
-  @ApiProperty({ type: [String], description: 'Problems that did not stop the import.', example: [] })
+  @ApiProperty({
+    type: [String],
+    description:
+      'Why the restore was rolled back (per-row failures, a failed session ownership restore, chat-state re-key ' +
+      'or restored-row cleanup, or a backup with no rows). Non-empty only when `imported` is false; non-fatal ' +
+      'messages are in `notices`.',
+    example: [],
+  })
   warnings!: string[];
 
   @ApiProperty({ type: [String], description: 'Informational messages about what the import did.', example: [] })
   notices!: string[];
 
-  @ApiProperty({ description: 'Whether the process must restart before the imported state is live.', example: true })
+  @ApiProperty({
+    description:
+      'True when an engine may still be writing into the restored tables (orphans left running by `force`, a ' +
+      'failed `stopOrphans` teardown, sessions held by another node; restart to reconcile), or when plugin ' +
+      'instance bindings could not be re-synced after the commit (a restart does not repair this; follow the ' +
+      'manual check named in `notices`). Can be true even when `imported` is false.',
+    example: false,
+  })
   restartRequired!: boolean;
 
   @ApiProperty({

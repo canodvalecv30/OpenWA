@@ -5,7 +5,7 @@
 > **Current Status: ✅ Implemented**
 >
 > The plugin runtime — loader, hook bus, capability facade, permission enforcement, per-session
-> activation, and a `worker_thread` sandbox for untrusted plugins — is shipped and wired.
+> activation, and a `worker_thread` sandbox for user-installed plugins — is shipped and wired.
 
 | Component                | Status         | Location                                                           |
 | ------------------------ | -------------- | ------------------------------------------------------------------ |
@@ -17,15 +17,15 @@
 | **Dashboard UI**         | ✅ Implemented | `dashboard/src/pages/Plugins.tsx`                                  |
 | **REST API**             | ✅ Implemented | `src/modules/plugins/plugins.controller.ts`                        |
 
-| Component                    | Status         | Notes                                                                                                                        |
-| ---------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Sandboxed execution**      | ✅ Implemented | Untrusted (disk-loaded) plugins run in a `worker_thread`; see [30 — Plugin Sandboxing](./30-plugin-sandboxing.md). No `vm2`. |
-| **Permission enforcement**   | ✅ Implemented | Capability permissions enforced at the call boundary via `assertPermission`                                                  |
-| **Per-session activation**   | ✅ Implemented | A session-scoped plugin runs only for the sessions an operator activated it for                                              |
-| **Per-session config**       | ✅ Implemented | Per-session config overrides shallow-merged over the base config at hook time                                                |
-| **Built-in plugins**         | ✅ Implemented | The two engine adapters (`whatsapp-web.js`, `baileys`) register as in-process built-ins                                      |
-| **Plugin install / catalog** | ✅ Implemented | Install a `.zip` by upload or URL, or from the remote catalog                                                                |
-| **@openwa/plugin-sdk**       | 🔜 Planned     | NPM package not yet published; plugins implement `IPlugin` directly today                                                    |
+| Component                    | Status         | Notes                                                                                                                                    |
+| ---------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Sandboxed execution**      | ✅ Implemented | User-installed (disk-loaded) plugins run in a `worker_thread`; see [30 — Plugin Sandboxing](./30-plugin-sandboxing.md). No `vm2`.        |
+| **Permission enforcement**   | ✅ Implemented | Capability permissions enforced at the call boundary via `assertPermission`                                                              |
+| **Per-session activation**   | ✅ Implemented | A session-scoped plugin runs only for the sessions an operator activated it for                                                          |
+| **Per-session config**       | ✅ Implemented | Per-session config overrides deep-merged over the base config at hook time (nested objects merge key by key; arrays and scalars replace) |
+| **Built-in plugins**         | ✅ Implemented | The two engine adapters (`whatsapp-web.js`, `baileys`) register as in-process built-ins                                                  |
+| **Plugin install / catalog** | ✅ Implemented | Install a `.zip` by upload or URL, or from the remote catalog                                                                            |
+| **@openwa/plugin-sdk**       | 🔜 Planned     | NPM package not yet published; plugins implement `IPlugin` directly today                                                                |
 
 ---
 
@@ -52,9 +52,9 @@ flowchart TB
     end
 ```
 
-1. **Isolation** - Untrusted plugins (anything loaded from the `plugins/` directory) run in a `worker_thread`, separate from in-process built-ins; capability calls round-trip to the host. First-party built-ins (the engine adapters) run in-process. A `worker_thread` is V8-context isolation in the same OS process, not an OS-level sandbox — see [30 — Plugin Sandboxing](./30-plugin-sandboxing.md) for what it does and does not guarantee, and the OS-containment guidance.
+1. **Isolation** - User-installed plugins (anything loaded from the `plugins/` directory) run in a `worker_thread`, separate from in-process built-ins; capability calls round-trip to the host. First-party built-ins (the engine adapters) run in-process. A `worker_thread` is V8-context isolation in the same OS process, not an OS-level sandbox — see [30 — Plugin Sandboxing](./30-plugin-sandboxing.md) for what it does and does not guarantee, and the OS-containment guidance.
 2. **Extensibility** - Easy to add new features
-3. **Safety** - Capability permissions are enforced at the call boundary (`assertPermission` throws `PluginCapabilityError`), session scope is enforced per call, and outbound HTTP is SSRF-guarded.
+3. **Safety** - Capability permissions are enforced at the call boundary (`assertPermission` throws `PluginCapabilityError`), session scope is enforced per call, and `ctx.net.fetch` is SSRF-guarded and host-allowlisted (a direct Node socket opened by the worker is not; see [30 - Plugin Sandboxing](./30-plugin-sandboxing.md)).
 4. **Performance** - Lazy loading, minimal overhead
 
 ## 19.2 Plugin Types
@@ -109,8 +109,8 @@ plugins/
 ### Manifest File
 
 `id`, `name`, `version`, `type`, and `main` are required; the rest are optional. There is **no**
-`types` field and **no** version-compatibility (`min`/`maxVersion`) check — the loader does not gate on
-a host version, except for the SDK-major check applied to a manifest that declares `ingress` (see the
+`types` field and **no** `maxVersion`. The host version is gated by `minOpenWAVersion` only (see its
+row), and the SDK major by the check applied to a manifest that declares `ingress` (see the
 `sdkVersion` row). The config schema is the top-level `configSchema` (note: not nested under `config`).
 
 ```json
@@ -164,8 +164,9 @@ a host version, except for the SDK-major check applied to a manifest that declar
 | `sessions`              | —        | Session ids this plugin may act on, or `['*']`. Absent = `['*']`. Static — editing config can't widen it                                                                                                                                                                                             |
 | `sessionScoped`         | —        | Default `true`. A scoped plugin only sees events for the sessions it's activated for; `false` = always runs                                                                                                                                                                                          |
 | `net.allow`             | —        | Outbound-HTTP host allowlist for `ctx.net.fetch` (`host`, `host:port`, or `'*'`). Absent = deny all, unless `net.allowConfigHosts` admits a host                                                                                                                                                     |
-| `net.allowConfigHosts`  | —        | Config keys holding an https URL; each URL's host is admitted at fetch time on top of `net.allow`, so an adapter can reach an operator-configured host without `net.allow: ['*']`. Credentialed or non-https values are ignored, and the SSRF guard still applies                                    |
+| `net.allowConfigHosts`  | —        | Config keys holding an https URL; each URL's https origin (scheme, host and port) is admitted at fetch time on top of `net.allow`, so an adapter can reach an operator-configured host without `net.allow: ['*']`. Credentialed or non-https values are ignored, and the SSRF guard still applies    |
 | `sdkVersion`            | —        | Integration SDK `major` (or `major.minor`) the plugin was authored against. Absent = `'1'`. Only enforced for a manifest declaring `ingress`: a major other than `1` is refused at load                                                                                                              |
+| `minOpenWAVersion`      | -        | Oldest OpenWA release the plugin runs on (`MAJOR.MINOR.PATCH`). Install answers 400 and boot load fails when the running host is older; a malformed value is rejected. Absent or `null` = no floor                                                                                                   |
 | `ingress`               | —        | Inbound webhook routes this plugin claims (requires the `webhook:ingress` permission). Validated at load — route uniqueness, signature scheme, ack contract; see [25 — Integration Fabric](./25-integration-fabric.md)                                                                               |
 | `configSchema`          | —        | Declarative config schema the dashboard renders as a form when there is no `configUi`. Still required with one: it defines the fields, their types and which are `secret`                                                                                                                            |
 | `configUi`              | —        | Optional self-contained HTML config editor served into a sandboxed iframe. When present it **replaces** the generated form and owns saving — the dashboard renders neither the form nor its Save button                                                                                              |
@@ -185,9 +186,11 @@ it has an opaque origin and no access to the dashboard. It talks to the host by 
 
 `theme` matters because an opaque-origin iframe cannot read the dashboard's theme for itself; without it
 an editor can only guess, and a light-only editor becomes a glaring white panel inside a dark modal. It is
-sent once, with the handshake — the theme control sits behind the modal overlay, so the theme cannot
-change while an editor is open. Treat it as optional: an editor that ignores it still works, and one that
-uses it should fall back to `prefers-color-scheme` so it stays readable on an older host.
+sent once, with the handshake — the theme control sits behind the modal overlay, so an explicit Light or
+Dark choice cannot change while an editor is open. With the System theme, though, an OS color-scheme change
+is not forwarded, so an editor that wants to follow it should also listen to `prefers-color-scheme` inside
+the frame. Treat it as optional: an editor that ignores it still works, and one that uses it should fall
+back to `prefers-color-scheme` so it stays readable on an older host.
 
 `locale` is the dashboard's language code (`'es'`, `'zh-CN'`, ...), sent for the same reason: the iframe
 cannot read the operator's language setting, and `navigator.language` differs from it whenever the
@@ -320,7 +323,7 @@ claims a route the manifest already declared under `ingress`: the host owns the 
 ### Capability facade
 
 A plugin reaches WhatsApp, the engine, and the network **only** through these namespaces. Each call is
-gated by the matching declared permission (and, for everything except `net`, the session scope) — a
+gated by the matching declared permission (and, for everything except `net` and `storage`, the session scope) — a
 missing grant throws a `PluginCapabilityError`.
 
 ```typescript
@@ -345,7 +348,7 @@ export interface PluginEngineReadCapability {
 }
 
 // ctx.net — requires 'net:fetch'. Always through the host SSRF guard, scoped to the effective host
-// allowlist (manifest net.allow + the hosts of the net.allowConfigHosts config keys).
+// allowlist (manifest net.allow + the https origins of the net.allowConfigHosts config keys).
 export interface PluginNetCapability {
   fetch(url: string, init?: PluginNetRequestInit): Promise<PluginNetResponse>;
 }
@@ -518,21 +521,33 @@ is blocked: a handler that re-fires the event it is handling is short-circuited 
 re-entry only). Plugins never call `HookManager` directly — they use `ctx.registerHook(...)`, which
 also applies the per-session activation gate.
 
+Chains for different messages run concurrently, so a handler can see one chat's messages out of order.
+The gateway still stores and emits each chat's messages in arrival order: the `message:received` and
+`message:sent` chains run concurrently, but the row insert, the websocket event, `message:persisted` and
+the start of webhook dispatch wait for every earlier message of the same chat. A slow handler therefore
+delays that chat's later messages, by at most its 5 s hook timeout (`SANDBOX_HOOK_TIMEOUT_MS`) for a
+sandboxed plugin. Webhook dispatch itself is not ordered: its queue jobs and HTTP deliveries run
+concurrently, so a receiver that needs order should sort by the message's `data.timestamp`. That value is
+whole seconds from WhatsApp, so messages sent within the same second cannot be put back in order.
+
 ## 19.6 Plugin Loader
 
 `PluginLoaderService` (`src/core/plugins/plugin-loader.service.ts`) is the NestJS provider that
 discovers, loads, and runs plugins.
 
-**Discovery & load.** On `onModuleInit` it registers built-in plugins programmatically (the engine
-adapters; see §19.7), then scans the plugins directory (`plugins.dir`, default `<dataDir>/plugins` — the same tree the
+**Discovery & load.** On `onModuleInit` it scans the plugins directory (`plugins.dir`, default `<dataDir>/plugins` — the same tree the
 registry and each plugin's `ctx.storage` live in, so code and persisted state stay together on one
-volume; `PLUGINS_DIR` overrides it). For each
+volume; `PLUGINS_DIR` overrides it). The engine built-ins are not registered here: `EngineFactory`
+registers them in its own `onModuleInit` through `registerBuiltInPlugin` (see §19.7). For each
 sub-directory with a `manifest.json` it reads the manifest, validates the required fields
 (`id`/`name`/`version`/`type`/`main`), and records an `INSTALLED` plugin plus a persisted registry
 entry — **without running any plugin code**. Persisted config and per-session activation/config are
-read back so an operator's choices survive a restart. There is **no** host version-compatibility check;
-the one version gate is `validateIngressManifest`, which refuses a manifest declaring `ingress` whose
-`sdkVersion` major is not the supported Integration SDK major (`1`).
+read back so an operator's choices survive a restart. There are two version gates. The manifest
+validator refuses a plugin whose `minOpenWAVersion` is newer than the running OpenWA (at boot the
+plugin is skipped and logged as `plugin_load_failed`, it does not appear in `GET /plugins`, and
+its config is kept so it loads again after a host upgrade), and `validateIngressManifest`
+refuses a manifest declaring `ingress` whose `sdkVersion` major is not the supported Integration SDK
+major (`1`).
 
 > Loading a plugin from disk never runs it: a load always yields `INSTALLED`. Enabling is a separate
 > step that runs the lifecycle, and happens either on an explicit ADMIN action or — for a plugin the
@@ -556,7 +571,7 @@ double-enable, and engines must match the configured active engine):
 - **Built-in (trusted)** → `enableInProcess`: `require()` the `main` module (path-contained to the
   plugin dir), instantiate the default-exported class, and run `onLoad` then `onEnable` in-process with
   the live capability context.
-- **Untrusted (disk-loaded)** → `enableSandboxed`: spawn a `worker_thread`, load the module there, and
+- **User-installed (disk-loaded)** → `enableSandboxed`: spawn a `worker_thread`, load the module there, and
   drive `onLoad`/`onEnable` over the channel. Capability calls and hook dispatches round-trip to the
   host, which runs the **same** permission + session-scope checks. Lifecycle calls are bounded by a
   30 s timeout and hooks by a 5 s timeout; a failure tears the worker back down. See
@@ -676,7 +691,8 @@ URL / catalog), not an npm/github source descriptor.
 > and `X-Content-Type-Options: nosniff`. The dashboard fetches it **with** the API key and injects the
 > body as an iframe `srcdoc` (opaque origin), applying the current document's CSP nonce to inline scripts;
 > the editor exchanges config over a `postMessage` bridge, so the API key never reaches the iframe. If
-> the bridge does not initialize, the dashboard shows an error and keeps a declared `configSchema` form usable.
+> the bridge does not initialize within 5 s, the dashboard shows an error; the generated `configSchema`
+> form is not rendered as a fallback.
 
 ## 19.9 Plugin Security
 
@@ -744,7 +760,7 @@ first `ctx.registerSearchProvider` call.
 
 Two further checks apply on top of the permission:
 
-- **Session scope.** Every capability but `net` is session-scoped through `assertSessionActive`, which
+- **Session scope.** Every capability but `net` and `storage` is session-scoped through `assertSessionActive`, which
   requires **both** that the manifest `sessions` list admits the session (`assertSessionAllowed`; `['*']` =
   all) and that the operator has activated the plugin for it. Most verbs run it up front, on the
   `sessionId` the plugin passed; `ctx.mappings.getByProvider` takes no `sessionId`, so it runs the check
@@ -752,30 +768,36 @@ Two further checks apply on top of the permission:
   way an out-of-scope session is never reachable. The `sessionId` comes from the plugin, so this is the
   security boundary; the manifest half is static (editing config can't widen it).
 - **Network allowlist.** `ctx.net.fetch` additionally requires the target host to be on the plugin's
-  **effective** allowlist: `manifest.net.allow` plus the host of every `net.allowConfigHosts` config key
+  **effective** allowlist: `manifest.net.allow` plus the https origin of every `net.allowConfigHosts` config key
   that resolves to an https URL, taken across the base config **and** every per-session override. A host
   admitted only through `allowConfigHosts` is therefore allowed while absent from `net.allow`. The request
   always passes through the SSRF guard (which blocks internal IPs even for an allowlisted host).
 
 ### Sandboxed execution
 
-Untrusted plugins (anything loaded from the plugins directory) run in a Node `worker_thread`; there is
+User-installed plugins (anything loaded from the plugins directory) run in a Node `worker_thread`; there is
 **no `vm2`**. First-party built-ins (the engine adapters) run in-process. The loader routes by trust
 tier automatically. Key properties:
 
 - Each worker has a heap cap (`maxOldGenerationSizeMb`, default **256 MB**) — an OOM terminates the
   worker, not the host.
 - A sandboxed hook handler has a **5 s** time budget (`SANDBOX_HOOK_TIMEOUT_MS`); on timeout the host
-  resolves `{ continue: true }` (fail-open) so a slow/wedged handler never stalls the hook chain. The
-  same fail-open value drains in-flight hooks if the worker crashes.
+  resolves `{ continue: true }` (fail-open), so each sandboxed subscriber delays the hook chain by at most
+  5 s per event. The same fail-open value drains in-flight hooks if the worker crashes. The timeout is
+  logged at most once per event per minute and shows as the last hook error in plugin health.
+- After a hook, webhook or search dispatch times out, the host pings the worker. A worker whose event
+  loop is blocked (a synchronous loop) cannot answer within 5 s, so it is terminated and the plugin is
+  set to `ERROR`, as on a crash; a slow async handler answers and is left running.
 - Lifecycle methods (`load`/`onLoad`/`onEnable`/`onDisable`) and `healthCheck` are bounded by a **30 s**
   / **5 s** timeout respectively, so a wedged plugin can't hang an ADMIN enable/disable or the health endpoint.
 - The worker gets a **minimal allowlisted env** (`NODE_ENV`, `NODE_EXTRA_CA_CERTS`, `TZ`) — host secrets
-  (master key, DB/Redis vars, …) are withheld.
+  (master key, DB/Redis vars, …) are left out of the worker's `process.env`. That is hygiene, not a
+  boundary: the worker can still read the process environment through `fs`.
 
 This is V8-context isolation in the same OS process, not an OS-level sandbox: a worker can still reach
-Node built-ins (`fs`, `process`, sockets). For genuinely untrusted plugins, combine it with OS
-containment (the shipped Docker image runs read-only rootfs, non-root, `cap_drop: ALL`). See
+Node built-ins (`fs`, `process`, sockets), so it is fault containment and installing a plugin is full
+host trust. The bundled `docker-compose.yml` (not the image) adds read-only rootfs and `cap_drop: ALL`,
+which limit what the process can do to the host but not what a plugin inside it can reach. See
 [30 — Plugin Sandboxing](./30-plugin-sandboxing.md) for the full security model and author rules.
 
 ---

@@ -37,6 +37,17 @@ it('carries media and collapses the type to the status union', () => {
   expect(s.media).toEqual({ mimetype: 'image/jpeg', data: 'AAAA' });
 });
 
+// The store picks the omitted-media reason from these two: without them an engine-omitted status
+// is recorded as over the cap, and that reason goes out on the status.received webhook.
+it('carries the engine-omitted marker and the size of media it did not download', () => {
+  const s = buildIncomingStatus({
+    ...base,
+    type: 'image',
+    media: { mimetype: 'image/jpeg', omitted: true, sizeBytes: 99 },
+  })!;
+  expect(s.media).toStrictEqual({ mimetype: 'image/jpeg', data: undefined, omitted: true, sizeBytes: 99 });
+});
+
 it('carries text-status styling through to the store row', () => {
   const s = buildIncomingStatus({ ...base, backgroundColor: '#25d366', font: 2 })!;
   expect(s.backgroundColor).toBe('#25d366');

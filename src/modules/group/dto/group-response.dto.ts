@@ -80,7 +80,10 @@ export class GroupInfoDto {
   @ApiProperty({ type: [GroupParticipantDto], description: 'Members of the group.' })
   participants!: GroupParticipantDto[];
 
-  @ApiPropertyOptional({ description: 'Whether this account can no longer post (left or removed).', example: false })
+  @ApiPropertyOptional({
+    description: 'Whether this account cannot post: the group is announce-only and this account is not an admin.',
+    example: false,
+  })
   isReadOnly?: boolean;
 
   @ApiPropertyOptional({ description: 'Engine-reported announce flag.', example: false })

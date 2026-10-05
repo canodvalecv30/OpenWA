@@ -295,11 +295,15 @@ describe('SessionAuthDirMigration', () => {
     expect(fs.existsSync(path.join(baileysDir, uuidName))).toBe(false);
   });
 
-  it('skips the query and the filesystem entirely when there are no sessions', async () => {
+  it('stops after the query and leaves an orphan alone when there are no sessions', async () => {
     seed(path.join(sessionsDir, 'session-orphan'), 'orphan');
+    const repository = { find: jest.fn().mockResolvedValue([]) } as unknown as Repository<Session>;
+    const get = jest.fn((key: string) => (key === 'engine.sessionDataPath' ? sessionsDir : baileysDir));
 
-    await buildMigration([]).onModuleInit();
+    await new SessionAuthDirMigration(repository, { get } as unknown as ConfigService).onModuleInit();
 
+    // The directory paths are resolved only once there is a session to migrate.
+    expect(get).not.toHaveBeenCalled();
     expect(fs.readdirSync(sessionsDir)).toEqual(['session-orphan']);
   });
 });

@@ -42,8 +42,9 @@ describe('AddTemplateNameUnique migration', () => {
   });
 
   it('deduplicates pre-existing (sessionId, name) collisions losslessly, keeping the earliest', async () => {
-    await insert('id-early', 'sess-1', 'welcome', '2026-01-01T00:00:00.000Z');
-    await insert('id-late', 'sess-1', 'welcome', '2026-02-01T00:00:00.000Z');
+    // The earlier row has the id that sorts last and is inserted second, so only createdAt can pick it.
+    await insert('id-a-late', 'sess-1', 'welcome', '2026-02-01T00:00:00.000Z');
+    await insert('id-z-early', 'sess-1', 'welcome', '2026-01-01T00:00:00.000Z');
     await insert('id-other', 'sess-1', 'promo', '2026-01-01T00:00:00.000Z');
 
     const runner = ds.createQueryRunner();
@@ -54,8 +55,8 @@ describe('AddTemplateNameUnique migration', () => {
     expect(all).toHaveLength(3);
 
     const byId = Object.fromEntries(all.map(r => [r.id, r.name]));
-    expect(byId['id-early']).toBe('welcome'); // earliest keeps the clean name
-    expect(byId['id-late']).toBe('welcome-dup-id-late'); // later duplicate renamed losslessly
+    expect(byId['id-z-early']).toBe('welcome'); // earliest keeps the clean name
+    expect(byId['id-a-late']).toBe('welcome-dup-id-a-late'); // later duplicate renamed losslessly
     expect(byId['id-other']).toBe('promo'); // unrelated row untouched
 
     // The unique index now rejects a fresh duplicate.
@@ -76,9 +77,9 @@ describe('AddTemplateNameUnique migration', () => {
     await runner.release();
   });
 
-  it('lifts the runtime statement_timeout for the migration transaction on Postgres', async () => {
-    // The runtime data pool's statement_timeout is inherited by the boot-migration connection; this
-    // dedup UPDATE / CREATE UNIQUE INDEX over templates must not be aborted mid-flight.
+  it('clears statement_timeout for the migration transaction on Postgres', async () => {
+    // The migration pool carries no runtime statement_timeout, but a role- or database-level default
+    // could still abort this dedup UPDATE / CREATE UNIQUE INDEX over templates mid-flight.
     const queries: string[] = [];
     const pgRunner = {
       dataSource: { options: { type: 'postgres' } },

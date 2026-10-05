@@ -47,6 +47,9 @@ export class IntegrationInstanceController {
       'Instance created. The plaintext ingress secret and verifyToken are revealed once in this response — store them immediately (both masked on every later read).',
     type: InstanceView,
   })
+  @ApiResponse({ status: 400, description: 'Validation failed, or the plugin is not ingress-capable.' })
+  @ApiResponse({ status: 403, description: "sessionScope is outside the key's allowedSessions." })
+  @ApiResponse({ status: 404, description: 'Plugin not found.' })
   @ApiResponse({ status: 409, description: 'An instance with that id already exists for the plugin' })
   async create(
     @Param('pluginId') pluginId: string,
@@ -85,6 +88,7 @@ export class IntegrationInstanceController {
 
   @Get(':instanceId')
   @ApiResponse({ status: 200, description: 'The instance (secret masked).', type: InstanceView })
+  @ApiResponse({ status: 404, description: "Unknown instance, or one outside the key's allowedSessions." })
   async getOne(
     @Param('pluginId') pluginId: string,
     @Param('instanceId') instanceId: string,
@@ -102,6 +106,7 @@ export class IntegrationInstanceController {
       'Secret regenerated. The new plaintext secret is revealed once in this response; the verifyToken is also shown (unchanged).',
     type: InstanceView,
   })
+  @ApiResponse({ status: 404, description: "Unknown instance, or one outside the key's allowedSessions." })
   async regenerate(
     @Param('pluginId') pluginId: string,
     @Param('instanceId') instanceId: string,
@@ -109,6 +114,8 @@ export class IntegrationInstanceController {
   ): Promise<InstanceView> {
     await this.resolveVisible(pluginId, instanceId, apiKey);
     const inst = await this.instances.regenerateSecret(pluginId, instanceId);
+    // regenerateSecret() answers null when the row was deleted after resolveVisible read it.
+    if (!inst) throw new NotFoundException('instance not found');
     void this.audit.logInfo(AuditAction.INTEGRATION_INSTANCE_SECRET_REGENERATED, {
       metadata: { pluginId, instanceId },
     });
@@ -117,6 +124,9 @@ export class IntegrationInstanceController {
 
   @Patch(':instanceId')
   @ApiResponse({ status: 200, description: 'Instance updated (secret masked).', type: InstanceView })
+  @ApiResponse({ status: 400, description: 'Validation failed, or the masked config could not be restored.' })
+  @ApiResponse({ status: 403, description: "The new sessionScope is outside the key's allowedSessions." })
+  @ApiResponse({ status: 404, description: "Unknown instance, or one outside the key's allowedSessions." })
   async patch(
     @Param('pluginId') pluginId: string,
     @Param('instanceId') instanceId: string,
@@ -135,8 +145,10 @@ export class IntegrationInstanceController {
         { enabled: dto.enabled, sessionScope: dto.sessionScope, config: dto.config },
         this.schemaFor(pluginId),
       );
+      // update() answers null when the row was deleted after resolveVisible read it.
+      if (!inst) throw new NotFoundException('instance not found');
     }
-    const updated = inst as PluginInstance;
+    const updated = inst;
     // If the bound session changed, tear down the OLD scope (incl. a wildcard/null scope) so it stops
     // firing with stale config. The new scope is (re)bound right after; teardown runs first with the new
     // scope already persisted, so the wildcard retirement check sees the current state correctly.
@@ -156,6 +168,7 @@ export class IntegrationInstanceController {
   @Delete(':instanceId')
   @HttpCode(204)
   @ApiResponse({ status: 204, description: 'Instance deleted and its session scope torn down.' })
+  @ApiResponse({ status: 404, description: "Unknown instance, or one outside the key's allowedSessions." })
   async remove(
     @Param('pluginId') pluginId: string,
     @Param('instanceId') instanceId: string,

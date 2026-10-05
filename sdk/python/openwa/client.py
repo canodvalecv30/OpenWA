@@ -14,6 +14,8 @@ transport) and exposes domain resources as properties::
     # Sessions are addressed by the UUID that create() returns, not by name.
     session = client.sessions.create({"name": "my-session"})
     client.sessions.start(session["id"])
+    # Link the account before sending: scan sessions.get_qr_code or use sessions.request_pairing_code,
+    # then wait for status "ready". An unlinked session answers the send with 409.
     client.messages.send_text(session["id"], {
         "chatId": "628123456789@c.us",
         "text": "Hello from the OpenWA SDK!",

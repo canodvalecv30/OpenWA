@@ -65,6 +65,7 @@ import {
   inboundMediaMaxBytes,
   inboundMediaTimeoutMs,
   isMediaDownloadEnabled,
+  runUnderGlobalMediaGate,
   withInboundDownloadTimeout,
 } from './inbound-media-cap';
 import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
@@ -215,7 +216,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       capInboundMediaFor: (msg, maxBytesOverride) => this.capInboundMediaFor(msg, maxBytesOverride),
       config: this.config,
       getCallbacks: () => this.callbacks,
-      getSelfWid: () => this.client?.info?.wid?._serialized,
     };
     this.groups = new WwebjsGroups(this.host);
     this.messaging = new WwebjsMessaging(this.host);
@@ -237,6 +237,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       setStatus: status => this.lifecycle.setStatus(status),
       getCallbacks: () => this.callbacks,
       markReadyFromClientInfo: () => this.lifecycle.markReadyFromClientInfo(),
+      wasFreshPairing: () => this.lifecycle.qrShown,
       recoverFromStuckAuth: () => this.recoverFromStuckAuth(),
     });
     this.stuckAuth = new WwebjsStuckAuth({
@@ -294,7 +295,9 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     // that renamed it to `$1` (#747), which is the same build whose page-side rename makes these
     // downloads fail. The warnings below are the diagnostic for it, so they must carry a real id.
     const msgId = readWid(msg.id);
-    const maxBytes = maxBytesOverride ?? inboundMediaMaxBytes();
+    // An override (the status seed's STATUS_MEDIA_MAX_BYTES) only tightens the global cap: a larger one
+    // would let a download the cap below always drops run anyway, past the memory guard it exists for.
+    const maxBytes = Math.min(maxBytesOverride ?? Number.POSITIVE_INFINITY, inboundMediaMaxBytes());
     const data = (msg as unknown as { _data?: { size?: number; mimetype?: string; filename?: string } })._data;
     const declared = coerceDeclaredSize(data?.size);
     if (declared > maxBytes) {
@@ -321,7 +324,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     // base64 blob over CDP and holding the slot for it: after a burst, that backlog is what made
     // later messages miss their own deadline. A download that already started is unaffected.
     let abandoned = false;
-    const slotHeld = this.inboundLimiter.run(() => {
+    const downloadInSlot = (): Promise<void> => {
       if (abandoned) {
         resolveBounded(null);
         return Promise.resolve();
@@ -352,7 +355,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         () => undefined,
         () => undefined,
       );
-    });
+    };
+    // Per-session slot first, then the process-wide one, so a session parks at most its own
+    // INBOUND_MEDIA_CONCURRENCY waiters on the shared gate. Both are held until the download settles.
+    const slotHeld = this.inboundLimiter.run(() => runUnderGlobalMediaGate(downloadInSlot));
     // Defensive only, and deliberately kept. `run()` rejects on a full queue (gone — the queue is
     // unbounded) or on close(), which nothing calls on this limiter; the task itself swallows both
     // download outcomes. So nothing is expected here — but an unhandled rejection from a
@@ -388,6 +394,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       filename: media.filename || undefined,
       sizeBytes: Buffer.byteLength(media.data, 'base64'),
       toBase64: () => media.data,
+      maxBytes,
     });
     if (capped.omitted) {
       this.logger.warn('Inbound media exceeds MEDIA_DOWNLOAD_MAX_BYTES; dropped payload, kept envelope', {
@@ -485,15 +492,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     client.on('call', call => this.calls.handleIncomingCall(call));
   }
 
-  /**
-   * whatsapp-web.js exposes no way to observe another party's presence: WAWebPresenceChatAction
-   * offers only sendPresenceAvailable/sendPresenceUnavailable, which publish the ACCOUNT's own
-   * presence, and the library surfaces no presence event at all.
-   *
-   * Declared here inline rather than in a delegate on purpose. The parity gate reads method bodies
-   * off the prototype, so a throw hidden behind a delegate call is invisible to it and the
-   * `not-available` matrix row would go unverified; inline, the gate checks it.
-   */
   createChannel(name: string, description?: string): Promise<Channel> {
     return this.channels.createChannel(name, description);
   }
@@ -522,9 +520,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
    * whatsapp-web.js 1.34.7 can read labels and assign them, but cannot create, rename, recolour or
    * delete one — `index.d.ts` exposes getLabels / getLabelById / getChatLabels / getChatsByLabelId /
    * addOrRemoveLabels and nothing that edits the label itself.
-   *
-   * Inline rather than delegated so the parity gate, which reads bodies off the prototype, can
-   * verify the matrix row (see docs/29).
    */
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
   async upsertLabel(_label: LabelInput): Promise<void> {
@@ -536,6 +531,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     throw new EngineNotSupportedError('deleteLabel');
   }
 
+  /**
+   * whatsapp-web.js exposes no way to observe another party's presence: WAWebPresenceChatAction
+   * offers only sendPresenceAvailable/sendPresenceUnavailable, which publish the ACCOUNT's own
+   * presence, and the library surfaces no presence event at all.
+   */
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
   async subscribeToPresence(_chatId: string): Promise<void> {
     throw new EngineNotSupportedError('subscribeToPresence');
@@ -727,7 +727,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     return this.messaging.getChatHistory(chatId, limit, includeMedia, mediaMaxBytes, signal);
   }
 
-  // Delete Message
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
     return this.messaging.starMessage(chatId, messageId, star);
   }
@@ -863,7 +862,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   }
 
   // ========== Status/Stories (Phase 3) ==========
-  // Note: These are stub implementations - whatsapp-web.js has limited Status API support
 
   getContactStatuses(): Promise<Status[]> {
     return this.statuses.getContactStatuses();

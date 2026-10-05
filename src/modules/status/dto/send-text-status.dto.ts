@@ -3,8 +3,15 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ToStrictNumber } from '../../../common/utils/strict-boolean';
 
 export class SendTextStatusDto {
-  @ApiProperty({ description: 'Status text body.', example: 'Out for delivery 📦', maxLength: 4096 })
+  @ApiProperty({
+    description: 'Status text body. Must contain a non-whitespace character.',
+    example: 'Out for delivery 📦',
+    minLength: 1,
+    maxLength: 4096,
+  })
   @IsString()
+  // A blank body would publish an empty story (Baileys) or fail inside the engine with a 500.
+  @Matches(/\S/, { message: 'text must not be blank' })
   @MaxLength(4096)
   text!: string;
 

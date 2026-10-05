@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Injectable, Optional } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThanOrEqual, Repository } from 'typeorm';
@@ -8,6 +8,9 @@ import { resolveSendPacingConfig, type SendPacingConfig } from './send-pacing.co
 import { incrementSendPacingRefusals, type SendPacingRefusalReason } from '../../common/metrics/send-pacing-metrics';
 import { createLogger } from '../../common/services/logger.service';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
+import { EngineNotSentError } from '../../common/errors/engine-not-sent.error';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
@@ -53,6 +56,25 @@ export function countsTowardSendBreaker(error: unknown): boolean {
 }
 
 /**
+ * Whether a send that threw provably never went out, so its admission can be handed back: a client or
+ * refusal status (4xx), a 501 for something the engine cannot do, a media URL the SSRF guard blocked
+ * before any fetch, a WhatsApp rate limit (EngineThrottledError), turned away before it ran, or a transport
+ * failure before the message was handed to WhatsApp (EngineNotSentError). Anything else (a deadline, a
+ * dropped socket, a dead page) leaves the outcome unknown; WhatsApp may have taken the message, so its
+ * admission stays held.
+ */
+export function sentNothing(error: unknown): boolean {
+  return (
+    error instanceof SsrfBlockedError ||
+    (error instanceof HttpException &&
+      (error.getStatus() < 500 ||
+        error instanceof EngineNotSupportedError ||
+        error instanceof EngineThrottledError ||
+        error instanceof EngineNotSentError))
+  );
+}
+
+/**
  * Cold reachouts `assertReachoutAllowed` set aside on the group tally for one request, and the UTC
  * day they were taken from. Hand it back to `refundGroupReachouts` if the engine call fails.
  */
@@ -70,6 +92,60 @@ interface BreakerState {
   /** Epoch ms the breaker opened, or null while it is closed. */
   openedAt: number | null;
 }
+
+/**
+ * A send admitted recently, with the counts it read before it was admitted. A send's row is written by
+ * the caller after the check returns (after the plugin gate), so a burst of parallel requests would
+ * otherwise all read the same persisted count and all pass. Each cap is judged by the larger of the
+ * persisted count and, for every held admission, the count it read plus the admissions held from it
+ * on: none of those rows can be in the count it read, so nothing is counted twice. An admission stays held
+ * for as long as any admission taken after it is held, since those may have read before its row landed
+ * and would otherwise miss it once it stops being held. The cold cap holds its own chain the same way, over
+ * the cold admissions alone: only a cold admission reads a cold count.
+ */
+interface Admission {
+  /** Epoch ms its own term ends: a window from its admission, or from its settle. */
+  until: number;
+  /** Epoch ms it stops being held, so only its row counts from then on; refreshed by heldAdmissions. */
+  heldUntil: number;
+  sentToday: number;
+  /**
+   * Set for a cold send; the key is folded the way the cold count folds dialects. Cleared by heldAdmissions
+   * once no cold admission's own term is running, so from then on only its row counts against the cold cap.
+   */
+  cold: { key: string; coldToday: number } | null;
+}
+
+/** The admissions a session holds, in the order they were admitted, for one UTC day. */
+interface AdmissionHold {
+  dayStartMs: number;
+  admissions: Admission[];
+}
+
+/**
+ * How long each admitted send is held against the caps before only its row counts: from its own
+ * admission, or for one taken `untilSettled`, from the moment its caller settles it. It only has to
+ * outlast the gap between that moment and the row insert. A send that fails before writing a row hands
+ * its admission back (see assertSendAllowed), so only one that may still have gone out is over-counted,
+ * for this long after it settles, or as long as a send admitted after it is held, if that is longer.
+ */
+const ADMISSION_WINDOW_MS = 10_000;
+
+/**
+ * Safety bound on an admission taken `untilSettled` that its caller never settles. Far longer than an
+ * engine send normally runs (a media URL fetch is bounded by MEDIA_DOWNLOAD_TIMEOUT_MS, 30 s by default),
+ * so it only matters if a caller loses track of one, which then holds the caps for this long instead of
+ * for the rest of the day. A send still running past it stops being held.
+ */
+const UNSETTLED_ADMISSION_MAX_MS = 5 * 60_000;
+
+/**
+ * Settles the admission assertSendAllowed held. Called with nothing, for a send that provably never went
+ * out, it hands the admission back at once. Called with `true`, once the engine returned or failed with an
+ * unknown outcome, it holds the admission for ADMISSION_WINDOW_MS from now, while the row or the own-send
+ * echo lands, or for as long as a send admitted after it is held, if that is longer.
+ */
+export type SettleAdmission = (mayHaveSent?: boolean) => void;
 
 /** Refusals suppressed since the last audited one, per session. */
 interface RefusalSample {
@@ -115,6 +191,10 @@ const MAX_REFUSAL_KEYS = 1000;
  * writes no row itself but is counted through the OUTGOING row its own-send echo persists
  * (MessageProjector.handleOwnSendEcho) shortly after the send returns. Deliberate, and documented in
  * .env.example and docs/06 so the number an operator reads is the number they get.
+ * Because the row lands only after the check returns, sends admitted in the last few seconds are
+ * also held in memory (see Admission), or a parallel burst would pass against one stale count. A bulk
+ * item and a product send write their row only after the engine call, which can outlast that window
+ * (a media URL fetch, an upload), so they are held until they settle (see `untilSettled`).
  * The breaker, by contrast, is in memory on purpose: it describes live conditions, and a restart
  * clearing it is the correct behaviour.
  */
@@ -133,6 +213,7 @@ export class SendPacingService {
    * chat half is counted from the messages table and is.
    */
   private readonly groupReachoutTally = new Map<string, { dayStartMs: number; count: number }>();
+  private readonly holds = new Map<string, AdmissionHold>();
   private readonly refusalSamples = new Map<string, RefusalSample>();
 
   constructor(
@@ -153,14 +234,116 @@ export class SendPacingService {
    *
    * When the feature is off this returns before doing anything at all — no query, no map lookup — so
    * a deployment that has not opted in behaves exactly as it did before the governor existed.
+   *
+   * `hold: false` judges the send without holding it in the admission window, for a gated send that
+   * never writes a row (an edit): holding it would charge the caps for a message that is never sent.
+   *
+   * `untilSettled` holds the admission for as long as the send runs, for a caller whose row lands only
+   * after the engine call (a bulk item, a product send): the window starts when the caller settles it
+   * with `true`, bounded by UNSETTLED_ADMISSION_MAX_MS if it never does. Without it the window starts
+   * now, for a caller that writes its PENDING row before asking the engine.
+   *
+   * Returns the settle for the admission it held, or undefined when it held none. A caller whose send
+   * fails before writing a row, and before WhatsApp may have taken it, calls it with nothing so that
+   * send stops counting against the caps at once instead of refusing the next one.
    */
-  async assertSendAllowed(sessionId: string, chatId?: string): Promise<void> {
+  async assertSendAllowed(
+    sessionId: string,
+    chatId?: string,
+    opts: { hold?: boolean; untilSettled?: boolean } = {},
+  ): Promise<SettleAdmission | undefined> {
     const config = resolveSendPacingConfig(this.configService);
     if (!config.enabled) return;
 
     this.assertBreakerClosed(sessionId, config);
-    await this.assertUnderDailyCap(sessionId, config);
-    await this.assertUnderColdCap(sessionId, chatId, config);
+    const session = await this.sessionRepository.findOne({ where: { id: sessionId } });
+    // No row means the send is about to fail on its own for a better reason than pacing; let it.
+    if (!session) return;
+
+    const dayStart = startOfUtcDay(new Date());
+    // Age from createdAt, NOT connectedAt: connectedAt is overwritten on every connect, so a session
+    // that reconnects would look one day old forever and never leave the first rung of the ramp.
+    const ageDays = Math.floor((dayStart.getTime() - startOfUtcDay(session.createdAt).getTime()) / DAY_MS);
+    const allowance = this.allowanceForAge(config.warmupSchedule, ageDays);
+    const sentToday = await this.messageRepository.count({
+      where: { sessionId, direction: MessageDirection.OUTGOING, createdAt: MoreThanOrEqual(dayStart) },
+    });
+    // The overall cap is the cheaper check and bounds everything, so it settles before the cold probe.
+    this.assertUnderDailyCap(sessionId, dayStart, ageDays, allowance, sentToday);
+    const cold = await this.readColdReachouts(sessionId, chatId, dayStart, ageDays, config);
+
+    // Judged again, and admitted, with no await from here on: a concurrent request admitted while this
+    // one was reading must count, and this one must count for the next.
+    this.assertUnderDailyCap(sessionId, dayStart, ageDays, allowance, sentToday);
+    // A status post (no chatId) never writes a row and never has, so it is not held either.
+    if (!chatId) return;
+    // A chat already held as a cold admission is the same reachout again, not a new one.
+    const key = coldChatKey(chatId);
+    if (cold && !this.heldAdmissions(sessionId, dayStart).some(a => a.cold?.key === key)) {
+      this.assertUnderColdCap(sessionId, dayStart, ageDays, cold);
+    }
+    if (opts.hold !== false) {
+      const until = Date.now() + (opts.untilSettled ? UNSETTLED_ADMISSION_MAX_MS : ADMISSION_WINDOW_MS);
+      const admission: Admission = {
+        until,
+        heldUntil: until,
+        sentToday,
+        cold: cold ? { key, coldToday: cold.coldToday } : null,
+      };
+      const hold = this.holds.get(sessionId);
+      if (hold?.dayStartMs === dayStart.getTime()) hold.admissions.push(admission);
+      else this.holds.set(sessionId, { dayStartMs: dayStart.getTime(), admissions: [admission] });
+      return (mayHaveSent = false) => {
+        if (mayHaveSent) {
+          admission.until = Date.now() + ADMISSION_WINDOW_MS;
+          return;
+        }
+        // Handed back, it holds nothing.
+        admission.until = admission.heldUntil = 0;
+        const admissions = this.holds.get(sessionId)?.admissions;
+        const index = admissions?.indexOf(admission) ?? -1;
+        if (admissions && index !== -1) admissions.splice(index, 1);
+      };
+    }
+  }
+
+  /** Cold chat reachouts today: the persisted count, or more when the held admissions account for more. */
+  private chatReachoutsToday(sessionId: string, dayStart: Date, persisted: number): number {
+    const held = this.heldAdmissions(sessionId, dayStart);
+    // Newest first, so `chats` is always the distinct cold chats held from this admission on.
+    const chats = new Set<string>();
+    let count = persisted;
+    for (let i = held.length - 1; i >= 0; i--) {
+      const cold = held[i].cold;
+      if (!cold) continue;
+      chats.add(cold.key);
+      count = Math.max(count, cold.coldToday + chats.size);
+    }
+    return count;
+  }
+
+  /** This session's held admissions today, oldest first; empty once none of them is held or the day rolled. */
+  private heldAdmissions(sessionId: string, dayStart: Date): Admission[] {
+    const hold = this.holds.get(sessionId);
+    if (!hold) return [];
+    const now = Date.now();
+    // The cold terms lapse as a whole, once no cold admission's own term is running: a warm admission read no
+    // cold count, so it cannot have missed a cold row, and letting it hold them would keep a cold send that
+    // wrote no row counted for as long as warm sends keep arriving. Cleared rather than skipped, so a cold
+    // admission taken later cannot bring them back.
+    if (!hold.admissions.some(a => a.cold && a.until > now)) for (const a of hold.admissions) a.cold = null;
+    // Newest first: an admission stays held while the next one is. Each one taken after it may have read
+    // its count before this one's row landed, and its own term counts this one and each later one once, on
+    // a count read before any of their rows.
+    for (let i = hold.admissions.length - 1; i >= 0; i--) {
+      const a = hold.admissions[i];
+      a.heldUntil = Math.max(a.until, hold.admissions[i + 1]?.heldUntil ?? 0);
+    }
+    // heldUntil never rises from the oldest admission to the newest, so the hold lapses as a whole, once
+    // its oldest admission is no longer held.
+    if (hold.dayStartMs === dayStart.getTime() && (hold.admissions[0]?.heldUntil ?? 0) > now) return hold.admissions;
+    this.holds.delete(sessionId);
+    return [];
   }
 
   /**
@@ -211,16 +394,27 @@ export class SendPacingService {
     const dayStart = startOfUtcDay(new Date());
     const ageDays = Math.floor((dayStart.getTime() - startOfUtcDay(session.createdAt).getTime()) / DAY_MS);
     const allowance = this.allowanceForAge(config.coldSchedule, ageDays);
-    // Both sources of the day's reachouts: cold chat messages (persisted rows) and prior group adds
+    // A batch larger than a whole day's allowance cannot pass on any day of this rung, so a 429 with a
+    // retry hint would send a client that honours it round the same refusal every day. Nothing is
+    // reserved; the caller has to split the request.
+    if (coldCount > allowance) {
+      throw new BadRequestException(
+        `Reaching ${coldCount} new contact(s) exceeds the daily allowance of ${allowance} new ` +
+          `conversation(s) for a session ${ageDays} day(s) old; split the request into batches of at most ${allowance}`,
+      );
+    }
+    // Both sources of the day's reachouts: cold chat messages (persisted rows, or the sends just
+    // admitted when those are more) and prior group adds
     // (the in-memory tally). Group adds persist nothing, so without the tally they would not count
     // against themselves and the cap would reset every request.
-    const usedToday =
-      (await this.countColdReachoutsToday(sessionId, dayStart)) + this.groupReachoutsToday(sessionId, dayStart);
+    const coldChats = await this.countColdReachoutsToday(sessionId, dayStart);
     // The UTC day rolled over while counting: check again against the new day, so the batch is
     // reserved on (and judged by) the day it actually runs in.
     if (startOfUtcDay(new Date()).getTime() !== dayStart.getTime()) {
       return this.assertReachoutAllowed(sessionId, contactIds);
     }
+    const groupToday = this.groupReachoutsToday(sessionId, dayStart);
+    const usedToday = this.chatReachoutsToday(sessionId, dayStart, coldChats) + groupToday;
     if (usedToday + coldCount <= allowance) {
       // Reserved now, with no await between the check and the charge: a concurrent request must
       // see this batch as spent. The caller refunds it (refundGroupReachouts) if the engine call
@@ -230,7 +424,16 @@ export class SendPacingService {
       return { coldCount, dayStartMs: dayStart.getTime() };
     }
 
-    this.refuse('cold_daily_cap', sessionId, secondsUntilNextUtcDay(), {
+    // Refused only because of cold sends still held: the batch fits once they lapse, not at the next UTC day.
+    const retryAfter =
+      coldChats + groupToday + coldCount <= allowance
+        ? secondsUntilLapsed(
+            this.heldAdmissions(sessionId, dayStart)
+              .filter(a => a.cold)
+              .map(a => a.until),
+          )
+        : secondsUntilNextUtcDay();
+    this.refuse('cold_daily_cap', sessionId, retryAfter, {
       reason:
         `Reaching ${coldCount} new contact(s) would exceed the daily allowance of ${allowance} ` +
         `new conversation(s) for a session ${ageDays} day(s) old (${usedToday} already used)`,
@@ -339,23 +542,20 @@ export class SendPacingService {
     });
   }
 
-  private async assertUnderDailyCap(sessionId: string, config: SendPacingConfig): Promise<void> {
-    const session = await this.sessionRepository.findOne({ where: { id: sessionId } });
-    // No row means the send is about to fail on its own for a better reason than pacing; let it.
-    if (!session) return;
-
-    const dayStart = startOfUtcDay(new Date());
-    // Age from createdAt, NOT connectedAt: connectedAt is overwritten on every connect, so a session
-    // that reconnects would look one day old forever and never leave the first rung of the ramp.
-    const ageDays = Math.floor((dayStart.getTime() - startOfUtcDay(session.createdAt).getTime()) / DAY_MS);
-    const allowance = this.allowanceForAge(config.warmupSchedule, ageDays);
-
-    const sentToday = await this.messageRepository.count({
-      where: { sessionId, direction: MessageDirection.OUTGOING, createdAt: MoreThanOrEqual(dayStart) },
-    });
+  private assertUnderDailyCap(
+    sessionId: string,
+    dayStart: Date,
+    ageDays: number,
+    allowance: number,
+    persisted: number,
+  ): void {
+    const held = this.heldAdmissions(sessionId, dayStart);
+    const sentToday = held.reduce((max, a, i) => Math.max(max, a.sentToday + held.length - i), persisted);
     if (sentToday < allowance) return;
 
-    this.refuse('daily_cap', sessionId, secondsUntilNextUtcDay(), {
+    const retryAfter =
+      persisted < allowance ? secondsUntilLapsed(held.map(a => a.heldUntil)) : secondsUntilNextUtcDay();
+    this.refuse('daily_cap', sessionId, retryAfter, {
       reason: `Daily send allowance of ${allowance} reached for a session ${ageDays} day(s) old`,
       allowance,
       sentToday,
@@ -397,7 +597,7 @@ export class SendPacingService {
   }
 
   /**
-   * Refuse a cold reachout once the day's allowance for them is spent.
+   * Read what the cold-reachout rule needs for this send, or null when the rule does not apply.
    *
    * "Cold" means this account has no history with the chat in EITHER direction: answering someone
    * who wrote to you first is not a reachout, and counting it as one would throttle exactly the
@@ -407,12 +607,14 @@ export class SendPacingService {
    * The cheap probe runs first and settles most sends in one indexed lookup; the aggregate that
    * counts the day's cold reachouts only runs when this send is itself cold.
    */
-  private async assertUnderColdCap(
+  private async readColdReachouts(
     sessionId: string,
     chatId: string | undefined,
+    dayStart: Date,
+    ageDays: number,
     config: SendPacingConfig,
-  ): Promise<void> {
-    if (!chatId || config.coldSchedule.length === 0) return;
+  ): Promise<{ allowance: number; coldToday: number } | null> {
+    if (!chatId || config.coldSchedule.length === 0) return null;
 
     // Any row at all, either direction, any time: one message from them, or one from us last month,
     // and this is an existing relationship rather than a reachout. Probed under both user-id
@@ -421,21 +623,36 @@ export class SendPacingService {
     const hasHistory = await this.messageRepository.exists({
       where: dialectVariants(chatId).map(id => ({ sessionId, chatId: id })),
     });
-    if (hasHistory) return;
+    if (hasHistory) return null;
 
-    const session = await this.sessionRepository.findOne({ where: { id: sessionId } });
-    if (!session) return;
+    return {
+      allowance: this.allowanceForAge(config.coldSchedule, ageDays),
+      coldToday: await this.countColdReachoutsToday(sessionId, dayStart),
+    };
+  }
 
-    const dayStart = startOfUtcDay(new Date());
-    const ageDays = Math.floor((dayStart.getTime() - startOfUtcDay(session.createdAt).getTime()) / DAY_MS);
-    const allowance = this.allowanceForAge(config.coldSchedule, ageDays);
+  /** Refuse a cold reachout once the day's allowance for them is spent. */
+  private assertUnderColdCap(
+    sessionId: string,
+    dayStart: Date,
+    ageDays: number,
+    { allowance, coldToday: persisted }: { allowance: number; coldToday: number },
+  ): void {
     // Group adds share this budget: a day spent adding strangers to groups must leave fewer cold
-    // chat reachouts, so fold the in-memory group tally in alongside the persisted chat count.
-    const coldToday =
-      (await this.countColdReachoutsToday(sessionId, dayStart)) + this.groupReachoutsToday(sessionId, dayStart);
+    // chat reachouts, so fold the in-memory group tally in alongside the chat count.
+    const groupToday = this.groupReachoutsToday(sessionId, dayStart);
+    const coldToday = this.chatReachoutsToday(sessionId, dayStart, persisted) + groupToday;
     if (coldToday < allowance) return;
 
-    this.refuse('cold_daily_cap', sessionId, secondsUntilNextUtcDay(), {
+    const retryAfter =
+      persisted + groupToday < allowance
+        ? secondsUntilLapsed(
+            this.heldAdmissions(sessionId, dayStart)
+              .filter(a => a.cold)
+              .map(a => a.until),
+          )
+        : secondsUntilNextUtcDay();
+    this.refuse('cold_daily_cap', sessionId, retryAfter, {
       reason: `Daily allowance of ${allowance} new conversation(s) reached for a session ${ageDays} day(s) old`,
       allowance,
       coldToday,
@@ -446,8 +663,9 @@ export class SendPacingService {
    * Distinct chats this session started today: it sent to them today, nothing in the chat predates
    * today, and nobody wrote to it first — a chat whose counterpart messaged earlier the same day is
    * an answered conversation, not a reachout (the "cold" rule above), however new the chat is.
-   * Expressed as NOT EXISTS probes so the outer query stays on the `(sessionId, createdAt)` and
-   * `chatId` indexes; the only aggregate is a per-chat MIN over today's outgoing rows.
+   * Expressed as NOT EXISTS probes so the outer query stays on the `(sessionId, createdAt)` index
+   * and each probe seeks `(sessionId, chatId, createdAt)`; the only aggregate is a per-chat MIN over
+   * today's outgoing rows.
    */
   private countColdReachoutsToday(sessionId: string, dayStart: Date): Promise<number> {
     return (
@@ -526,6 +744,11 @@ const DAY_MS = 86_400_000;
 const DIALECT_PAIR = (alias: string): string =>
   `REPLACE(${alias}."chatId", '@s.whatsapp.net', '@c.us'), REPLACE(${alias}."chatId", '@c.us', '@s.whatsapp.net')`;
 
+/** A chat id folded the way countColdReachoutsToday folds it, so the window counts contacts alike. */
+function coldChatKey(chatId: string): string {
+  return chatId.replace('@s.whatsapp.net', '@c.us');
+}
+
 function dialectVariants(chatId: string): string[] {
   const lower = chatId.toLowerCase();
   if (lower.endsWith('@c.us')) {
@@ -550,6 +773,17 @@ function dialectVariants(chatId: string): string[] {
  */
 function startOfUtcDay(at: Date): Date {
   return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+}
+
+/**
+ * Seconds until every one of these held admissions could have lapsed, given the epoch ms each one's hold
+ * ends: when the persisted count alone is under the cap, the refusal lifts then, not at the next UTC day.
+ * One still unsettled lapses a window after its settle at the earliest, so it is hinted as if it settled now.
+ */
+function secondsUntilLapsed(holdEnds: number[]): number {
+  const now = Date.now();
+  const last = holdEnds.reduce((max, end) => Math.max(max, Math.min(end, now + ADMISSION_WINDOW_MS)), now);
+  return Math.max(1, Math.ceil((last - now) / 1000));
 }
 
 function secondsUntilNextUtcDay(): number {

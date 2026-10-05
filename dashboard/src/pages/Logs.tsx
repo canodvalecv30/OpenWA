@@ -28,18 +28,17 @@ export function Logs() {
   const logs: AuditLog[] = data?.data ?? [];
   const total: number = data?.total ?? 0;
 
-  const filteredLogs = logs.filter(log => {
-    const matchesSearch =
-      log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (log.errorMessage || '').toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesSearch;
-  });
+  // Trimmed once, so the table, its empty state and the export agree on whether a search is active.
+  const q = searchQuery.trim().toLowerCase();
+  const matchesSearch = (log: AuditLog) =>
+    log.action.toLowerCase().includes(q) || (log.errorMessage || '').toLowerCase().includes(q);
+  const filteredLogs = logs.filter(matchesSearch);
 
   const totalPages = Math.ceil(total / limit);
   // Distinguish "filters matched nothing on this page" from "there are no logs at all": the search
   // box only filters the fetched page (the API has no text search), so a non-match here must not
   // read as "no such event exists" while more pages may hold it.
-  const hasSearch = searchQuery.trim() !== '';
+  const hasSearch = q !== '';
   // Severity is enforced SERVER-SIDE (the query carries it): an empty result there means no logs
   // match at all, which deserves different guidance than the page-local search box.
   const hasSeverityFilter = severityFilter !== 'all';
@@ -101,10 +100,7 @@ export function Logs() {
       // The walk pages by offset over a live table, newest first: a row written between two pages pushes
       // the older ones down, so the next page starts with one already fetched. Keep each id once.
       const all = [...new Map(items.map(log => [log.id, log])).values()];
-      const q = searchQuery.toLowerCase();
-      const rows = q
-        ? all.filter(l => l.action.toLowerCase().includes(q) || (l.errorMessage || '').toLowerCase().includes(q))
-        : all;
+      const rows = all.filter(matchesSearch);
       // Either stop keeps the newest rows (the API orders newest first); older ones are missing. A
       // narrower filter gets past the cap, only waiting gets past the throttle. The count follows the UI
       // language, not the browser's locale, so it reads right inside the sentence.
@@ -126,17 +122,6 @@ export function Logs() {
       setExporting(false);
     }
   };
-
-  if (loading && logs.length === 0) {
-    return (
-      <div
-        className="logs-page"
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '400px' }}
-      >
-        <Loader2 className="animate-spin" size={32} />
-      </div>
-    );
-  }
 
   return (
     <div className="logs-page">
@@ -201,17 +186,29 @@ export function Logs() {
             <span>{t('logs.columns.ip')}</span>
             <span>{t('logs.columns.severity')}</span>
           </div>
-          {filteredLogs.length === 0 ? (
+          {/* The spinner stays inside the table: a search or severity change switches to a page that
+              may not be cached, and replacing the whole page would unmount the search box mid-typing. */}
+          {loading && logs.length === 0 ? (
+            <div className="empty-table-state">
+              <Loader2 className="animate-spin" size={32} />
+            </div>
+          ) : logsError && logs.length === 0 ? (
+            // Nothing was read, so no "no logs" copy: the banner above reports the failure on its own.
+            <div className="empty-table-state">
+              <AlertCircle size={32} />
+            </div>
+          ) : filteredLogs.length === 0 ? (
             <div className="empty-table-state">
               <FileText size={48} strokeWidth={1} />
-              {hasSeverityFilter || hasSearch ? (
+              {hasSeverityFilter && !hasSearch ? (
+                <>
+                  <h3>{t('logs.empty.title')}</h3>
+                  <p>{t('logs.empty.filteredServerDescription')}</p>
+                </>
+              ) : hasSearch ? (
                 <>
                   <h3>{t('logs.empty.filteredTitle')}</h3>
-                  <p>
-                    {hasSeverityFilter && !hasSearch
-                      ? t('logs.empty.filteredServerDescription')
-                      : t('logs.empty.filteredDescription')}
-                  </p>
+                  <p>{t('logs.empty.filteredDescription')}</p>
                 </>
               ) : (
                 <>
@@ -229,7 +226,7 @@ export function Logs() {
                 <span className="api-key">{log.apiKeyName || '—'}</span>
                 <span className="ip">{log.ipAddress || '—'}</span>
                 <span>
-                  <span className={`severity-badge ${log.severity}`}>{log.severity.toUpperCase()}</span>
+                  <span className={`severity-badge ${log.severity}`}>{t(`logs.severity.${log.severity}`)}</span>
                 </span>
               </div>
             ))

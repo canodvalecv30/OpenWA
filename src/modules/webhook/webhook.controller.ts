@@ -19,6 +19,11 @@ export class WebhookController {
     description: 'Webhook created',
     type: WebhookResponseDto,
   })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid body, the URL embeds credentials or is blocked by the SSRF policy, or the per-session webhook limit is reached',
+  })
   @ApiResponse({ status: 404, description: 'Session not found' })
   async create(@Param('sessionId') sessionId: string, @Body() dto: CreateWebhookDto): Promise<WebhookResponseDto> {
     return WebhookResponseDto.fromEntity(await this.webhookService.create(sessionId, dto));
@@ -61,6 +66,10 @@ export class WebhookController {
     status: 200,
     description: 'Webhook updated',
     type: WebhookResponseDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid body, or a changed URL embeds credentials or is blocked by the SSRF policy',
   })
   @ApiResponse({ status: 404, description: 'Webhook not found' })
   async update(

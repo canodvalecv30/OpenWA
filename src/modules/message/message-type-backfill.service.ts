@@ -13,9 +13,9 @@ import { createLogger } from '../../common/services/logger.service';
  * render wrong (text as a `[chat]` media bubble, voice notes as document links) and stats split the
  * same kind across old/new tokens.
  *
- * This runs on startup in EVERY DB mode. A TypeORM data migration would NOT suffice: the zero-config
- * SQLite default uses `synchronize: true`, under which `migrationsRun` is false, so migrations never
- * run there. The mapping is forward-only and collision-free (the neutral targets were never valid
+ * This runs on startup in EVERY DB mode. A TypeORM data migration would NOT suffice: a SQLite data DB
+ * under the opt-in DATABASE_SYNCHRONIZE=true (e.g. docker-compose.dev.yml) runs with `migrationsRun`
+ * false, so migrations never run there. The mapping is forward-only and collision-free (the neutral targets were never valid
  * raw tokens, and passthrough kinds already match), so re-running on already-converted rows is a
  * no-op — safe to execute on every boot.
  */

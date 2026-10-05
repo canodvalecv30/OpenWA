@@ -30,6 +30,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -63,10 +64,14 @@ jobs:
           echo "Tag $TAG matches package.json $PKG_VERSION"
 
       - name: Security audit
-        # Matches ci.yml exactly, including its per-advisory allowlist. The release gate must not be
-        # laxer than the PR gate, or a HIGH advisory blocked on every PR would still sail through at
-        # tag time — and it must not be STRICTER either, or a tag fails on something main has already
-        # accepted, which is how a release stalls with nothing actionable to fix.
+        # Matches ci.yml's advisory rules exactly, including its per-advisory allowlist. The release
+        # gate must not be laxer than the PR gate, or a HIGH advisory blocked on every PR would still
+        # sail through at tag time, and it must not excuse fewer advisories either, or a tag fails on
+        # something main has already accepted. The one difference is an audit that could not run:
+        # PR CI skips it with a warning, while a release refuses to publish with no advisory checked.
+        # A re-run clears a transient npm outage.
+        env:
+          CHECK_AUDIT_REQUIRED: '1'
         run: npm run check:audit
 
       # Second tree, same rule. The dashboard's runtime deps are bundled into dashboard/dist and the
@@ -126,9 +131,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    # Mirrors ci.yml's test job. Without this service the queue-on e2e suite self-skips and the
-    # release path reports green on a suite it never actually ran — the tag is the one place that
-    # must not be verified less than the branch it came from.
+    timeout-minutes: 20
+    # Mirrors ci.yml's test job. The queue-on and throttler-redis e2e suites need this service: under
+    # GitHub Actions they fail rather than skipping when Redis is unreachable, so the tag is never
+    # verified less than the branch it came from.
     services:
       redis:
         image: redis:7-alpine
@@ -173,6 +179,7 @@ jobs:
   test-postgres:
     name: Test (PostgreSQL migrations)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -222,17 +229,17 @@ jobs:
       # database), that a paged message list has a total order, that the data entities can build
       # their own schema (raw SQL the ORM passes through verbatim, such as a partial index predicate,
       # only case-folds on a real server), and that the UTC pin holds across a backup round trip, a
-      # retention window and a local-midnight count. All five self-skip unless DATABASE_TYPE=postgres,
+      # retention window and a local-midnight count. All six self-skip unless DATABASE_TYPE=postgres,
       # so they are a no-op in the default test job and only execute here against the postgres:16
       # service. TZ is deliberately not UTC, for the reason ci.yml states.
-      - name: Postgres specs (FTS provider + boot-migration lock + list ordering + entity synchronize + UTC pin)
+      - name: Postgres specs (FTS + migrations + ordering + schema + UTC + recovery)
         # --runInBand: same reason the CI job passes it — both specs issue DDL against the one
         # shared service database, and jest's default file-parallelism races their catalog writes
         # (the first v0.19.0 tag failed this step on `relation "messages" already exists` over a
         # tree CI had passed minutes earlier). The lock spec's own two-migrator race is in-file
         # (Promise.all) and unaffected by runInBand. The synchronize spec additionally CREATEs and
         # DROPs a scratch database of its own, which is only safe serialized.
-        run: npx jest --runInBand src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts src/database/migrations/__tests__/pg-boot-migrations.pg.spec.ts src/modules/message/message-list-ordering.pg.spec.ts src/database/migrations/__tests__/pg-entity-synchronize.pg.spec.ts src/database/postgres-utc.pg.spec.ts
+        run: npx jest --runInBand src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts src/database/migrations/__tests__/pg-boot-migrations.pg.spec.ts src/modules/message/message-list-ordering.pg.spec.ts src/database/migrations/__tests__/pg-entity-synchronize.pg.spec.ts src/database/postgres-utc.pg.spec.ts src/modules/webhook/webhook-recovery.pg.spec.ts
         env:
           TZ: Asia/Jakarta
           DATABASE_TYPE: postgres
@@ -245,6 +252,7 @@ jobs:
   dashboard:
     name: Dashboard
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -275,7 +283,9 @@ jobs:
       - name: Build dashboard
         run: cd dashboard && npm run build
 
+      # --test-timeout in test:unit fails a hung test by name; this bounds a hang it cannot see.
       - name: Run dashboard unit tests
+        timeout-minutes: 10
         run: cd dashboard && npm run test:unit
 
   # Mirrors ci.yml's scripts-smoke job, which had no counterpart here at all: the shell scripts that
@@ -283,6 +293,7 @@ jobs:
   scripts-smoke:
     name: Shell scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -311,6 +322,7 @@ jobs:
   chart:
     name: Helm chart and workflows
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -358,6 +370,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [lint, test, dashboard, scripts-smoke, chart]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -374,10 +387,15 @@ jobs:
       - name: Build project
         run: npm run build
 
+      # Same lane as ci.yml's build job: inbound messages through the real Baileys library.
+      - name: Run inbound messages through the real Baileys library
+        run: npm run test:engine-real
+
   # ──── Create GitHub Release ───────────────────────────────────────
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     # Gate the public Release on every CI-strength job AND a successfully built+pushed image that
@@ -431,6 +449,7 @@ jobs:
   docker:
     name: Docker Release
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -523,6 +542,7 @@ jobs:
   boot-smoke:
     name: Boot smoke (amd64 + arm64)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       packages: read
     needs: [docker]
@@ -561,7 +581,24 @@ jobs:
           IMAGE: ${{ steps.image.outputs.ref }}
         run: OPENWA_SMOKE_IMAGE="$IMAGE" ./scripts/smoke-test-non-root.sh
 
+      # Boot below proves the image starts, not that either engine can: Baileys is imported on the
+      # first session start and the browser is launched per session, and both differ by
+      # architecture. Hermetic, so a WhatsApp outage cannot block a release. Both architectures are
+      # tried even if the first fails, and the boot check below still runs, so logs name both.
+      # arm64 runs under QEMU on this amd64 runner, so there the script runs the browser binary
+      # instead of launching it.
+      - name: Load both engine libraries on each architecture
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          rc=0
+          for platform in linux/amd64 linux/arm64; do
+            OPENWA_SMOKE_IMAGE="$IMAGE" OPENWA_SMOKE_PLATFORM="$platform" ./scripts/smoke-test-engine-libs.sh || rc=1
+          done
+          exit "$rc"
+
       - name: Boot + liveness check on each architecture
+        if: ${{ !cancelled() }}
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
         run: |
@@ -612,6 +649,7 @@ jobs:
   image-scan:
     name: Image scan (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       packages: read
     needs: [docker]
@@ -663,13 +701,19 @@ jobs:
   # promoted set is by construction the build's own tag set, never a re-derived pattern).
   # `imagetools create` re-points tags at the existing manifest list without rebuilding, so the
   # promoted image is bit-identical to the one tested on both registries, and its provenance and
-  # SBOM attestations travel with it. If boot-smoke fails, this job never runs and the release
-  # tags never appear anywhere.
+  # SBOM attestations travel with it. Before re-pointing anything, the job records a signed
+  # build-provenance attestation for that digest, which `gh attestation verify` checks against this
+  # repository; the id-token grant it needs lives on this job alone, not on the jobs that build or
+  # test the image. If boot-smoke fails, this job never runs and the release tags never appear
+  # anywhere.
   promote:
     name: Promote image to release tags
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       packages: write
+      id-token: write
+      attestations: write
     needs: [docker, boot-smoke, image-scan]
     steps:
       - name: Set up Docker Buildx
@@ -690,6 +734,22 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve the image name to attest
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      # Before any release tag moves, so a failed attestation publishes nothing. Keyed by digest in
+      # GitHub's attestation store, so it covers every tag promoted below on both registries, each of
+      # which must resolve to this digest. Not pushed to the registry, which would add an untagged
+      # package version per release.
+      - name: Attest build provenance for the tested digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ needs.docker.outputs.digest }}
 
       - name: Tag the smoke-tested image with the release tags
         env:
@@ -747,7 +807,7 @@ jobs:
             grep -q "$want" /tmp/inspect.txt || { echo "MISSING PLATFORM: $want"; exit 1; }
           done
 
-  # ──── Staging tag cleanup (happy path AND failure path) ───────────
+  # ──── Staging tag cleanup (only when promote never ran) ───────────
   # Best-effort tidy-up of the staging tag, and it MUST refuse to act unless that tag is the only
   # one on its version.
   #
@@ -761,17 +821,25 @@ jobs:
   # This lives in its own `if: always()` job — not inside promote — because the failure path is
   # exactly when cleanup matters most: when boot-smoke or image-scan fails, promote is skipped and
   # the staging tag would otherwise leak. On the happy path the release tags share the staging
-  # version, so the step below keeps it (the deliberate retention documented above); on a failed
-  # run the staging tag is alone and gets removed.
+  # version, so the step below does not run at all (the deliberate retention documented above): the
+  # package-versions API is eventually consistent, and a read that does not list the new release
+  # tags yet would count the staging tag alone and delete the version just published. The same
+  # holds for a promote that failed after re-pointing some tags, so the step runs only when promote
+  # never ran, which is the one case where the staging tag is alone and gets removed.
   cleanup-staging:
     name: Clean up the staging tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: always()
     permissions:
       packages: write
     needs: [docker, boot-smoke, image-scan, promote]
     steps:
       - name: Remove the staging tag (only when it is alone on its version)
+        # Only when promote never ran: once it has started re-pointing tags, the version can carry
+        # release tags that a stale read does not list yet. A failed or cancelled promote leaves the
+        # stray staging tag behind, the same retention as the happy path.
+        if: needs.promote.result == 'skipped'
         # Best-effort: a failed tidy-up must not turn an otherwise successful release red.
         continue-on-error: true
         env:
@@ -813,12 +881,17 @@ jobs:
   verify-published:
     name: Verify published tags (anonymous)
     runs-on: ubuntu-latest
-    # After cleanup-staging, not beside it: GHCR's package-versions API is eventually consistent, so
-    # that job can read a version whose release tags are not listed yet and delete the version the
-    # release just published. This check is the net for exactly that, so it has to run last. It is a
-    # best-effort job, so gate on promote rather than on its result.
+    timeout-minutes: 15
+    # After cleanup-staging, not beside it: that job deletes registry versions, so this check has to
+    # see the registry after it, and run last. It is a best-effort job, so gate on promote rather
+    # than on its result.
     needs: [docker, promote, cleanup-staging]
     if: always() && needs.promote.result == 'success'
+    # attestations: read for `gh attestation verify` below. GH_TOKEN is an API credential for the
+    # attestation lookup, not a registry login: every pull here stays anonymous.
+    permissions:
+      contents: read
+      attestations: read
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -828,6 +901,7 @@ jobs:
         env:
           TAGS: ${{ needs.docker.outputs.tags }}
           EXPECTED_DIGEST: ${{ needs.docker.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Fail closed. A verification step that reports success because something upstream of the
           # assertion broke is worse than no verification at all — `set -e` plus the checked-count
@@ -857,6 +931,15 @@ jobs:
               echo "::error::$ref resolves to $digest, not the tested build digest $EXPECTED_DIGEST"
               failed=1
             fi
+            # The same pins as the operator checklist in docs/04: --repo alone accepts an attestation
+            # from any workflow in the repository on any ref.
+            if ! gh attestation verify "oci://$ref" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" > /tmp/attest.txt 2>&1; then
+              echo "::error::$ref has no build-provenance attestation from $GITHUB_REPOSITORY's release workflow at $GITHUB_REF"
+              cat /tmp/attest.txt
+              failed=1
+            fi
             echo "$ref OK ($digest)"
             checked=$((checked + 1))
             echo "::endgroup::"
@@ -869,4 +952,4 @@ jobs:
             echo "::error::The release is not usable. Re-point the missing tags before announcing it."
             exit 1
           fi
-          echo "all $checked release tags are publicly pullable, multi-arch, and digest-identical to the tested build"
+          echo "all $checked release tags are publicly pullable, multi-arch, digest-identical to the tested build, and attested"

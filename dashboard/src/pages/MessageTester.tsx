@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ChangeEvent } from 'react';
+import { Fragment, useState, useEffect, useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Send, CheckCircle, XCircle, Loader2, Upload, X, Plus, AlertCircle } from 'lucide-react';
 import {
@@ -72,6 +72,16 @@ const messageTypes = [
 
 // The types that share the media upload/URL block (base64 XOR url + mimetype).
 const mediaMessageTypes: readonly string[] = ['image', 'video', 'audio', 'document', 'sticker'];
+
+// The gateway's @MaxLength bounds on the single-send bodies. A multi-group send repeats one body per group,
+// so a body over any of them would be refused once per group.
+const MESSAGE_TEXT_MAX_LENGTH = 4096;
+const MEDIA_FILENAME_MAX_LENGTH = 255;
+const LOCATION_TEXT_MAX_LENGTH = 1024;
+const CONTACT_NAME_MAX_LENGTH = 255;
+const CONTACT_NUMBER_MAX_LENGTH = 30;
+const POLL_NAME_MAX_LENGTH = 255;
+const POLL_OPTION_MAX_LENGTH = 100;
 
 // Hint the native file picker at the right category (documents accept anything).
 const mediaAccept: Record<(typeof messageTypes)[number], string> = {
@@ -226,8 +236,16 @@ export function MessageTester() {
         if (batchPollRef.current !== timer) return;
         setBatchStatus(status);
         if (TERMINAL_BATCH_STATUSES.includes(status.status)) stopBatchPolling();
-      } catch {
-        // A transient poll failure (network blip, backend restart) must not kill progress tracking.
+      } catch (err) {
+        if (batchPollRef.current !== timer) return;
+        // A 404 (the batch or its session was deleted) or 403 (the key lost access) is permanent: stop
+        // and say so. A transient failure (network blip, backend restart, 5xx, 408, 429) must not kill
+        // progress tracking.
+        const status = (err as { status?: number }).status;
+        if (status === 404 || status === 403) {
+          stopBatchPolling();
+          setBatchError(err instanceof Error ? err.message : t('messageTester.sendFailed'));
+        }
       }
     }, 2000);
     batchPollRef.current = timer;
@@ -323,47 +341,88 @@ export function MessageTester() {
     messageType === 'bulk' &&
     !!mediaFile &&
     mediaFile.base64.length * bulkRecipientList.length > BULK_INLINE_MEDIA_MAX_BYTES;
-  const bulkMediaUrlInvalid =
-    messageType === 'bulk' && !mediaFile && mediaUrl.trim() !== '' && !isHttpMediaUrl(mediaUrl);
+  // The gateway reads a media string as a URL only with an http(s) prefix and decodes anything else as
+  // base64, so a URL without one is refused (or sent as garbage bytes) for every recipient alike.
+  const mediaUrlInvalid = !mediaFile && mediaUrl.trim() !== '' && !isHttpMediaUrl(mediaUrl);
   // Audio goes out without a caption (the bulk service does not forward one), so text next to an audio
   // attachment would be dropped while the batch reports success. Refuse it instead of sending half.
   const bulkAudioWithText = bulkAttachment?.kind === 'audio' && content.trim().length > 0;
   const bulkCaptionTooLong =
     bulkAttachment !== null && bulkAttachment.kind !== 'audio' && captionLength(content) > BULK_CAPTION_MAX_LENGTH;
+  // Without an attachment every item is a text message, under the same bound as a single text send.
+  const bulkTextTooLong = bulkAttachment === null && captionLength(content) > MESSAGE_TEXT_MAX_LENGTH;
+
+  // The text field goes out as the caption on image and video and as the filename on a document.
+  const mediaContentMax =
+    messageType === 'document'
+      ? MEDIA_FILENAME_MAX_LENGTH
+      : messageType === 'image' || messageType === 'video'
+        ? BULK_CAPTION_MAX_LENGTH
+        : Infinity;
 
   // Per-type required-field validation (the backend stays the authoritative validator). A multi-group
   // send repeats the request per group, so a body the backend would refuse must not start the run.
   let formValid = true;
   if (messageType === 'text') {
-    formValid = content.trim().length > 0;
+    formValid = content.trim().length > 0 && captionLength(content) <= MESSAGE_TEXT_MAX_LENGTH;
   } else if (isMediaMessageType) {
-    formValid = !!mediaFile || mediaUrl.trim().length > 0;
+    formValid = (!!mediaFile || isHttpMediaUrl(mediaUrl)) && captionLength(content) <= mediaContentMax;
   } else if (messageType === 'location') {
-    formValid = !Number.isNaN(lat) && !Number.isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+    formValid =
+      !Number.isNaN(lat) &&
+      !Number.isNaN(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180 &&
+      captionLength(locationDescription.trim()) <= LOCATION_TEXT_MAX_LENGTH &&
+      captionLength(locationAddress.trim()) <= LOCATION_TEXT_MAX_LENGTH;
   } else if (messageType === 'contact') {
-    formValid = contactName.trim().length > 0 && contactNumber.trim().length > 0;
+    formValid =
+      contactName.trim().length > 0 &&
+      captionLength(contactName.trim()) <= CONTACT_NAME_MAX_LENGTH &&
+      contactNumber.trim().length > 0 &&
+      captionLength(contactNumber.trim()) <= CONTACT_NUMBER_MAX_LENGTH;
   } else if (messageType === 'poll') {
-    formValid = pollQuestion.trim().length > 0 && pollOptionsFilled.length >= 2;
+    formValid =
+      pollQuestion.trim().length > 0 &&
+      captionLength(pollQuestion.trim()) <= POLL_NAME_MAX_LENGTH &&
+      pollOptionsFilled.length >= 2 &&
+      pollOptionsFilled.every(option => captionLength(option) <= POLL_OPTION_MAX_LENGTH);
   } else if (messageType === 'forward') {
     formValid = forwardTo.trim().length > 0 && forwardMessageId.trim().length > 0;
   } else if (messageType === 'bulk') {
     formValid =
       (content.trim().length > 0 || bulkAttachment !== null) &&
       !bulkMediaTooLarge &&
-      !bulkMediaUrlInvalid &&
+      !mediaUrlInvalid &&
       !bulkAudioWithText &&
       !bulkCaptionTooLong &&
+      !bulkTextTooLong &&
       bulkRecipientList.length > 0 &&
       bulkRecipientList.length <= BULK_MAX_RECIPIENTS &&
       (delayMs === undefined || (!Number.isNaN(delayMs) && delayMs >= 1000 && delayMs <= 60000));
   }
 
+  // A new send replaces the batch on screen, so it waits for an in-flight cancel: the cancel's answer
+  // would otherwise be merged into the newer batch and stop its progress polling.
   const isSendDisabled =
     !canWrite ||
     isLoading ||
+    batchCancelling ||
     !session ||
     !formValid ||
     (messageType !== 'bulk' && (recipientType === 'group' ? selectedGroups.length === 0 : !recipient));
+
+  // Says why Send is held when a field runs past its bound, counted the way `formValid` counts it.
+  const tooLongHint = (value: string, max: number) => {
+    const count = captionLength(value);
+    return (
+      <span className="hint error" role="status">
+        {count > max ? t('common.fieldTooLong', { max, count }) : ''}
+      </span>
+    );
+  };
 
   const isGroupSending = groupSendProgress !== null;
 
@@ -471,7 +530,7 @@ export function MessageTester() {
             // backend accepts url XOR base64 and requires a mimetype for base64 (always provided here).
             const payload: SendMediaPayload = mediaFile
               ? { base64: mediaFile.base64, mimetype: mediaFile.mimetype }
-              : { url: mediaUrl };
+              : { url: mediaUrl.trim() };
             if ((messageType === 'image' || messageType === 'video') && content) payload.caption = content;
             if (messageType === 'document' && content) payload.filename = content;
             return messageApi.sendMedia(session, target, messageType, payload);
@@ -479,7 +538,7 @@ export function MessageTester() {
           case 'sticker': {
             const payload: SendMediaPayload = mediaFile
               ? { base64: mediaFile.base64, mimetype: mediaFile.mimetype }
-              : { url: mediaUrl };
+              : { url: mediaUrl.trim() };
             return messageApi.sendSticker(session, target, payload);
           }
           case 'location':
@@ -584,11 +643,9 @@ export function MessageTester() {
           placeholder="https://example.com/file.jpg"
           disabled={!!mediaFile}
         />
-        {messageType === 'bulk' && (
-          <span className="hint error" role="status">
-            {bulkMediaUrlInvalid ? t('messageTester.bulkMediaUrlInvalid') : ''}
-          </span>
-        )}
+        <span className="hint error" role="status">
+          {mediaUrlInvalid ? t('messageTester.bulkMediaUrlInvalid') : ''}
+        </span>
       </div>
       <div className="form-group">
         <label>
@@ -785,6 +842,7 @@ export function MessageTester() {
                   placeholder={t('messageTester.messagePlaceholder')}
                   rows={5}
                 />
+                {tooLongHint(content, MESSAGE_TEXT_MAX_LENGTH)}
               </div>
             )}
 
@@ -808,6 +866,7 @@ export function MessageTester() {
                           : t('messageTester.captionPlaceholder')
                       }
                     />
+                    {tooLongHint(content, mediaContentMax)}
                   </div>
                 )}
               </>
@@ -853,6 +912,7 @@ export function MessageTester() {
                     value={locationDescription}
                     onChange={e => setLocationDescription(e.target.value)}
                   />
+                  {tooLongHint(locationDescription.trim(), LOCATION_TEXT_MAX_LENGTH)}
                 </div>
                 <div className="form-group">
                   <label htmlFor="mt-16">
@@ -864,6 +924,7 @@ export function MessageTester() {
                     value={locationAddress}
                     onChange={e => setLocationAddress(e.target.value)}
                   />
+                  {tooLongHint(locationAddress.trim(), LOCATION_TEXT_MAX_LENGTH)}
                 </div>
               </>
             )}
@@ -879,6 +940,7 @@ export function MessageTester() {
                     onChange={e => setContactName(e.target.value)}
                     placeholder={t('messageTester.contactNamePlaceholder')}
                   />
+                  {tooLongHint(contactName.trim(), CONTACT_NAME_MAX_LENGTH)}
                 </div>
                 <div className="form-group">
                   <label htmlFor="mt-7">{t('messageTester.contactNumber')}</label>
@@ -889,6 +951,7 @@ export function MessageTester() {
                     onChange={e => setContactNumber(e.target.value)}
                     placeholder="+62812345678"
                   />
+                  {tooLongHint(contactNumber.trim(), CONTACT_NUMBER_MAX_LENGTH)}
                 </div>
               </>
             )}
@@ -904,27 +967,31 @@ export function MessageTester() {
                     onChange={e => setPollQuestion(e.target.value)}
                     placeholder={t('messageTester.pollQuestionPlaceholder')}
                   />
+                  {tooLongHint(pollQuestion.trim(), POLL_NAME_MAX_LENGTH)}
                 </div>
                 <div className="form-group">
                   <label>{t('messageTester.pollOptions')}</label>
                   {pollOptions.map((option, index) => (
-                    <div className="poll-option-row" key={index}>
-                      <input
-                        type="text"
-                        value={option}
-                        onChange={e => setPollOptions(prev => prev.map((o, i) => (i === index ? e.target.value : o)))}
-                        placeholder={t('messageTester.pollOptionPlaceholder', { index: index + 1 })}
-                      />
-                      <button
-                        type="button"
-                        className="remove-option-btn"
-                        onClick={() => setPollOptions(prev => prev.filter((_, i) => i !== index))}
-                        disabled={pollOptions.length <= 2}
-                        aria-label={t('messageTester.removeOption')}
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
+                    <Fragment key={index}>
+                      <div className="poll-option-row">
+                        <input
+                          type="text"
+                          value={option}
+                          onChange={e => setPollOptions(prev => prev.map((o, i) => (i === index ? e.target.value : o)))}
+                          placeholder={t('messageTester.pollOptionPlaceholder', { index: index + 1 })}
+                        />
+                        <button
+                          type="button"
+                          className="remove-option-btn"
+                          onClick={() => setPollOptions(prev => prev.filter((_, i) => i !== index))}
+                          disabled={pollOptions.length <= 2}
+                          aria-label={t('messageTester.removeOption')}
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                      {tooLongHint(option.trim(), POLL_OPTION_MAX_LENGTH)}
+                    </Fragment>
                   ))}
                   <button
                     type="button"
@@ -1044,7 +1111,9 @@ export function MessageTester() {
                             max: BULK_CAPTION_MAX_LENGTH,
                             count: captionLength(content),
                           })
-                        : ''}
+                        : bulkTextTooLong
+                          ? t('common.fieldTooLong', { max: MESSAGE_TEXT_MAX_LENGTH, count: captionLength(content) })
+                          : ''}
                   </span>
                 </div>
                 {mediaSourceFields}

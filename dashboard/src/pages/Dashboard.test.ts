@@ -1,10 +1,12 @@
 // Render test for the Dashboard stat cards under the bare `node --test` runner, on the Sessions.test.ts
-// harness. GET /webhooks and GET /stats/overview both reject a viewer key; each card must then show
-// the unavailable placeholder rather than a count the gateway never returned. POST /sessions/:id/stop
+// harness. GET /webhooks is OPERATOR-only and GET /stats/overview ADMIN-only: a key without the role
+// is not sent them, and a refused or unsent read shows the unavailable placeholder rather than a count
+// the gateway never returned. POST /sessions/:id/stop
 // is OPERATOR-only: a viewer is offered no Disconnect, and a failed stop is reported, not swallowed.
 import '../test-helpers/register-hooks.ts';
 import { test, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -14,6 +16,8 @@ let webhookList: unknown[] = [];
 let sessionList: unknown[] = [];
 let stopStatus = 200;
 let sessionsStatus = 200;
+let holdWebhooks = false;
+const requested: string[] = [];
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -32,6 +36,7 @@ function installFetchStub(): void {
   globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const path = url.replace(/^https?:\/\/[^/]+/, '');
+    requested.push(path);
     if (path === '/api/sessions') {
       return Promise.resolve(
         sessionsStatus === 200 ? jsonResponse(sessionList) : jsonResponse({ message: 'Bad Gateway' }, sessionsStatus),
@@ -45,6 +50,7 @@ function installFetchStub(): void {
       );
     }
     if (path === '/api/webhooks') {
+      if (holdWebhooks) return new Promise<Response>(() => {});
       return webhooksStatus === 200
         ? Promise.resolve(jsonResponse(webhookList))
         : Promise.resolve(jsonResponse({ message: 'Insufficient permissions. Required: operator' }, webhooksStatus));
@@ -77,6 +83,8 @@ before(async () => {
   ({ RoleProvider } = await import('../components/RoleProvider.tsx'));
   ({ ToastProvider } = await import('../components/Toast.tsx'));
   ({ Dashboard } = await import('./Dashboard.tsx'));
+  // Loaded up front so the lazy chart section resolves at once wherever it is rendered.
+  await import('../components/DashboardCharts.tsx');
 });
 
 afterEach(() => {
@@ -87,7 +95,10 @@ afterEach(() => {
   sessionList = [];
   stopStatus = 200;
   sessionsStatus = 200;
+  holdWebhooks = false;
+  requested.length = 0;
   window.sessionStorage.setItem('openwa_user_role', 'viewer');
+  window.sessionStorage.removeItem('openwa_key_scoped');
 });
 
 function renderDashboard(): void {
@@ -112,9 +123,10 @@ function statValue(label: string): string {
 
 test('a refused webhook read shows the unavailable placeholder, not zero webhooks', async () => {
   webhooksStatus = 403;
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
   renderDashboard();
   await rtl.screen.findByText('Webhooks Configured');
-  // The overview card is refused too, so its placeholder is the one the webhook card must match.
+  // The overview card is not read for an operator, so its placeholder is the one the webhook card must match.
   await rtl.waitFor(() => assert.equal(statValue('Webhooks Configured'), statValue('Messages Today')));
   assert.notEqual(statValue('Webhooks Configured'), '0');
 });
@@ -122,6 +134,7 @@ test('a refused webhook read shows the unavailable placeholder, not zero webhook
 test('a failed background refetch keeps counting the cached webhooks', async () => {
   webhooksStatus = 200;
   webhookList = [{ id: 'w1', url: 'https://example.test/hook', events: [] }];
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
   renderDashboard();
   await rtl.screen.findByText('Webhooks Configured');
   await rtl.waitFor(() => assert.equal(statValue('Webhooks Configured'), '1'));
@@ -134,9 +147,21 @@ test('a failed background refetch keeps counting the cached webhooks', async () 
 
 test('a successful empty webhook read still counts zero', async () => {
   webhooksStatus = 200;
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
   renderDashboard();
   await rtl.screen.findByText('Webhooks Configured');
-  await rtl.waitFor(() => assert.equal(statValue('Webhooks Configured'), '0'));
+  await rtl.waitFor(() => assert.equal(queryClient!.getQueryState(['webhooks'])?.status, 'success'));
+  assert.equal(statValue('Webhooks Configured'), '0');
+});
+
+test('a webhook read still in flight shows the placeholder, not zero webhooks', async () => {
+  holdWebhooks = true;
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
+  renderDashboard();
+  await rtl.screen.findByText('Webhooks Configured');
+  await rtl.waitFor(() => assert.ok(requested.includes('/api/webhooks')));
+  assert.equal(statValue('Webhooks Configured'), statValue('Messages Today'));
+  assert.notEqual(statValue('Webhooks Configured'), '0');
 });
 
 test('a read-only key is offered no Disconnect', async () => {
@@ -166,6 +191,23 @@ test('a failed stop is reported, not swallowed', async () => {
   );
 });
 
+// Stop needs a live engine, which the gateway reports as engineLoaded: a status cannot tell a session
+// reconnecting with its engine from a stopped one.
+test('Disconnect is offered exactly where the gateway holds an engine', async () => {
+  webhooksStatus = 200;
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
+  sessionList = [{ ...READY_SESSION, status: 'disconnected', engineLoaded: true }];
+  renderDashboard();
+  await rtl.screen.findByRole('button', { name: 'Disconnect' });
+
+  rtl.cleanup();
+  queryClient?.clear();
+  sessionList = [{ ...READY_SESSION, status: 'initializing', engineLoaded: false }];
+  renderDashboard();
+  await rtl.screen.findByText('Main');
+  assert.ok(!rtl.screen.queryByRole('button', { name: 'Disconnect' }), 'a session with no engine offered Disconnect');
+});
+
 test('a failed background refetch of the sessions keeps the cached page', async () => {
   webhooksStatus = 200;
   sessionList = [READY_SESSION];
@@ -183,4 +225,63 @@ test('a failed first read of the sessions still shows the error', async () => {
   sessionsStatus = 502;
   renderDashboard();
   await rtl.screen.findByText(/Bad Gateway/);
+});
+
+test('a non-admin key never loads the chart section', async () => {
+  for (const role of ['viewer', 'operator']) {
+    window.sessionStorage.setItem('openwa_user_role', role);
+    renderDashboard();
+    await rtl.waitFor(() => assert.ok(requested.includes('/api/sessions')));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(!requested.includes('/api/stats/overview'), `${role}: the admin-only overview was requested`);
+    if (role === 'viewer')
+      assert.ok(!requested.includes('/api/webhooks'), 'viewer: the operator-only webhook list was requested');
+    assert.ok(
+      !requested.some(p => p.startsWith('/api/stats/messages')),
+      `${role}: the charts asked for /stats/messages`,
+    );
+    rtl.cleanup();
+    requested.length = 0;
+  }
+});
+
+test('a viewer is not sent the webhook read and its card shows the placeholder', async () => {
+  webhooksStatus = 200;
+  renderDashboard();
+  await rtl.screen.findByText('Webhooks Configured');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(!requested.includes('/api/webhooks'));
+  assert.equal(statValue('Webhooks Configured'), statValue('Messages Today'));
+  assert.notEqual(statValue('Webhooks Configured'), '0');
+});
+
+test('an admin key loads the chart section', async () => {
+  window.sessionStorage.setItem('openwa_user_role', 'admin');
+  renderDashboard();
+  await rtl.waitFor(() => assert.ok(requested.some(p => p.startsWith('/api/stats/messages'))));
+});
+
+test('a session-scoped admin key never loads the cross-session statistics', async () => {
+  // GET /stats/overview and /stats/messages refuse a key restricted to selected sessions, whatever its role.
+  window.sessionStorage.setItem('openwa_user_role', 'admin');
+  window.sessionStorage.setItem('openwa_key_scoped', 'true');
+  renderDashboard();
+  await rtl.waitFor(() => assert.ok(requested.includes('/api/sessions')));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(!requested.includes('/api/stats/overview'), 'the overview was requested');
+  assert.ok(!requested.some(p => p.startsWith('/api/stats/messages')), 'the charts asked for /stats/messages');
+});
+
+// The session table renders `status-pill ${session.status}`, so every status needs its own colour.
+test('the status pill styles every session status and nothing else', () => {
+  const entity = readFileSync(
+    new URL('../../../src/modules/session/entities/session.entity.ts', import.meta.url),
+    'utf8',
+  );
+  const block = /export enum SessionStatus \{([^}]*)\}/.exec(entity)?.[1] ?? '';
+  const statuses = [...block.matchAll(/= '([a-z_]+)'/g)].map(m => m[1]).sort();
+  assert.ok(statuses.length > 0, 'SessionStatus was not found');
+  const css = readFileSync(new URL('./Dashboard.css', import.meta.url), 'utf8');
+  const styled = [...new Set([...css.matchAll(/\.dashboard \.status-pill\.([a-z_]+)/g)].map(m => m[1]))].sort();
+  assert.deepEqual(styled, statuses);
 });

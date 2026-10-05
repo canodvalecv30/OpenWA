@@ -23,7 +23,7 @@ export class StatusController {
   @ApiOperation({ summary: 'Get all contact status updates' })
   @ApiResponse({
     status: 200,
-    description: 'Status updates visible to the session, grouped by contact.',
+    description: 'Status updates visible to the session, newest first.',
     type: StatusListResponseDto,
   })
   async getStatuses(@Param('sessionId') sessionId: string) {
@@ -47,7 +47,7 @@ export class StatusController {
   @ApiOperation({ summary: 'Stream a stored status media file' })
   @ApiResponse({
     status: 200,
-    description: 'The status image/video bytes.',
+    description: 'The status image, video or voice note (audio) bytes.',
     content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
   })
   @ApiResponse({ status: 404, description: 'No stored media (text status, omitted, or expired).' })

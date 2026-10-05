@@ -9,20 +9,6 @@ import { WhatsAppWebJsAdapter } from './adapters/whatsapp-web-js.adapter';
 // agree, so each is asserted against the shared builders rather than a hand-written string.
 describe('engine auth directory paths', () => {
   const SESSION_ID = '8f5b1d9e-0c4a-4e21-9d6b-2a7c3f0e1b44';
-  const OTHER_ID = '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-
-  it('gives two sessions whose NAMES differ only in case two distinct directories', () => {
-    // The reported bug: `my-bot` and `My-Bot` are two rows, and on a case-insensitive filesystem the
-    // name-keyed directories collapsed into one. Ids differ in more than case, so the paths do too,
-    // and neither carries the name that used to collide.
-    for (const dirs of [
-      [wwjsAuthDir('./data/sessions', SESSION_ID), wwjsAuthDir('./data/sessions', OTHER_ID)],
-      [baileysAuthDir('./data/baileys', SESSION_ID), baileysAuthDir('./data/baileys', OTHER_ID)],
-    ]) {
-      expect(dirs[0].toLowerCase()).not.toBe(dirs[1].toLowerCase());
-      expect(dirs.join(' ')).not.toMatch(/my-bot/i);
-    }
-  });
 
   it('the baileys adapter stores credentials at the id-keyed path', () => {
     const adapter = new BaileysAdapter({

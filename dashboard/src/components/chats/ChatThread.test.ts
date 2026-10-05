@@ -151,3 +151,69 @@ test('an @mention of a participant who posted in the thread shows their first na
   assert.equal(body?.querySelector('bdi')?.textContent, '@Bob');
   assert.equal(container.querySelector('.quote-body bdi')?.textContent, '@Bob');
 });
+
+test('a document sent by URL opens in a new tab instead of navigating the dashboard away', () => {
+  // Browsers ignore `download` on a cross-origin link, so a plain click would unload the dashboard.
+  const doc = (id: string, data: string): ChatMessageView => ({
+    ...PROMPT,
+    id,
+    waMessageId: `wamid.${id}`,
+    body: '',
+    type: 'document',
+    metadata: { media: { mimetype: 'application/pdf', filename: `${id}.pdf`, data } },
+  });
+  const { container } = renderThread('operator', [
+    doc('remote', 'https://files.example.com/remote.pdf'),
+    doc('inline', 'JVBERi0='),
+  ]);
+  const [remote, inline] = Array.from(container.querySelectorAll<HTMLAnchorElement>('a.chat-document-media'));
+  assert.equal(remote.getAttribute('target'), '_blank');
+  assert.equal(remote.getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(inline.getAttribute('target'), null);
+  assert.equal(inline.getAttribute('download'), 'inline.pdf');
+});
+
+test('archive-only media previews inline from the media route; a plain omitted marker and a document keep the button', async () => {
+  // MESSAGE_INLINE_MEDIA=archive leaves `{ omitted, archived }` on the row: the image rendered inline
+  // before, so it must still. The over-budget marker (no `archived`) must not fetch on render, and a
+  // document has nothing to preview.
+  const media = (id: string, type: ChatMessageView['type'], archived: boolean): ChatMessageView => ({
+    ...PROMPT,
+    id,
+    waMessageId: `wamid.${id}`,
+    body: '',
+    type,
+    metadata: { media: { mimetype: 'image/jpeg', filename: `${id}.jpg`, omitted: true, sizeBytes: 10, archived } },
+  });
+  const fetched: string[] = [];
+  const fetchOriginal = globalThis.fetch;
+  const createOriginal = URL.createObjectURL;
+  const revokeOriginal = URL.revokeObjectURL;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetched.push(String(input));
+    return new Response(new Blob(['x'], { type: 'image/jpeg' }), { status: 200 });
+  }) as typeof fetch;
+  URL.createObjectURL = () => 'blob:archived';
+  URL.revokeObjectURL = () => {};
+  try {
+    const { container } = renderThread('viewer', [
+      media('arch', 'image', true),
+      media('plain', 'image', false),
+      media('doc', 'document', true),
+    ]);
+    const img = await rtl.waitFor(() => {
+      const found = container.querySelector('[data-wa-message-id="wamid.arch"] img.chat-image-media');
+      assert.ok(found, 'the archived image did not preview');
+      return found;
+    });
+    assert.equal(img.getAttribute('src'), 'blob:archived');
+    assert.equal(fetched.length, 1, 'only the archived image is fetched on render');
+    assert.match(fetched[0], /\/messages\/.+\/wamid\.arch\/media$/);
+    assert.ok(container.querySelector('[data-wa-message-id="wamid.plain"] button.message-media-omitted'));
+    assert.ok(container.querySelector('[data-wa-message-id="wamid.doc"] button.message-media-omitted'));
+  } finally {
+    globalThis.fetch = fetchOriginal;
+    URL.createObjectURL = createOriginal;
+    URL.revokeObjectURL = revokeOriginal;
+  }
+});

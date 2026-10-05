@@ -9,7 +9,8 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger, OnModuleDestroy } from '@nestjs/common';
+import { OnModuleDestroy } from '@nestjs/common';
+import { createLogger } from '../../common/services/logger.service';
 import { ConfigService } from '@nestjs/config';
 import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
@@ -117,7 +118,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @WebSocketServer()
   server!: Server;
 
-  private logger = new Logger('EventsGateway');
+  private logger = createLogger('EventsGateway');
 
   /**
    * Active sockets keyed by their validating API-key id, so a key revoked/disabled
@@ -182,8 +183,8 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * Re-validate the keys behind the live sockets against the database, once per tick.
    *
    * A socket carries the key snapshot taken at connect and never refreshes it, so every later change
-   * to the row is invisible to it: a key deleted, revoked, expired or narrowed by another node, by a
-   * direct database write, or by an operator change that committed in the window between this
+   * to the row is invisible to it: a key deleted, revoked, expired or narrowed by a direct write to
+   * this node's main database, or by an operator change that committed in the window between this
    * socket's validation and its registration here. The operator path still evicts synchronously in
    * the same request (see AuthService.update/revoke/delete); this is the backstop for the changes
    * that never reached this process.
@@ -313,7 +314,17 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     }
   }
 
-  async handleConnection(client: Socket) {
+  handleConnection(client: Socket): Promise<void> {
+    // socket.io sends CONNECT to the client before Nest calls this, and Nest binds the frame handlers
+    // without waiting for it, so a client that subscribes from its 'connect' handler can send a frame
+    // while the key below is still being validated. handleMessage waits on this promise; it is stored
+    // synchronously, before any frame can be dispatched.
+    const ready = this.authenticate(client);
+    (client.data as { authReady?: Promise<void> }).authReady = ready;
+    return ready;
+  }
+
+  private async authenticate(client: Socket): Promise<void> {
     // Resolve the client IP once here so the handshake throttle, the validation, and the
     // audit trail all use the same trusted-proxy-aware value (parity with the REST guard / MCP mount).
     const clientIp = this.resolveClientIp(client);
@@ -361,6 +372,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       // chat's events to it. Mirrors the REST guard's default-deny for unmarked routes.
       if ((validKey.allowedChats?.length ?? 0) > 0) {
         this.logger.warn(`Client ${client.id} rejected: chat-scoped key ${validKey.id} cannot subscribe to events`);
+        this.auditChatScopedRefusal(validKey, clientIp);
         client.emit(
           'message',
           this.createError('UNAUTHORIZED', 'API keys restricted to selected chats cannot subscribe to events'),
@@ -428,6 +440,19 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     }
   }
 
+  /**
+   * A refused chat-scoped key is a stored key turned away, which the REST guard, the MCP surface and
+   * Bull Board all record; the socket refusal returns before the handshake's catch, so it audits here.
+   */
+  private auditChatScopedRefusal(apiKey: ApiKey, clientIp: string): void {
+    void this.auditService.logWarn(AuditAction.API_KEY_AUTH_FAILED, {
+      apiKey,
+      ipAddress: clientIp,
+      metadata: { surface: 'websocket' },
+      errorMessage: 'API keys restricted to selected chats cannot subscribe to events',
+    });
+  }
+
   handleDisconnect(client: Socket) {
     this.untrackSocket(client);
     this.logger.log(`Client disconnected: ${client.id}`);
@@ -473,6 +498,14 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       return this.reply(client, this.createError('RATE_LIMITED', 'Frame rate limit exceeded, slow down', requestId));
     }
 
+    // A frame sent during the handshake waits for it. Without this a subscribe found no key on the socket
+    // and was refused as 'API key is no longer valid', a server-side close the client does not retry.
+    // A socket the handshake refused has already been answered and closed, so its frame is dropped.
+    await (client.data as { authReady?: Promise<void> }).authReady;
+    if (client.disconnected) {
+      return undefined;
+    }
+
     switch (message?.type) {
       case 'subscribe':
         return this.reply(client, await this.handleSubscribe(client, message));
@@ -515,8 +548,15 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     let subscriberKey: ApiKey | null;
     try {
       subscriberKey = rawApiKey ? await this.authService.validateApiKey(rawApiKey, clientIp) : null;
-    } catch {
+    } catch (error) {
       subscriberKey = null;
+      // A key refused here was valid at connect (revoked, expired, deleted or IP-refused since), so it
+      // is audited like the handshake refusal; the socket is disconnected below, bounding the volume.
+      void this.auditService.logWarn(AuditAction.API_KEY_AUTH_FAILED, {
+        ipAddress: clientIp,
+        metadata: { surface: 'websocket' },
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
     }
     if (!subscriberKey) {
       client.emit('message', this.createError('UNAUTHORIZED', 'API key is no longer valid', requestId));
@@ -532,13 +572,16 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     }
 
     // The connect handshake refuses a chat-restricted key, but the key can gain allowedChats after
-    // connect (an update on another node), so the fresh key is held to the same rule here.
+    // connect (a direct write to this node's main database, or an operator update that committed
+    // between this socket's validation and its registration), so the fresh key is held to the same
+    // rule here.
     if ((subscriberKey.allowedChats?.length ?? 0) > 0) {
       const refusal = this.createError(
         'UNAUTHORIZED',
         'API keys restricted to selected chats cannot subscribe to events',
         requestId,
       );
+      this.auditChatScopedRefusal(subscriberKey, clientIp);
       client.emit('message', refusal);
       client.disconnect();
       return refusal;
@@ -616,8 +659,13 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     }
   }
 
-  private handleUnsubscribe(client: Socket, message: WSUnsubscribeRequest): WSUnsubscribedResponse {
+  private handleUnsubscribe(client: Socket, message: WSUnsubscribeRequest): WSUnsubscribedResponse | WSErrorResponse {
     const { sessionId, requestId } = message;
+    // Same check as subscribe: a missing sessionId matched no room, left every subscription in place,
+    // and was still answered 'unsubscribed'.
+    if (!sessionId || typeof sessionId !== 'string') {
+      return this.createError('INVALID_SESSION', 'sessionId is required', requestId);
+    }
 
     // Leave all rooms for this session
     const clientRooms = Array.from(client.rooms);

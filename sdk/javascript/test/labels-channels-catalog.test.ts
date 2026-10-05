@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { OpenWAClient } from '../src';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import { OpenWAClient, type CatalogInfo, type CatalogProduct } from '../src';
 import { MockTransport } from './helpers';
 
 function client(t: MockTransport): OpenWAClient {
@@ -74,6 +74,18 @@ describe('CatalogResource — exact paths (note: catalog controller is session-r
     expect(t.lastCall!.url).toContain('limit=20');
     await c.catalog.product('s', 'p1');
     expect(t.lastCall!.url).toBe('http://localhost:2785/api/sessions/s/catalog/products/p1');
+  });
+
+  it('types and resolves an empty catalog or product body as null', async () => {
+    // The gateway answers 200 with an empty body when the account has no catalog or no product has the id.
+    const t = new MockTransport().on('GET', /\/catalog(\/products\/p9)?$/, { status: 200 });
+    const c = client(t);
+    const info = await c.catalog.info('s');
+    expectTypeOf(info).toEqualTypeOf<CatalogInfo | null>();
+    expect(info).toBeNull();
+    const product = await c.catalog.product('s', 'p9');
+    expectTypeOf(product).toEqualTypeOf<CatalogProduct | null>();
+    expect(product).toBeNull();
   });
 
   it('sendProduct shares the messages path', async () => {

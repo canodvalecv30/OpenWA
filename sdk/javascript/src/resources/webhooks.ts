@@ -9,8 +9,10 @@ import { encodeSegment } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
   CreateWebhookRequest,
+  RedriveWebhookDeliveriesRequest,
   UpdateWebhookRequest,
   WebhookDeliveryFailure,
+  WebhookRedriveResult,
   WebhookResponse,
   WebhookTestResult,
 } from '../types.js';
@@ -38,17 +40,35 @@ export class WebhooksResource {
   }
 
   /**
-   * Deliveries that were attempted and failed — the diagnostic to reach for when a webhook stopped
-   * arriving. Requires an ADMIN-level key.
+   * Deliveries the gateway gave up on or could not dispatch: the diagnostic to reach for when a webhook
+   * stopped arriving. Rows with `attempts > 0` exhausted their retries against the receiver. Rows with
+   * `attempts === 0` were not given up after retries: the payload was over the size cap or could not be
+   * serialized after the webhook:before hooks, dispatch capacity was shed, or shutdown interrupted the
+   * delivery (possibly between retries, after earlier attempts). A row is removed once a later replay
+   * delivers the event. Requires an ADMIN-level key.
    *
-   * Note it records deliveries that were ATTEMPTED: a delivery a smart filter suppressed never reaches
-   * this log. Most recent first.
+   * A delivery a smart filter suppressed never reaches this log. Most recent first.
    */
   deliveryFailures(query?: DeliveryFailureQuery): Promise<WebhookDeliveryFailure[]> {
     return this.client.request<WebhookDeliveryFailure[]>({
       method: 'GET',
       path: '/api/webhooks/delivery-failures',
       query,
+    });
+  }
+
+  /**
+   * Replay recorded deliveries that still hold their event data (`replayable: true` in
+   * {@link deliveryFailures}), fewest attempts first, then oldest, one bounded batch per call.
+   * Each replay reuses the stored idempotency key, so a receiver that already handled the event can dedup it. Only rows recorded
+   * while the gateway's `WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS` is above 0 are replayable. Requires
+   * an ADMIN-level key; rows outside the key's allowedSessions are never touched.
+   */
+  redriveDeliveryFailures(body: RedriveWebhookDeliveriesRequest = {}): Promise<WebhookRedriveResult> {
+    return this.client.request<WebhookRedriveResult>({
+      method: 'POST',
+      path: '/api/webhooks/delivery-failures/redrive',
+      body,
     });
   }
 

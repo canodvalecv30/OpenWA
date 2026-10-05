@@ -21,7 +21,12 @@ public record StatusMediaInput(String url, String base64, String mimetype) {
             return this;
         }
 
-        /** Optional explicit mimetype (inferred from URL/bytes when omitted). */
+        /**
+         * MIME type of the media. When omitted the server uses the route's default
+         * ({@code image/jpeg}, {@code video/mp4} or {@code audio/ogg; codecs=opus}), which also
+         * overrides a URL's Content-Type; the bytes are never inspected. Set it for base64 and for
+         * any media of another type.
+         */
         public Builder mimetype(String v) {
             this.mimetype = v;
             return this;

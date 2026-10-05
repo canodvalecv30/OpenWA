@@ -40,6 +40,19 @@ export function RoleProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Session-scoped keys are refused on the cross-session routes (e.g. /stats/overview) whatever their
+  // role, so the UI needs the scope beside the role to avoid sending them.
+  const [scoped, setScopedState] = useState(() => sessionStorage.getItem('openwa_key_scoped') === 'true');
+
+  const setScoped = useCallback((newScoped: boolean) => {
+    setScopedState(newScoped);
+    if (newScoped) {
+      sessionStorage.setItem('openwa_key_scoped', 'true');
+    } else {
+      sessionStorage.removeItem('openwa_key_scoped');
+    }
+  }, []);
+
   const value: RoleContextType = {
     role,
     setRole,
@@ -49,6 +62,8 @@ export function RoleProvider({ children }: { children: ReactNode }) {
     canWrite: role === 'admin' || role === 'operator',
     engineType,
     setEngineType,
+    scoped,
+    setScoped,
   };
 
   return <RoleContext.Provider value={value}>{children}</RoleContext.Provider>;

@@ -26,6 +26,10 @@ export class InfraDataController {
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Export all data from Data DB for migration' })
   @ApiResponse({ status: 200, description: 'Exported data as JSON', type: InfraExportDataResponseDto })
+  @ApiResponse({
+    status: 409,
+    description: 'Refused with code IMPORT_ALREADY_RUNNING: a data import is running; export after it finishes.',
+  })
   async exportData(): Promise<InfraExportDataResult> {
     return this.infraData.exportData();
   }
@@ -46,7 +50,7 @@ export class InfraDataController {
   @ApiResponse({
     status: 409,
     description:
-      'Refused, with the reason in `code`. IMPORT_ALREADY_RUNNING: another import is running — wait for it. IMPORT_NESTED_TRANSACTION: another database transaction holds this connection, so a restore could not be made durable — retry with nothing else in flight. IMPORT_WOULD_ORPHAN_ENGINES: live engines exist for sessions the backup would remove — retry with stopOrphans=true to stop them in-request, or force=true to proceed and restart after. Only the last of these is retryable with stopOrphans; the others leave nothing to decide',
+      'Refused, with the reason in `code`. IMPORT_ALREADY_RUNNING: another import is running — wait for it. EXPORT_IN_PROGRESS: a data export is running; wait for it. IMPORT_NESTED_TRANSACTION: another database transaction holds this connection, so a restore could not be made durable — retry with nothing else in flight. IMPORT_WOULD_ORPHAN_ENGINES: sessions the backup would remove are running, starting or waiting to relaunch here — retry with stopOrphans=true to stop them in-request, or force=true to proceed and restart after. Only the last of these is retryable with stopOrphans; the others leave nothing to decide',
   })
   async importData(@Body() data: ImportDataDto): Promise<InfraImportDataResult> {
     return this.infraData.importData(data);

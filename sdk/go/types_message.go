@@ -520,7 +520,7 @@ type BatchProgress struct {
 	Cancelled int `json:"cancelled"`
 }
 
-// BatchStatusResponse is the response from the batch status / cancel endpoints.
+// BatchStatusResponse is the response from the batch status endpoint.
 type BatchStatusResponse struct {
 	BatchID     string               `json:"batchId"`
 	Status      BatchLifecycleStatus `json:"status"`
@@ -528,6 +528,14 @@ type BatchStatusResponse struct {
 	Results     []BatchMessageResult `json:"results"`
 	StartedAt   *string              `json:"startedAt,omitempty"`
 	CompletedAt *string              `json:"completedAt,omitempty"`
+}
+
+// BatchCancelResponse is the response from the batch cancel endpoint: the batch
+// state without the per-recipient results.
+type BatchCancelResponse struct {
+	BatchID  string               `json:"batchId"`
+	Status   BatchLifecycleStatus `json:"status"`
+	Progress BatchProgress        `json:"progress"`
 }
 
 // MessageMedia is a message's stored media: the raw bytes plus the served

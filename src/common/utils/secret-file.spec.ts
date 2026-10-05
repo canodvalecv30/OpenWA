@@ -1,7 +1,15 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import * as fs from 'fs';
 import { writeSecretFile } from './secret-file';
+
+// A named import of chmodSync cannot be spied on after the fact, so route it through a mock that
+// defaults to the real call.
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return { ...actual, chmodSync: jest.fn(actual.chmodSync) };
+});
 
 describe('writeSecretFile', () => {
   let dir: string;
@@ -39,17 +47,32 @@ describe('writeSecretFile', () => {
     expect(readFileSync(p, 'utf8')).toBe('new');
   });
 
-  it('warns to the console when a chmod fails (does not stay silently world-readable)', () => {
-    const p = join(dir, 'ghost');
+  it('does not warn when the file simply does not exist yet (create-mode covers it)', () => {
+    const p = join(dir, 'fresh');
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    // chmod a path that does not exist → ENOENT on the pre-write call. The write still succeeds
-    // (create-mode), and the failure is surfaced via console.warn instead of being swallowed.
+    writeSecretFile(p, 'secret');
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(readFileSync(p, 'utf8')).toBe('secret');
+    warnSpy.mockRestore();
+  });
+
+  it('warns to the console when a chmod fails for any other reason (does not stay silently world-readable)', () => {
+    const p = join(dir, 'nochmod');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.mocked(fs.chmodSync).mockImplementation(() => {
+      throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    });
+
+    // The write still succeeds (create-mode), and both failures are surfaced instead of swallowed.
     writeSecretFile(p, 'secret');
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pre-write chmod 0o600 failed'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('post-write chmod 0o600 failed'));
     expect(readFileSync(p, 'utf8')).toBe('secret');
 
+    jest.mocked(fs.chmodSync).mockImplementation(jest.requireActual<typeof import('fs')>('fs').chmodSync);
     warnSpy.mockRestore();
   });
 });

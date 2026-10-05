@@ -62,8 +62,8 @@ export function buildConversationSendFacade(deps: ConversationSendDeps) {
         // A location envelope is delivered as a native location pin. Without valid coordinates there
         // is NOTHING to send — reject loudly instead of degrading to an empty text message.
         if (env.type === 'location') {
-          // The engine location path cannot quote a message, so a location reply is not expressible.
-          // Reject rather than silently drop the quote (same rule as media).
+          // The plugin location port (ConversationSendDeps, PluginMessagePort) carries no quotedMessageId,
+          // so a location reply would lose its quote. Reject rather than silently drop it (same rule as media).
           if (env.replyTo) {
             throw new PluginCapabilityError('conversation.send: replyTo is not supported for location messages');
           }
@@ -83,8 +83,8 @@ export function buildConversationSendFacade(deps: ConversationSendDeps) {
         // nothing to send as media, so it falls through to the text/reply path — a plugin that puts the
         // URL in `text` as a fallback still delivers a (text) message rather than erroring.
         if (isMediaType(env.type) && env.mediaUrl) {
-          // The engine media path takes only (chatId, media) — it cannot quote a message, so a media
-          // reply is not expressible. Reject rather than silently drop the quote.
+          // The plugin media port (ConversationSendDeps, PluginMessagePort) carries no quotedMessageId, so
+          // a media reply would lose its quote. Reject rather than silently drop it.
           if (env.replyTo) {
             throw new PluginCapabilityError('conversation.send: replyTo is not supported for media messages');
           }

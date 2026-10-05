@@ -19,7 +19,7 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 export interface RequestOptions {
   method: HttpMethod;
-  /** Full path beginning with `/`, e.g. `/api/sessions`. */
+  /** Full path beginning with `/`, e.g. `/api/sessions`; any other path is refused and nothing is sent. */
   path: string;
   /** Query parameters, serialized into the URL. */
   query?: object;
@@ -44,14 +44,25 @@ export interface ClientConfig {
   fetch?: FetchLike;
 }
 
+/** Stands in for an empty or dot id; encodeURIComponent output never contains it. */
+const BLANK_SEGMENT = '\u0000';
+
 /**
  * Percent-encode a single path segment (e.g. a chat/message id) so a value
  * containing `/`, `#`, `?` or whitespace can't break out of its path position.
  * WhatsApp-id characters that are already path-safe (`@`, `:`, `+`) are kept
  * readable.
+ *
+ * An empty, `.` or `..` segment becomes {@link BLANK_SEGMENT}, which `send()`
+ * rejects: fetch resolves dot segments before sending, and an empty one means
+ * a required id was blank, so either would reach the parent resource instead
+ * of the intended one. Marking it here rather than throwing keeps the refusal
+ * a rejection of the returned promise, since resource methods are not async.
  */
 export function encodeSegment(segment: string | number): string {
-  return encodeURIComponent(String(segment)).replace(/%40/g, '@').replace(/%3A/g, ':').replace(/%2B/g, '+');
+  const text = String(segment);
+  if (text === '' || text === '.' || text === '..') return BLANK_SEGMENT;
+  return encodeURIComponent(text).replace(/%40/g, '@').replace(/%3A/g, ':').replace(/%2B/g, '+');
 }
 
 /** Build a URL with serialized query params, omitting `undefined`/`null` values. */
@@ -64,7 +75,8 @@ export function buildUrl(baseUrl: string, path: string, query?: object): string 
     params.append(key, String(value));
   }
   const qs = params.toString();
-  return qs ? `${url}?${qs}` : url;
+  // A raw path may already carry a query string; extend it rather than start a second one.
+  return qs ? `${url}${path.includes('?') ? '&' : '?'}${qs}` : url;
 }
 
 /**
@@ -139,21 +151,30 @@ async function send<T>(
   options: RequestOptions,
   consume: (res: Response) => Promise<T>,
 ): Promise<T> {
-  // fetch resolves `.` and `..` segments before sending, so such a segment would reach the parent
-  // resource instead of the intended one. Mirror the URL parser: it drops tab and newline, trims
-  // trailing C0 controls and spaces, reads `\` as `/`, and treats %2e as a dot. An empty segment is
-  // refused too: it means a required id was blank.
-  const pathOnly = options.path
-    .split(/[?#]/, 1)[0]
-    .replace(/[\t\n\r]/g, '')
-    .replace(/[\x00-\x20]+$/, '');
-  for (const segment of pathOnly.split(/[/\\]/).slice(1)) {
-    const dots = segment.replace(/%2e/gi, '.');
-    if (dots === '' || dots === '.' || dots === '..') {
-      throw new TypeError(`OpenWA: empty or dot path segment in ${JSON.stringify(options.path)}`);
-    }
+  // The path is appended to the base URL, so one without a leading `/` could move the host
+  // (`.example.net/x`, `@example.net/x`) and send the API key there.
+  if (!options.path.startsWith('/')) {
+    throw new TypeError(`OpenWA: path must begin with "/": ${JSON.stringify(options.path)}`);
+  }
+  if (options.path.includes(BLANK_SEGMENT)) {
+    throw new TypeError(`OpenWA: empty or dot path segment in ${JSON.stringify(options.path)}`);
   }
   const url = buildUrl(config.baseUrl, options.path, options.query);
+  // fetch resolves `.` and `..` segments before sending, so such a segment would reach the parent
+  // resource instead of the intended one. Mirror the URL parser: it drops tab and newline, reads `\`
+  // as `/`, treats %2e as a dot, and trims trailing C0 controls and spaces, which end the path only
+  // when no query or fragment follows it. Empty segments, such as a trailing slash, are sent as
+  // written; a blank id is refused above.
+  const tail = url.slice(config.baseUrl.replace(/\/$/, '').length);
+  const rawPath = tail.split(/[?#]/, 1)[0];
+  let pathOnly = rawPath.replace(/[\t\n\r]/g, '');
+  if (rawPath.length === tail.length) pathOnly = pathOnly.replace(/[\x00-\x20]+$/, '');
+  for (const segment of pathOnly.split(/[/\\]/).slice(1)) {
+    const dots = segment.replace(/%2e/gi, '.');
+    if (dots === '.' || dots === '..') {
+      throw new TypeError(`OpenWA: dot path segment in ${JSON.stringify(options.path)}`);
+    }
+  }
   const timeoutMs = toTimeoutMs(options.timeoutMs ?? config.timeoutMs);
 
   const controller = new AbortController();
@@ -167,12 +188,14 @@ async function send<T>(
   // Auth and JSON content-type WIN over caller-supplied defaults/per-request headers — the SDK only
   // ever sends a JSON body, and this matches the Python and PHP SDKs (which force JSON) and the
   // documented "JSON headers win" contract. Header names are case-insensitive and fetch joins duplicates,
-  // so drop a caller's copy in any case before adding ours; putting ours last is not enough.
-  const headers: Record<string, string> = {};
-  for (const [name, value] of Object.entries({ ...config.defaultHeaders, ...options.headers })) {
+  // so merge by lowercased name (a per-request header replaces a default in any case) and drop a
+  // caller's copy of ours before adding them; putting ours last is not enough.
+  const merged = new Map<string, [string, string]>();
+  for (const [name, value] of [...Object.entries(config.defaultHeaders), ...Object.entries(options.headers ?? {})]) {
     const lower = name.toLowerCase();
-    if (lower !== 'content-type' && lower !== 'x-api-key') headers[name] = value;
+    if (lower !== 'content-type' && lower !== 'x-api-key') merged.set(lower, [name, value]);
   }
+  const headers: Record<string, string> = Object.fromEntries(merged.values());
   headers['Content-Type'] = 'application/json';
   headers['X-API-Key'] = config.apiKey;
 
@@ -194,7 +217,7 @@ async function send<T>(
     if (!res.ok) {
       const context = `${options.method} ${options.path}`;
       const apiError = await OpenWAApiError.fromResponse(res, context);
-      throw classifyApiError(apiError.status, apiError.message, apiError.body, apiError.errorKind);
+      throw classifyApiError(apiError.status, apiError.message, apiError.body, apiError.errorKind, apiError.headers);
     }
 
     return await consume(res);

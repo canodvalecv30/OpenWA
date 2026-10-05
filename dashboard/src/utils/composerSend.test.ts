@@ -22,12 +22,14 @@ const ATTACHMENT = { base64: 'AAAA', mimetype: 'image/png', filename: 'a.png' };
 // Stands in for the composer's localized labeler.
 const label = (type: string) => `[${type === 'image' ? 'Image' : type}]`;
 
-test('quotedIdOf prefers the WhatsApp id over the local one', () => {
+test('quotedIdOf quotes by the WhatsApp id', () => {
   assert.equal(quotedIdOf(REPLY), 'true_628@c.us_3EB0');
 });
 
-test('quotedIdOf falls back to the local id before the echo assigns a WA id', () => {
-  assert.equal(quotedIdOf({ ...REPLY, waMessageId: undefined }), 'local-1');
+// A local temp_/sent_ id is not something the gateway can resolve: sending it as the quote fails the
+// send with a 404 instead of keeping the quote, so a message without a WA id is not quotable.
+test('quotedIdOf never falls back to the local id', () => {
+  assert.equal(quotedIdOf({ ...REPLY, waMessageId: undefined }), undefined);
 });
 
 test('quotedIdOf yields nothing when not replying', () => {

@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsIn, IsObject, IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength, Validate } from 'class-validator';
+import { MaxCodePoints } from '../../../common/validation/max-code-points';
 import { HasDecodableProxyCredentialsConstraint } from './has-decodable-proxy-credentials.validator';
+import { normaliseSessionConfig, RecognisedSessionConfigConstraint } from './recognised-session-config.validator';
 
 export class CreateSessionDto {
   @ApiProperty({
@@ -31,8 +34,10 @@ export class CreateSessionDto {
       'from the next session start.',
     example: { autoRejectCalls: false, maxReconnectAttempts: 5, reconnectBaseDelay: 5000 },
   })
+  @Transform(({ value }) => normaliseSessionConfig(value))
   @IsOptional()
   @IsObject()
+  @Validate(RecognisedSessionConfigConstraint)
   config?: Record<string, unknown>;
 
   // Phase 3: Proxy per session
@@ -40,15 +45,18 @@ export class CreateSessionDto {
     description:
       'Optional per-session egress proxy URL (http/https/socks4/socks5; credentialed form ' +
       '"http://user:pass@host" allowed). Must be a REAL, REACHABLE proxy — an unreachable value ' +
-      'silently blocks the WhatsApp WebSocket (no QR is ever delivered) and the session start times ' +
-      'out (~30s → 504 Gateway Timeout). Leave unset unless your network cannot reach WhatsApp directly.',
+      'silently blocks the WhatsApp WebSocket (no QR is ever delivered). On whatsapp-web.js the session ' +
+      'start then times out (~30s → 504 Gateway Timeout); on Baileys the start succeeds and the session ' +
+      'keeps retrying the connection. Leave unset unless your network cannot reach WhatsApp directly. ' +
+      'Setting it requires an ADMIN key (403 otherwise).',
+    maxLength: 255,
   })
   @IsOptional()
   @IsString()
-  @MaxLength(255)
+  @MaxCodePoints(255)
   // Reject a malformed/non-proxy URL at the boundary (credentialed http://user:pass@host and
   // socks4/5 still validate). The host is intentionally NOT SSRF-blocked here — a per-session proxy
-  // is operator-chosen egress, and a loopback proxy sidecar is a legitimate setup.
+  // is trusted egress that only an ADMIN key may set, and a loopback proxy sidecar is a legitimate setup.
   // require_tld:false + allow_underscores:true so single-label container hostnames (e.g. `squid`,
   // `localhost`) and IP-literal proxies validate, matching the engine's URL-parse check.
   @IsUrl(
@@ -64,9 +72,9 @@ export class CreateSessionDto {
   proxyUrl?: string;
 
   @ApiPropertyOptional({
-    description: 'Proxy type',
+    description: 'Deprecated and ignored: the proxyUrl scheme selects the proxy protocol. Accepted for compatibility.',
     enum: ['http', 'https', 'socks4', 'socks5'],
-    example: 'http',
+    deprecated: true,
   })
   @IsOptional()
   @IsIn(['http', 'https', 'socks4', 'socks5'])

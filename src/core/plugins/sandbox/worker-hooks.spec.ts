@@ -116,6 +116,26 @@ describe('WorkerHookRegistry', () => {
     expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({ continue: true, data: { n: 2 }, error: 'boom' });
   });
 
+  it('reports an uncloneable handler result as an error instead of rejecting the dispatch', async () => {
+    // parentPort.postMessage structured-clones the result; a rejection here would be unhandled in the
+    // worker (the bootstrap calls handleHook with void) and kill it.
+    const sent: WorkerToHostMessage[] = [];
+    const post = (m: WorkerToHostMessage): void => {
+      sent.push(structuredClone(m));
+    };
+    const reg = new WorkerHookRegistry(post);
+    reg.register('e', ({ data }) => Promise.resolve({ continue: true, data: { ...(data as object), fn: () => 1 } }));
+
+    await expect(
+      reg.handleHook({ kind: 'hook', id: 1, event: 'e', data: { x: 1 }, source: 's' }),
+    ).resolves.toBeUndefined();
+
+    const result = sent.find(m => m.kind === 'hook-result') as Extract<WorkerToHostMessage, { kind: 'hook-result' }>;
+    expect(result).toMatchObject({ id: 1, continue: true });
+    expect(result.error).toContain('could not be sent');
+    expect(result).not.toHaveProperty('data'); // the host keeps the original data
+  });
+
   it('reports only the FIRST handler error and stringifies non-Error throws', async () => {
     const { sent, post } = collect();
     const reg = new WorkerHookRegistry(post);

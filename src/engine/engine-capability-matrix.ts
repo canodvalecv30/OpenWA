@@ -272,7 +272,7 @@ export const CURATED_CAPABILITY_EXCEPTIONS: Record<string, MethodCapability> = {
     wwjs: { status: 'supported' },
     baileys: { status: 'supported' },
     evidence:
-      'Both implement it, but not to the same depth, which is what the optional marker on the interface allows: wwjs races a real Client.getState() round trip against a 10s timeout (whatsapp-web-js.adapter.ts:1710) and answers alive inside the bounded navigation re-inject window; baileys returns a local check, status === READY && sock != null (baileys-lifecycle.ts:738), because its keepalive already emits a close event within ~35s. So a wedged wwjs page is caught by the probe, while a wedged baileys socket is caught by the transport rather than here',
+      'Both implement it, but not to the same depth, which is what the optional marker on the interface allows: wwjs races a real Client.getState() round trip against a 10s timeout (WwebjsLifecycle.probeLiveness, wwebjs-lifecycle.ts) and answers alive inside the bounded navigation re-inject window; baileys returns a local check, status === READY && sock != null (BaileysLifecycle.probeLiveness, baileys-lifecycle.ts), because its keepalive already emits a close event within ~35s. So a wedged wwjs page is caught by the probe, while a wedged baileys socket is caught by the transport rather than here',
   },
   promoteParticipants: {
     wwjs: { status: 'supported' },

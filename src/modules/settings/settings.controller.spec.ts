@@ -18,6 +18,33 @@ describe('SettingsController', () => {
     expect(settings).toHaveProperty('notifications');
   });
 
+  it('reads the rate limit, debug flag and port from the keys the app configures', () => {
+    const prev = process.env.BASE_URL;
+    try {
+      delete process.env.BASE_URL;
+      const config = new ConfigService({
+        port: 9999,
+        database: { logging: true },
+        api: { rateLimit: { mediumLimit: 7, mediumTtl: 1234 } },
+      });
+      const settings = new SettingsController(config).get();
+      expect(settings.api.rateLimit).toBe(7);
+      expect(settings.api.rateLimitWindow).toBe(1234);
+      expect(settings.general.debugMode).toBe(true);
+      expect(settings.general.apiBaseUrl).toBe('http://localhost:9999');
+    } finally {
+      if (prev !== undefined) process.env.BASE_URL = prev;
+    }
+  });
+
+  it('reports no notification feature as enabled, since none exists', () => {
+    expect(new SettingsController(configStub).get().notifications).toEqual({
+      emailEnabled: false,
+      notificationEmail: '',
+      webhookAlerts: false,
+    });
+  });
+
   it('reports enableDocs from the real ENABLE_SWAGGER gate, not a hardcoded true', () => {
     const prev = process.env.ENABLE_SWAGGER;
     try {

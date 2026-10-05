@@ -51,13 +51,14 @@ test("WebKit's 'Load failed' collapses into one connection-lost toast", () => {
   assert.deepEqual(raise([['Load failed'], ['Load failed']]), [CONNECTION_LOST]);
 });
 
-test('a proxy 504 collapses into one connection-lost toast like 502 and 503', () => {
+test('a proxy 502 or 503 collapses into one connection-lost toast, a 504 keeps its own', () => {
+  // A 504 is a proxy that stopped waiting on a reachable backend: the request may still be running.
   assert.deepEqual(
     raise([
-      ['Save failed', 'HTTP 504'],
+      ['Import failed', 'HTTP 504'],
       ['Refresh failed', 'HTTP 504'],
     ]),
-    [CONNECTION_LOST],
+    ['Import failed', 'Refresh failed'],
   );
   rtl.cleanup();
   assert.deepEqual(

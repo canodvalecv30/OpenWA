@@ -29,15 +29,16 @@ describe('AddMessagesWaMessageIdUnique migration', () => {
     );
 
   it('deletes duplicate (sessionId, waMessageId) rows keeping the earliest, then enforces uniqueness', async () => {
-    await insert('id-early', 'sess-1', 'wa-1', '2026-01-01T00:00:00.000Z');
-    await insert('id-late', 'sess-1', 'wa-1', '2026-02-01T00:00:00.000Z');
+    // The earlier row has the id that sorts last and is inserted second, so only createdAt can pick it.
+    await insert('id-a-late', 'sess-1', 'wa-1', '2026-02-01T00:00:00.000Z');
+    await insert('id-z-early', 'sess-1', 'wa-1', '2026-01-01T00:00:00.000Z');
     await insert('id-other', 'sess-1', 'wa-2', '2026-01-01T00:00:00.000Z');
 
     const runner = ds.createQueryRunner();
     await new AddMessagesWaMessageIdUnique1781300000000().up(runner);
 
     const rows = (await runner.query(`SELECT id FROM "messages" ORDER BY id`)) as { id: string }[];
-    expect(rows.map(r => r.id).sort()).toEqual(['id-early', 'id-other']); // later dup deleted, earliest kept
+    expect(rows.map(r => r.id).sort()).toEqual(['id-other', 'id-z-early']); // later dup deleted, earliest kept
 
     await expect(insert('id-new', 'sess-1', 'wa-1', '2026-03-01T00:00:00.000Z')).rejects.toThrow();
     await runner.release();
@@ -65,9 +66,9 @@ describe('AddMessagesWaMessageIdUnique migration', () => {
     await runner.release();
   });
 
-  it('lifts the runtime statement_timeout for the migration transaction on Postgres', async () => {
-    // The runtime data pool carries a statement_timeout that is inherited by the boot-migration
-    // connection; this DELETE / CREATE UNIQUE INDEX over the hot messages table must not be aborted.
+  it('clears statement_timeout for the migration transaction on Postgres', async () => {
+    // The migration pool carries no runtime statement_timeout, but a role- or database-level default
+    // could still abort this DELETE / CREATE UNIQUE INDEX over the hot messages table mid-flight.
     const queries: string[] = [];
     const pgRunner = {
       dataSource: { options: { type: 'postgres' } },

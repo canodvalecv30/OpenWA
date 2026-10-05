@@ -1,5 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsIn, IsInt, IsString, Min } from 'class-validator';
+import { IsIn, IsInt, IsString, Max, Min } from 'class-validator';
+
+/** The largest epoch-ms value a JS Date can hold; anything above it is an Invalid Date. */
+const MAX_DATE_MS = 8_640_000_000_000_000;
 
 export class CreateCallLinkDto {
   @ApiProperty({
@@ -17,8 +20,12 @@ export class CreateCallLinkDto {
       'whatsapp-web.js generates an event-linked call and has no notion of "no start time", so a ' +
       'link for right now is `Date.now()` rather than an omitted field.',
     example: 1800000000000,
+    type: 'integer',
+    minimum: 1,
+    maximum: MAX_DATE_MS,
   })
   @IsInt()
   @Min(1)
+  @Max(MAX_DATE_MS)
   startTime!: number;
 }

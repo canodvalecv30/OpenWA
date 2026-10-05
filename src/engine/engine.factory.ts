@@ -3,7 +3,6 @@ import * as path from 'path';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IWhatsAppEngine } from './interfaces/whatsapp-engine.interface';
-import { WhatsAppWebJsAdapter } from './adapters/whatsapp-web-js.adapter';
 import { PluginLoaderService, PluginType, IEnginePlugin, PluginManifest } from '../core/plugins';
 import { WhatsAppWebJsPlugin } from './builtin/whatsapp-web-js';
 import { BaileysPlugin } from './builtin/baileys';
@@ -113,10 +112,9 @@ export class EngineFactory implements OnModuleInit {
     }
 
     // Both engine shapes' credential dirs are made owner-only up front, whichever engine this
-    // session runs and whichever construction path serves it (plugin or fallback): a whatsapp-web.js
-    // profile and a baileys creds.json each hold everything needed to take over the linked account,
-    // so read access to the data volume must not be enough. Mirrors purgeSessionData, which removes
-    // BOTH shapes for the same engine-switch-residue reason.
+    // session runs: a whatsapp-web.js profile and a baileys creds.json each hold everything needed
+    // to take over the linked account, so read access to the data volume must not be enough.
+    // Mirrors purgeSessionData, which removes BOTH shapes for the same engine-switch-residue reason.
     ensurePrivateDir(this.wwjsAuthDir(options.sessionId));
     ensurePrivateDir(this.baileysAuthDir(options.sessionId));
 
@@ -124,23 +122,25 @@ export class EngineFactory implements OnModuleInit {
     const enginePlugin = this.pluginLoader.getPlugin(this.engineType);
 
     if (enginePlugin?.instance && this.isEnginePlugin(enginePlugin.instance)) {
-      // Engine-neutral per-call config only. Engine-specific config (e.g. Puppeteer for
-      // whatsapp-web.js) is supplied to the plugin as an opaque blob via context.config at
-      // registration, so the factory never assembles browser-shaped fields.
+      // Engine-neutral per-call config, plus the two auth-dir bases. Engine-specific config (e.g.
+      // Puppeteer for whatsapp-web.js) is supplied to the plugin as an opaque blob via context.config
+      // at registration, so the factory never assembles browser-shaped fields. The bases are the
+      // exception: this factory hardens and purges the credential dirs under them, and the boot
+      // migration renames into them, so the engine must write there too. context.config can carry a
+      // persisted plugin-config override that none of those would follow.
       return enginePlugin.instance.createEngine({
         sessionId: options.sessionId,
         dbSessionId: options.dbSessionId,
         proxyUrl: options.proxyUrl,
         proxyType: options.proxyType,
+        sessionDataPath: this.sessionDataPath(),
+        authDir: this.baileysAuthBase(),
       }) as IWhatsAppEngine;
     }
 
-    // Fallback to direct adapter creation (legacy support)
-    this.logger.warn(`Engine plugin ${this.engineType} not available, using fallback`, {
-      action: 'engine_fallback',
-    });
-
-    return this.createFallbackEngine(options);
+    // Both built-ins are registered with an instance in onModuleInit and ENGINE_TYPE is whitelisted at
+    // boot, so this is reached only by a broken host. Never build some other engine in its place.
+    throw new Error(`Engine '${this.engineType}' is not registered; cannot start the session.`);
   }
 
   /**
@@ -206,14 +206,24 @@ export class EngineFactory implements OnModuleInit {
     }
   }
 
+  /** The whatsapp-web.js sessionDataPath from config. */
+  private sessionDataPath(): string {
+    return this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions';
+  }
+
+  /** The baileys authDir from config. */
+  private baileysAuthBase(): string {
+    return this.configService.get<string>('engine.baileys.authDir') ?? './data/baileys';
+  }
+
   /** The whatsapp-web.js LocalAuth profile dir for `sessionId`, with sessionDataPath from config. */
   private wwjsAuthDir(sessionId: string): string {
-    return wwjsAuthDir(this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions', sessionId);
+    return wwjsAuthDir(this.sessionDataPath(), sessionId);
   }
 
   /** The baileys multi-file auth dir for `sessionId`, with authDir from config. */
   private baileysAuthDir(sessionId: string): string {
-    return baileysAuthDir(this.configService.get<string>('engine.baileys.authDir') ?? './data/baileys', sessionId);
+    return baileysAuthDir(this.baileysAuthBase(), sessionId);
   }
 
   /** True when `dir`'s base directory holds an entry with exactly that name (see readAuthDirEntries). */
@@ -234,36 +244,6 @@ export class EngineFactory implements OnModuleInit {
       'createEngine' in instance &&
       typeof (instance as { createEngine: unknown }).createEngine === 'function'
     );
-  }
-
-  private createFallbackEngine(options: EngineCreateOptions): IWhatsAppEngine {
-    // This legacy fallback can only construct the whatsapp-web.js adapter. If a different engine was
-    // requested (e.g. ENGINE_TYPE=baileys) and its plugin wasn't available, building wwebjs here would
-    // silently run the WRONG engine — fail loudly so the misconfiguration is visible instead.
-    if (this.engineType !== 'whatsapp-web.js') {
-      throw new Error(
-        `Engine '${this.engineType}' is unavailable and has no direct fallback; cannot start the session.`,
-      );
-    }
-
-    // Legacy direct creation (fallback)
-    return new WhatsAppWebJsAdapter({
-      sessionId: options.sessionId,
-      sessionDataPath: this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions',
-      puppeteer: {
-        headless: this.configService.get<boolean>('engine.puppeteer.headless') ?? true,
-        args: this.configService.get<string[]>('engine.puppeteer.args') ?? ['--no-sandbox', '--disable-setuid-sandbox'],
-        executablePath: this.configService.get<string>('engine.puppeteer.executablePath'),
-        protocolTimeoutMs: this.configService.get<number>('engine.puppeteer.protocolTimeoutMs'),
-      },
-      proxy: options.proxyUrl
-        ? {
-            url: options.proxyUrl,
-            type: options.proxyType ?? 'http',
-          }
-        : undefined,
-      lidMappingStore: this.lidMappingStore,
-    });
   }
 
   // ============================================================================

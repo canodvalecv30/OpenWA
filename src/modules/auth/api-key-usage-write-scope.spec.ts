@@ -1,5 +1,7 @@
+import 'reflect-metadata';
 import { readFileSync, readdirSync } from 'fs';
 import { join, relative, sep } from 'path';
+import { DataSource } from 'typeorm';
 import { ApiKeyUsageTracker } from './api-key-usage-tracker.service';
 import { ApiKey, ApiKeyRole } from './entities/api-key.entity';
 
@@ -10,11 +12,11 @@ import { ApiKey, ApiKeyRole } from './entities/api-key.entity';
  * `lastUsedAt`/`usageCount` on it and persists on a 60s window. Persisting that entity WHOLE writes
  * every column back — including `isActive`, `role`, `allowedSessions`, `allowedIps` and `expiresAt`
  * as they were when the request began. An administrator change committed between the load and the
- * windowed write is silently reverted by an advisory statistics update. Revocation is a hard delete,
+ * windowed write is silently reverted by an advisory statistics update. Deletion is a hard delete,
  * so the same write on a removed key is an INSERT rather than an UPDATE: the credential comes back
  * with its original hash and authenticates again.
  *
- * `forget()` is called by revoke() before its deactivating save and closes the window for a key with
+ * `forget()` is called by revoke() and delete() after their write and closes the window for a key with
  * only PENDING counters. It cannot reach an entity a request handler is already holding, which is the
  * case these tests pin.
  *
@@ -122,7 +124,8 @@ describe('API-key usage write scope', () => {
     // rather than writing NULL, so an undefined here is not a wipe — it is a write that silently
     // updates nothing but `updatedAt`, and the statistics stop advancing with no error to notice.
     expect(written.lastUsedAt).toBeInstanceOf(Date);
-    expect(typeof written.usageCount).toBe('number');
+    // The count is a SQL increment expression, not a value.
+    expect(typeof written.usageCount).toBe('function');
   });
 
   it('aims the write at the row it loaded and no other', async () => {
@@ -162,6 +165,39 @@ describe('API-key usage write scope', () => {
   });
 });
 
+describe('API-key usage count at a window boundary', () => {
+  let ds: DataSource;
+
+  beforeAll(async () => {
+    ds = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [ApiKey], synchronize: true });
+    await ds.initialize();
+  });
+
+  afterAll(async () => {
+    await ds.destroy();
+  });
+
+  it('keeps every counted use when two requests holding the same stale row both write', async () => {
+    const repo = ds.getRepository(ApiKey);
+    const { id } = await repo.save(
+      repo.create({ name: 'k', keyPrefix: 'kp', keyHash: 'window', role: ApiKeyRole.OPERATOR, usageCount: 0 }),
+    );
+    const tracker = new ApiKeyUsageTracker(repo);
+
+    // Ten uses inside the window stay pending.
+    await repo.update({ id }, { lastUsedAt: new Date(Date.now() - 1_000) });
+    for (let i = 0; i < 10; i++) await tracker.record(await repo.findOneByOrFail({ id }));
+
+    // The window passes; two requests load the same row before either windowed write lands.
+    await repo.update({ id }, { lastUsedAt: new Date(Date.now() - 120_000) });
+    const first = await repo.findOneByOrFail({ id });
+    const second = await repo.findOneByOrFail({ id });
+    await Promise.all([tracker.record(first), tracker.record(second)]);
+
+    expect((await repo.findOneByOrFail({ id })).usageCount).toBe(12);
+  });
+});
+
 /**
  * Structural guard for the entrypoint dimension of the same bug.
  *
@@ -179,6 +215,7 @@ describe('validateApiKey entrypoint coverage', () => {
     ['modules/auth/guards/api-key.guard.ts', 'REST route guard'],
     ['modules/events/events.gateway.ts', 'websocket connect and per-subscribe re-validation'],
     ['modules/health/health.controller.ts', 'version disclosure on the public health check'],
+    ['modules/mcp/mcp.server.ts', 'MCP mount key gate'],
   ]);
 
   /** Where validateApiKey is declared, which is not a caller. */

@@ -12,14 +12,11 @@ func (s *CatalogService) sessionBase(sessionID string) string {
 	return "/api/sessions/" + pathEscape(sessionID)
 }
 
-// Info returns catalog metadata.
+// Info returns catalog metadata, or nil when the account has no catalog.
 func (s *CatalogService) Info(ctx context.Context, sessionID string) (*CatalogInfo, error) {
-	var out CatalogInfo
+	var out *CatalogInfo
 	err := s.client.do(ctx, "GET", s.sessionBase(sessionID)+"/catalog", nil, nil, &out)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return out, err
 }
 
 // Products returns paginated catalog products.
@@ -32,14 +29,11 @@ func (s *CatalogService) Products(ctx context.Context, sessionID string, query *
 	return &out, nil
 }
 
-// Product returns a single catalog product.
+// Product returns a single catalog product, or nil when no product has that id.
 func (s *CatalogService) Product(ctx context.Context, sessionID, productID string) (*CatalogProduct, error) {
-	var out CatalogProduct
+	var out *CatalogProduct
 	err := s.client.do(ctx, "GET", s.sessionBase(sessionID)+"/catalog/products/"+pathEscape(productID), nil, nil, &out)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return out, err
 }
 
 // SendProduct sends a product message. Requires an OPERATOR-level key.

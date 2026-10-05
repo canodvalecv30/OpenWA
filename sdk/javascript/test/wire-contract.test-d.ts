@@ -21,6 +21,7 @@ import type {
   ChannelMessageRecord,
   ChannelRecord,
   ChatHistoryMessage,
+  HealthReadyResponse,
   LabelRecord,
   StatusRecord,
 } from '../src/types.js';
@@ -34,14 +35,14 @@ interface WireLabel {
 
 /**
  * `Status` — `timestamp`/`expiresAt` are `Date` on the server and ISO strings once serialized.
- * `mediaUrl`/`backgroundColor`/`font` are declared by the engine interface but no adapter populates
- * them yet (wwjs `collectStatuses()` sets neither; Baileys throws `unsupported`), so they are
- * optional here for forward-compatibility rather than because a response carries them today.
+ * Reads come from the status store: `mediaUrl` is set only when the status media was stored (it
+ * points at `/api/sessions/:id/status/:statusId/media`), and `backgroundColor`/`font` only when the
+ * stored row carries them, so all three are optional.
  */
 interface WireStatus {
   id: string;
   contact: { id: string; name?: string; pushName?: string };
-  type: 'text' | 'image' | 'video';
+  type: 'text' | 'image' | 'video' | 'voice';
   caption?: string;
   mediaUrl?: string;
   backgroundColor?: string;
@@ -75,7 +76,7 @@ interface WireChannelMessage {
  * `IncomingMessage` — `messages.history()` hands back the engine array verbatim, so the wire shape is
  * that interface serialized. `backgroundColor`/`font` are set by the Baileys extended-text mapper but
  * are not reachable through this route (Baileys answers `getChatHistory` with `unsupported`); they are
- * declared for the same forward-compatibility reason as on `WireStatus`.
+ * declared for forward-compatibility.
  *
  * Scope, so nobody reads more into a green build than it carries: `Mirrors` compares TOP-LEVEL keys,
  * so drift inside `contact`, `call`, `media`, `quotedMessage` or `location` compiles clean. And like
@@ -153,6 +154,15 @@ interface WireCatalog {
 }
 
 /**
+ * `ReadinessResponseDto`: the 200 body of `GET /api/health/ready`. Each dependency is an object
+ * carrying its own `status`, not a bare string.
+ */
+interface WireReadiness {
+  status: string;
+  details: { mainDatabase: { status: 'up' | 'down' }; dataDatabase: { status: 'up' | 'down' } };
+}
+
+/**
  * Resolves to `true` only when `Rec` is an honest view of `Wire`: it can hold every real response
  * (so no field access that the server answers is a compile error), and it declares no field the
  * server never sends (so no access silently evaluates to `undefined`). A mismatch resolves to a
@@ -172,5 +182,6 @@ const channel: Mirrors<WireChannel, ChannelRecord> = true;
 const channelMessage: Mirrors<WireChannelMessage, ChannelMessageRecord> = true;
 const catalog: Mirrors<WireCatalog, CatalogInfo> = true;
 const chatHistoryMessage: Mirrors<WireChatHistoryMessage, ChatHistoryMessage> = true;
+const readiness: Mirrors<WireReadiness, HealthReadyResponse> = true;
 
-export const contract = [label, status, channel, channelMessage, catalog, chatHistoryMessage];
+export const contract = [label, status, channel, channelMessage, catalog, chatHistoryMessage, readiness];

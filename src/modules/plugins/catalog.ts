@@ -46,7 +46,9 @@ export function compareSemver(a: string, b: string): number {
 
 /**
  * Annotate catalog entries with install state, given the plugins currently loaded by this instance.
- * `updateAvailable` is true when an entry is installed and the catalog version is strictly newer.
+ * `updateAvailable` is true when an entry is installed and the catalog version is strictly newer. A final
+ * release counts as newer than an installed prerelease of the same version, which compareSemver alone
+ * would call equal.
  */
 export function annotateCatalog(
   entries: CatalogEntry[],
@@ -55,11 +57,14 @@ export function annotateCatalog(
   const byId = new Map(installed.map(p => [p.id, p.version]));
   return entries.map(entry => {
     const installedVersion = byId.get(entry.id) ?? null;
+    const cmp = installedVersion === null ? 0 : compareSemver(entry.version, installedVersion);
     return {
       ...entry,
       installed: installedVersion !== null,
       installedVersion,
-      updateAvailable: installedVersion !== null && compareSemver(entry.version, installedVersion) > 0,
+      updateAvailable:
+        installedVersion !== null &&
+        (cmp > 0 || (cmp === 0 && installedVersion.includes('-') && !String(entry.version).includes('-'))),
     };
   });
 }

@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
-
 :root {
   --primary: #25d366;
   /* The brand green as FOREGROUND is 1.98:1 on white, far under the 4.5:1 AA needs for text.
@@ -49,8 +47,9 @@
   --border: #334155; /* Slate 700 */
   --info: #60a5fa; /* Blue 400 — lighter so it reads over the dark translucent-blue tints */
   /* On the dark surfaces success and warning already clear AA (6.42:1 and 6.81:1), so they
-     keep their base value; error is 4.06:1 there and is lightened instead. */
-  --error-text: #f15e5e;
+     keep their base value; error is 3.89:1 on Slate 800 and is lightened instead, to a value that still
+     clears 4.65:1 on the darkest error tint behind it (20 percent over Slate 800). */
+  --error-text: #f77b7b;
   --success-text: var(--success);
   --warning-text: var(--warning);
 
@@ -71,8 +70,9 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     /* Match native controls (e.g. the Login page <select> option popup) to the dark theme.
-       The Login screen never sets data-theme, so it relies solely on this block — without an
-       explicit color-scheme the popup rendered light, leaving the light option text illegible (#249). */
+       Unless a light or dark theme is stored (main.tsx applies it before first paint), the Login screen
+       has no data-theme and relies solely on this block: without an explicit color-scheme the popup
+       rendered light, leaving the light option text illegible (#249). */
     color-scheme: dark;
     --bg-light: #0f172a;
     --bg-white: #1e293b;
@@ -83,12 +83,13 @@
     --border: #334155;
     --info: #60a5fa;
     /* On the dark surfaces success and warning already clear AA (6.42:1 and 6.81:1), so they
-       keep their base value; error is 4.06:1 there and is lightened instead. */
-    --error-text: #f15e5e;
+       keep their base value; error is 3.89:1 on Slate 800 and is lightened instead, to a value that still
+       clears 4.65:1 on the darkest error tint behind it (20 percent over Slate 800). */
+    --error-text: #f77b7b;
     --success-text: var(--success);
     --warning-text: var(--warning);
     --primary-soft: color-mix(in srgb, var(--primary) 18%, transparent);
-    /* Must be restated here, not inherited: the light value (#17833f) measures 3.03:1 on Slate 800
+    /* Must be restated here, not inherited: the light value (#17813e) measures 2.96:1 on Slate 800
        and would fail worse than the brand green it replaced. On dark the brand green is 7.38:1. */
     --primary-text: var(--primary);
     --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
@@ -103,15 +104,8 @@
 
 body {
   margin: 0;
-  font-family:
-    'Plus Jakarta Sans',
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    Roboto,
-    Helvetica,
-    Arial,
-    sans-serif;
+  /* No font-family here: body inherits it from <html>, where index.css sets the Latin stack and the
+     Hebrew and Arabic ones per lang. Declaring one on body would shadow those. */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background: var(--bg-light);

@@ -17,8 +17,10 @@ import { fileURLToPath } from 'node:url';
  * match built with `process.argv[1].split('/')` finds no separator in a Windows path and is loose
  * enough to fire for an unrelated script of the same name.
  *
- * The correct comparison is resolved path against decoded URL. This test pins it for every script
- * rather than for the two that were caught.
+ * The correct comparison is real path against decoded URL. A resolved path is not enough: Node
+ * realpaths the main module's URL but not argv[1], so a run through a symlink (/tmp on macOS)
+ * never matched and exited 0 having checked nothing. This test pins it for every script rather
+ * than for the two that were caught.
  */
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -26,7 +28,7 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const GUARD_LINE = /process\.argv\[1\]|import\.meta\.url\s*===/;
 
 /** The one shape that is correct on every platform and every path. */
-const CORRECT_GUARD = /resolve\(process\.argv\[1\]\)\s*===\s*fileURLToPath\(import\.meta\.url\)/;
+const CORRECT_GUARD = /realpathSync\(process\.argv\[1\]\)\s*===\s*fileURLToPath\(import\.meta\.url\)/;
 
 const BANNED = [
   { pattern: /import\.meta\.url\s*===\s*`file:\/\/\$\{process\.argv\[1\]\}`/, why: 'compares a percent-encoded URL against a raw native path' },
@@ -58,9 +60,9 @@ test('no script uses a self-invocation guard that can silently disable it', () =
   assert.deepEqual(offenders, [], `banned self-invocation guard:\n${offenders.join('\n')}`);
 });
 
-test('every guarded script compares a resolved path against the decoded module URL', () => {
+test('every guarded script compares a real path against the decoded module URL', () => {
   const offenders = guarded.filter(s => !CORRECT_GUARD.test(s.source)).map(s => s.name);
-  assert.deepEqual(offenders, [], `missing the resolved-path guard: ${offenders.join(', ')}`);
+  assert.deepEqual(offenders, [], `missing the real-path guard: ${offenders.join(', ')}`);
 });
 
 test('the correct guard holds for a path that needs URL escaping', () => {

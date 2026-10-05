@@ -49,8 +49,8 @@ class MediaResource
 
     /**
      * Convert video into an MP4 every WhatsApp client accepts: baseline H.264 with
-     * AAC audio, long edge bounded at 1280, index moved to the front for immediate
-     * playback. Requires an OPERATOR-level key.
+     * AAC audio, fitted inside 1280x720 (720x1280 portrait), index moved to the front
+     * for immediate playback. Requires an OPERATOR-level key.
      *
      * @param array<string,mixed> $media Exactly one of url or base64.
      * @return array<string,mixed>

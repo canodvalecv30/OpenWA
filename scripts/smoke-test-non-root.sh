@@ -21,12 +21,23 @@ else
   echo "==> Using pre-built image: $IMAGE_TAG"
 fi
 
+VOL=""
+SIGNAL_CONTAINER=""
+
 # Only remove an image this script created — never one the caller handed us.
 cleanup() {
+  if [ -n "$SIGNAL_CONTAINER" ]; then
+    docker rm -f "$SIGNAL_CONTAINER" > /dev/null 2>&1 || true
+  fi
+  if [ -n "$VOL" ]; then
+    docker volume rm -f "$VOL" > /dev/null 2>&1 || true
+  fi
   if [ "$BUILT_HERE" -eq 1 ]; then
     docker rmi "$IMAGE_TAG" > /dev/null 2>&1 || true
   fi
 }
+# Every exit, set -e aborts included, so a failed step never leaves the volume or image behind.
+trap cleanup EXIT
 
 echo ""
 echo "==> Checking process user inside container..."
@@ -36,7 +47,6 @@ echo "    $USER_OUTPUT"
 
 if echo "$USER_OUTPUT" | grep -q "uid=0(root)"; then
   echo "FAIL: process is running as root!" >&2
-  cleanup
   exit 1
 fi
 
@@ -44,7 +54,6 @@ if echo "$USER_OUTPUT" | grep -q "openwa"; then
   echo "PASS: process runs as openwa (non-root)"
 else
   echo "FAIL: process is not running as the openwa user" >&2
-  cleanup
   exit 1
 fi
 
@@ -57,10 +66,100 @@ if echo "$PID1" | grep -q "dumb-init"; then
 else
   # Without it as PID 1 nothing reaps Chromium's exited children or forwards signals past Node.
   echo "FAIL: PID 1 is '$PID1' (expected dumb-init), check the ENTRYPOINT chain" >&2
-  cleanup
   exit 1
 fi
 
-cleanup
+echo ""
+echo "==> Checking signal forwarding with Compose capabilities..."
+CAPS=$(docker run --rm -i --entrypoint node "$IMAGE_TAG" -e \
+  'const fs=require("fs"),yaml=require("js-yaml");console.log(yaml.load(fs.readFileSync(0,"utf8")).services["openwa-api"].cap_add.join(" "))' < docker-compose.yml)
+set --
+for cap in $CAPS; do
+  set -- "$@" --cap-add "$cap"
+done
+SIGNAL_CONTAINER=$(docker run -d --read-only --tmpfs /tmp --cap-drop ALL "$@" \
+  --security-opt no-new-privileges "$IMAGE_TAG" node -e \
+  'const fs=require("fs");if(process.getuid()!==997||!/^CapEff:\s+0+$/m.test(fs.readFileSync("/proc/self/status","utf8")))process.exit(1);process.on("SIGTERM",()=>process.exit(0));console.log("signal-ready");setInterval(()=>{},1000)')
+for attempt in 1 2 3 4 5; do
+  if docker logs "$SIGNAL_CONTAINER" | grep -q '^signal-ready$'; then
+    break
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    echo "FAIL: the non-root signal test did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
+docker stop --time 5 "$SIGNAL_CONTAINER" > /dev/null
+SIGNAL_EXIT=$(docker inspect --format '{{.State.ExitCode}}' "$SIGNAL_CONTAINER")
+if [ "$SIGNAL_EXIT" != 0 ]; then
+  echo "FAIL: the unprivileged process did not receive SIGTERM (exit $SIGNAL_EXIT)" >&2
+  exit 1
+fi
+echo "PASS: init forwards SIGTERM and the non-root process has no effective capabilities"
+docker rm "$SIGNAL_CONTAINER" > /dev/null
+SIGNAL_CONTAINER=""
+
+echo ""
+echo "==> Checking /app/data ownership on start..."
+VOL="openwa-smoke-data-$$"
+docker volume create "$VOL" > /dev/null
+# Seed as root, bypassing the entrypoint: a file restored as root, and a link to a root-owned file.
+docker run --rm --entrypoint sh -v "$VOL":/app/data "$IMAGE_TAG" -c \
+  'mkdir -p /app/data/sessions/s1 && touch /app/data/sessions/s1/restored && ln -s /etc/passwd /app/data/link'
+OWNERS=$(docker run --rm -v "$VOL":/app/data "$IMAGE_TAG" stat -c '%U:%G' /app/data/sessions/s1/restored /etc/passwd | tr '\n' ' ')
+echo "    restored file, link target: $OWNERS"
+if [ "$OWNERS" = "openwa:openwa root:root " ]; then
+  echo "PASS: a root-owned file is re-owned and a symlink target is left alone"
+else
+  echo "FAIL: expected 'openwa:openwa root:root', got '$OWNERS'" >&2
+  exit 1
+fi
+# A chown is a metadata write even when the owner is unchanged, so it moves ctime. A start that
+# re-owns an already-owned file pays that write per file, which is minutes on a large volume.
+CTIME_BEFORE=$(docker run --rm --entrypoint stat -v "$VOL":/app/data "$IMAGE_TAG" -c %z /app/data/sessions/s1/restored)
+docker run --rm -v "$VOL":/app/data "$IMAGE_TAG" true
+CTIME_AFTER=$(docker run --rm --entrypoint stat -v "$VOL":/app/data "$IMAGE_TAG" -c %z /app/data/sessions/s1/restored)
+if [ "$CTIME_BEFORE" = "$CTIME_AFTER" ]; then
+  echo "PASS: a start leaves already-owned files untouched"
+else
+  echo "FAIL: a start re-owned an already-owned file (ctime $CTIME_BEFORE -> $CTIME_AFTER)" >&2
+  exit 1
+fi
+
+echo ""
+echo "==> Checking a start as the openwa uid itself..."
+# runAsUser/fsGroup and --user name a number, so the image must guarantee it.
+PINNED=$(docker run --rm --entrypoint id "$IMAGE_TAG" openwa)
+echo "    $PINNED"
+case "$PINNED" in
+  "uid=997(openwa) gid=997(openwa)"*) echo "PASS: openwa is uid/gid 997" ;;
+  *) echo "FAIL: expected openwa to be uid=997 gid=997, got '$PINNED'" >&2; exit 1 ;;
+esac
+# The Pod Security "restricted" shape: no capabilities at all, read-only rootfs, and the volume a
+# root start has already re-owned. The entrypoint must skip its chown and gosu drop, not fail on them.
+if ! NONROOT=$(docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  --user 997:997 -v "$VOL":/app/data "$IMAGE_TAG" id -u 2>&1); then
+  echo "FAIL: a start as 997:997 with no capabilities exited non-zero: $NONROOT" >&2
+  exit 1
+fi
+if [ "$NONROOT" = "997" ]; then
+  echo "PASS: a start as 997:997 with no capabilities runs the command as 997"
+else
+  echo "FAIL: a start as 997:997 printed '$NONROOT'" >&2
+  exit 1
+fi
+# Any other uid cannot write the image's /app/data; it must stop with the cause, not a chown error.
+if OTHER=$(docker run --rm --user 12345:12345 "$IMAGE_TAG" id -u 2>&1); then
+  echo "FAIL: a start as 12345 with an unwritable /app/data succeeded: $OTHER" >&2
+  exit 1
+fi
+if echo "$OTHER" | grep -q "FATAL: /app/data is not writable by uid 12345"; then
+  echo "PASS: a start as an unrelated uid stops and names the unwritable volume"
+else
+  echo "FAIL: a start as 12345 failed without the expected message: $OTHER" >&2
+  exit 1
+fi
+
 echo ""
 echo "All smoke tests passed!"

@@ -26,6 +26,19 @@ describe('CallService', () => {
     expect(rejectCall).toHaveBeenCalledWith('CALL1');
   });
 
+  it('delegates createCallLink to the engine with the type and epoch-ms startTime', async () => {
+    const createCallLink = jest.fn().mockResolvedValue('https://call.whatsapp.com/voice/L');
+    const svc = makeService({ createCallLink });
+    await expect(svc.createCallLink('s1', 'audio', 1_800_000_000_000)).resolves.toBe(
+      'https://call.whatsapp.com/voice/L',
+    );
+    expect(createCallLink).toHaveBeenCalledWith('audio', 1_800_000_000_000);
+  });
+
+  it('guards createCallLink with the same 400 when the engine is missing', () => {
+    expect(() => makeService(undefined).createCallLink('s1', 'video', 1)).toThrow('Session is not started');
+  });
+
   it('propagates the engine not-found error (unknown/expired call id -> 404)', async () => {
     const rejectCall = jest.fn().mockRejectedValue(new CallNotFoundError('CALL1'));
     const svc = makeService({ rejectCall });

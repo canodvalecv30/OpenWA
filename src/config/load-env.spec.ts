@@ -71,6 +71,48 @@ describe('loadEnvironment', () => {
     expect(workerConnectionOptions().host).toBe('host-from-process-env');
   });
 
+  // dotenv 17 prints an "injected env ... // tip: ..." line to stdout on every load unless told to be
+  // quiet. It bypasses the logger, so in production it lands as plain text in the JSON log stream.
+  it.each<[string, Record<string, string>]>([
+    [
+      'a saved configuration',
+      { '.env': 'REDIS_HOST=redis.internal\n', 'data/.env.generated': 'QUEUE_ENABLED=false\n' },
+    ],
+    ['a first run', { '.env': 'REDIS_HOST=redis.internal\n' }],
+  ])('keeps dotenv from printing its own load banner on %s', (_case, files) => {
+    delete process.env.DOTENV_CONFIG_QUIET;
+    makeTempCwd(files);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    runLoader();
+
+    expect(log.mock.calls.map(args => args.join(' '))).not.toContainEqual(expect.stringContaining('injected env'));
+  });
+
+  // The image runs with NODE_ENV=production, where the logger emits JSON. A raw console line from the
+  // loader would land in that stream as plain text, with no level for an aggregator to filter on.
+  it.each<[string, Record<string, string>]>([
+    ['a saved configuration', { '.env': 'DATABASE_SSL=false\n', 'data/.env.generated': 'DATABASE_SSL=true\n' }],
+    ['a first run', { '.env': 'REDIS_HOST=redis.internal\n' }],
+  ])('writes its boot lines through the structured logger on %s', (_case, files) => {
+    delete process.env.DATABASE_SSL;
+    process.env.LOG_FORMAT = 'json';
+    makeTempCwd(files);
+    const lines: string[] = [];
+    const capture = (line: unknown): void => void lines.push(String(line));
+    jest.spyOn(console, 'log').mockImplementation(capture);
+    jest.spyOn(console, 'warn').mockImplementation(capture);
+
+    runLoader();
+
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      const entry = JSON.parse(line) as { context?: string; level?: string };
+      expect(entry.context).toBe('Bootstrap');
+      expect(['info', 'warn']).toContain(entry.level);
+    }
+  });
+
   // Older .env templates shipped DATABASE_SSL=false, and compose forwards it, so it silently outranks
   // TLS turned on in the dashboard. The override stands, but the boot log names both values.
   it('warns when a pinned database TLS setting differs from the one saved in the dashboard', () => {

@@ -39,88 +39,35 @@ flowchart TB
 
 ### Dockerfile
 
+The repo `Dockerfile` is the source of truth; this section quotes the directives that matter
+rather than a second full copy. It is a two-stage build on a digest-pinned `node:22-slim`:
+
 ```dockerfile
-# Dockerfile (multi-stage build)
+# Builder stage. --include=dev is required: a platform that leaks NODE_ENV=production into the
+# build (Coolify does) would otherwise skip @nestjs/cli and fail with `nest: not found`.
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm ci --include=dev
+RUN npm run build && npm run dashboard:ci -- --include=dev && npm run dashboard:build && rm -f dist/*.tsbuildinfo
 
-# Build stage
-FROM node:22-slim AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
+# Production stage: runtime dependencies only, without install scripts; the dependency patchers
+# run in the same RUN, and any one failing fails the build.
+RUN npm ci --omit=dev --ignore-scripts \
+    && node scripts/patch-wwebjs-201832.js \
+    # ... one `&& node scripts/patch-*.js \` line per patcher ...
+    && npm cache clean --force
 
-# Runtime stage
-FROM node:22-slim
-
-# Install Chrome dependencies (avoid Debian's chromium package due to SIGTRAP in non-root)
-RUN apt-get update && apt-get install -y \
-    curl \
-    fonts-ipafont-gothic \
-    fonts-wqy-zenhei \
-    fonts-thai-tlwg \
-    fonts-kacst \
-    fonts-freefont-ttf \
-    libxss1 \
-    libnss3 \
-    libnspr4 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set Puppeteer skip download (we install it dynamically later)
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-
-# Create app directory
-WORKDIR /app
-
-# Copy package files & install production dependencies
-COPY package*.json ./
-RUN npm ci --only=production
-
-# NOTE: this example targets linux/amd64. The repo's image keeps Debian's chromium on arm64 by
-# choice (Chrome for Testing publishes linux-arm64 builds only from 153 on). For arm64, install
-# Debian's `chromium` package and point PUPPETEER_EXECUTABLE_PATH to /usr/bin/chromium — see the
-# repo's Dockerfile for the mixed multi-arch build.
-# Download Chrome for Testing via Puppeteer and point ENV to it
-RUN mkdir -p /opt/puppeteer && \
-    PUPPETEER_CACHE_DIR=/opt/puppeteer ./node_modules/.bin/puppeteer browsers install 'chrome@153.0.8010.36' && \
-    chrome_path=$(find /opt/puppeteer/chrome/linux*/chrome-linux64/chrome | head -n 1) && \
-    test -n "$chrome_path" && \
-    ln -s "$chrome_path" /usr/local/bin/puppeteer-chrome
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/puppeteer-chrome
-
-# Copy build output (the stage above is named "builder")
-COPY --from=builder /app/dist ./dist
-
-# Create the unprivileged user the entrypoint drops to. The real image deliberately has NO
-# `USER openwa` directive and no `chown -R openwa /app /opt/puppeteer`: a full /app chown walks
-# every production dependency (issue #1045: ~35 minutes on a small VPS), and the container itself
-# is the Chromium confinement boundary (cap_drop ALL, read_only rootfs). Instead the image starts
-# as root, the entrypoint chowns ONLY the writable ./data volume and then drops privileges via
-# `exec gosu openwa node dist/main.js` (no-new-privileges blocks any setuid path back up).
-RUN groupadd -r openwa && useradd -r -g openwa openwa
-
-# Expose port
-EXPOSE 2785
-
-# Health check (global API prefix is 'api'; readiness probes both databases)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:2785/api/health/ready || exit 1
 
-# Start app through the privilege-dropping entrypoint
-CMD ["docker-entrypoint.sh", "node", "dist/main.js"]
+# dumb-init is PID 1; the entrypoint runs as root, fixes /app/data ownership, then drops to the
+# openwa user with gosu before it execs the command.
+ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/docker-entrypoint.sh"]
+CMD ["node", "dist/main"]
 ```
+
+The image deliberately has no `USER openwa` directive and no `chown -R` over `/app`: a full chown
+walks every production dependency (#1045), so the entrypoint re-owns only the writable data volume
+and then drops privileges. Chromium comes from Chrome for Testing on amd64 and from Debian's
+`chromium` package on arm64; see the `Dockerfile` for the multi-arch build.
 
 ### Docker Compose (Development)
 
@@ -179,14 +126,14 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
 
   redis:
     image: redis:7-alpine
     volumes:
       - redis-data:/data
     ports:
-      - '6379:6379'
+      - '127.0.0.1:6379:6379'
 
   # No separate dashboard service: the `app` image bundles the dashboard SPA and serves it
   # from the same port (2785) via NestJS. Open http://localhost:2785 for the UI.
@@ -268,15 +215,17 @@ volumes:
 
 > [!IMPORTANT]
 > **Keep `replicas: 1`.** Session ownership gained claim/lease fencing (`nodeId` owner +
-> `leaseExpiresAt`), which bounds any two-engine overlap on one session to roughly one heartbeat
-> interval instead of eliminating it — and docs/13 still says DO NOT run its multi-replica examples
-> yet: WebSocket key eviction on a peer node lags by up to a minute, and WebSocket rate-limit
+> `leaseExpiresAt`), which, while the holder can reach the database, bounds any two-engine overlap on
+> one session to roughly one heartbeat interval instead of eliminating it — and docs/13 still says
+> DO NOT run its multi-replica examples yet: a holder cut off from the database keeps its engines for
+> the length of the outage, API keys and the audit log live in each node's own `main.sqlite` (a key
+> created, revoked or narrowed on one node is unchanged on the others), and WebSocket rate-limit
 > buckets, the unfenced liveness watchdog, bulk-batch state and MCP locality all remain per-process.
 > Follow [13 - Horizontal Scaling Guide](./13-horizontal-scaling.md) for the full list and the design
 > sketch. What multi-node eventually buys is engine capacity, not shared engine state: live engine
 > handles live in exactly one process's `EngineRegistry` (`src/engine/engine-registry.service.ts`),
 > and the hard requirements include a stable `NODE_ID` across restarts, NTP-synced clocks (lease skew
-> beyond the TTL wrongfully transfers a session; the zone each node runs in no longer matters, since
+> beyond the TTL minus one heartbeat, about 40s at defaults, wrongfully transfers a session; the zone each node runs in no longer matters, since
 > the Postgres data connection is pinned to UTC), sticky sessions, `TRUSTED_PROXIES` for forwarded
 > calls, Redis and Postgres.
 
@@ -302,9 +251,9 @@ an illustrative design sketch; the chart is the authoritative artifact.
 
 ### GitHub Actions Workflow
 
-`.github/workflows/ci.yml` (`name: CI`) runs on pushes and pull requests targeting `main` /
-`develop`. It is **integration only** — no job deploys anywhere. The final job publishes branch and
-SHA image tags to GHCR; `latest` is deliberately not set there and moves only through the separate,
+`.github/workflows/ci.yml` (`name: CI`) runs on pushes and pull requests targeting `main`. It is
+**integration only** — no job deploys anywhere. The final job publishes branch and SHA image
+tags to GHCR; `latest` is deliberately not set there and moves only through the separate,
 boot-smoke-gated release workflow.
 
 The per-job step lists live in [docs/09 §9.6](./09-testing-strategy.md#96-ci-checks), which a spec
@@ -323,10 +272,15 @@ Rollout is left to the operator — the repo has no SSH deploy step, no staging/
 environments and no auto-deploy on merge.
 
 `.github/workflows/security-scan.yml` (`name: Scheduled Security Scan`) complements the merge-time
-gates with a weekly run (Wednesdays 03:00 UTC, plus `workflow_dispatch`): it re-runs the exact
-`audit` job against the current dependency trees and the release workflow's `image-scan` against
+gates with a weekly run (Wednesdays 03:00 UTC, plus `workflow_dispatch`): it re-runs the `audit`
+job's checks against the current dependency trees, failing rather than skipping when npm's audit
+endpoint cannot answer (`CHECK_AUDIT_REQUIRED=1`), and the release workflow's `image-scan` against
 the published `latest` image on both architectures. A newly published advisory therefore turns
-something red within days instead of waiting for the next push or release.
+something red within days instead of waiting for the next push or release. A third job,
+`base-image-drift`, fails when the two `node:22-slim` FROM lines in the `Dockerfile` pin different
+digests, or when the pin differs from what the tag serves today and either the tag has served that
+image for 7 or more days, or for 3 or more days with the pin last changed 28 or more days ago; merge
+the pending Dependabot digest refresh, or refresh both FROM lines by hand.
 
 ## 10.4 Deployment Architecture
 
@@ -349,8 +303,8 @@ flowchart TB
 
 > **Design sketch, not a supported topology.** OpenWA is single-process with in-memory engine state,
 > so the multi-`OpenWA` fan-out below would corrupt WhatsApp auth across replicas. It is retained only
-> as the target architecture once the session-claim design in
-> [13 - Horizontal Scaling Guide](./13-horizontal-scaling.md) is implemented. Deploy with `replicas: 1`.
+> as the target architecture once the remaining gaps listed in
+> [13 - Horizontal Scaling Guide](./13-horizontal-scaling.md) are closed. Deploy with `replicas: 1`.
 
 ```mermaid
 flowchart TB
@@ -424,6 +378,17 @@ LOG_FORMAT=json
 # ===========================================
 # MEDIA STORAGE (choose one)
 # ===========================================
+# What the selected store holds: received status media, always, under statuses/<sessionId>/.
+# Chat message media is copied there only with CHAT_MEDIA_ARCHIVE_ENABLED=true, under
+# chat-media/<sessionId>/; media this account sent also needs CHAT_MEDIA_ARCHIVE_OUTBOUND=true.
+# With the archive off, chat media stays inline on the message row (up to MEDIA_DOWNLOAD_MAX_BYTES),
+# where GET /api/sessions/:sessionId/messages/:chatId/:messageId/media still serves it.
+# With the archive on, the row keeps its inline copy too unless MESSAGE_INLINE_MEDIA=archive, which
+# makes the store the only copy of archived media: back it up alongside the database.
+# On S3 every key sits under the S3_KEY_PREFIX root (default media/, so media/chat-media/...).
+# While S3 has not been reachable since boot, or its credentials are missing, files go to
+# STORAGE_LOCAL_PATH instead.
+# The other CHAT_MEDIA_* settings (size cap, TTL, orphan sweep) are in .env.example.
 # STORAGE_TYPE accepts only `local` or `s3` — env validation rejects anything else and the app
 # FAILS TO BOOT ("Invalid environment configuration"). There is no silent fallback to local disk.
 # Option 1: Local filesystem (default)
@@ -442,8 +407,16 @@ LOG_FORMAT=json
 # STORAGE_TYPE=s3
 # S3_ENDPOINT=http://minio:9000
 # S3_BUCKET=openwa
-# S3_ACCESS_KEY_ID=minioadmin
-# S3_SECRET_ACCESS_KEY=minioadmin
+# S3_ACCESS_KEY_ID=your-access-key
+# S3_SECRET_ACCESS_KEY=your-secret-key
+
+# One deployment per bucket and key prefix. S3_KEY_PREFIX (default media/) is the key root: give a
+# second deployment with its own database its own bucket or a non-overlapping prefix (neither may
+# start with the other: use siblings such as prod/ and staging/, never media/ and media/staging/).
+# An overlap puts the other deployment's objects in this one's storage stats and export, and each
+# one's orphan sweeps delete the other's media. The same applies to a shared STORAGE_LOCAL_PATH. Changing the prefix on a
+# live deployment hides existing objects: export storage, change it, then import.
+# S3_KEY_PREFIX=media/
 
 # ===========================================
 # CACHE & QUEUE
@@ -454,6 +427,10 @@ LOG_FORMAT=json
 # REDIS_ENABLED=false
 # REDIS_HOST=localhost
 # REDIS_PORT=6379
+# REDIS_TLS=false      # true for a Redis that requires TLS (not the built-in container); every client
+#                      # (cache, rate limits, queue, WebSocket fan-out) uses it. Private CA: NODE_EXTRA_CA_CERTS in the launch
+#                      # environment (shell, systemd, compose environment:), not in .env
+# REDIS_CACHE_DB=1     # logical database for the cache
 # Redis-backed caching switches on when REDIS_ENABLED=true OR CACHE_ENABLED=true — enabling Redis
 # for the queue alone therefore also enables the cache.
 # CACHE_ENABLED=true
@@ -468,11 +445,13 @@ LOG_FORMAT=json
 # SESSION_DATA_PATH=./data/sessions
 
 # Puppeteer (for whatsapp-web.js)
-PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Path to a system Chromium/Chrome binary. Leave unset to use the bundled browser; the Docker image sets its own.
+# PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 # PUPPETEER_HEADLESS=true
 # PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu
-# Optional per-browser-command budget, ms. Unset = Puppeteer's own budget. Raise only after seeing
-# "Runtime.callFunctionOn timed out"; positive integer, max 2147483647 (cost: see docs/12).
+# Optional per-browser-command budget, ms. Unset = Puppeteer's own budget. Raise only after a read answers
+# 503 "did not answer ... in time" or fails with "Runtime.callFunctionOn timed out"; positive integer, max
+# 2147483647 (cost: see docs/12).
 # PUPPETEER_PROTOCOL_TIMEOUT_MS=300000
 
 # ===========================================
@@ -492,6 +471,23 @@ WEBHOOK_TIMEOUT=10000
 WEBHOOK_RETRY_DELAY=5000
 WEBHOOK_DISPATCH_CONCURRENCY=16
 WEBHOOK_DISPATCH_MAX_QUEUED=1000
+# WEBHOOK_DISPATCH_CONCURRENCY caps inline POSTs in flight; a delivery waiting out a retry backoff
+# holds no slot. Running, parked, and backoff-waiting inline deliveries together are capped at
+# WEBHOOK_DISPATCH_CONCURRENCY + WEBHOOK_DISPATCH_MAX_QUEUED; past that bound a new delivery is
+# shed and left for the outbox sweep. Once a webhook's attempt fails, this process caps that
+# session's deliveries to it at WEBHOOK_DEGRADED_SESSION_CONCURRENCY at once
+# (default: a quarter of WEBHOOK_DISPATCH_CONCURRENCY or WEBHOOK_WORKER_CONCURRENCY, at least 1).
+# With the queue disabled, the cap applies to inline deliveries admitted after the failure; ones
+# admitted before it (running, parked, or in their retries) are not counted. The direct delivery
+# used when Redis rejects an enqueue is not capped. Queued, it applies to every job attempt
+# that starts afterwards, including retries and jobs already waiting (the rest wait in the delayed
+# set without spending an attempt, each wait doubling up to 64 times WEBHOOK_RETRY_DELAY (at
+# least 1 s), plus up to as much again in jitter); only an attempt already running is not counted.
+# The failing state and the cap are held per process, not per cluster.
+# The first 2xx from the webhook lifts it. With the queue disabled, a session parks at most a
+# quarter of WEBHOOK_DISPATCH_MAX_QUEUED behind that limit and sheds the rest, so other sessions
+# keep room.
+# WEBHOOK_DEGRADED_SESSION_CONCURRENCY=
 # Delivery attempts (total, including the first) are set per webhook with the retryCount API field (default 3, range 0-5).
 
 # ===========================================
@@ -538,8 +534,9 @@ export default () => ({
       .map(proxy => proxy.trim())
       .filter(Boolean),
   },
-  // Session data path and Puppeteer both live under `engine` — there is no top-level
-  // `session` or `puppeteer` key.
+  // Session data path and Puppeteer both live under `engine`; there is no top-level `puppeteer`
+  // key, and the top-level `session` (ownership leases) and `sessions` (concurrency cap) blocks do
+  // not hold the data path.
   engine: {
     type: process.env.ENGINE_TYPE || 'whatsapp-web.js',
     sessionDataPath: process.env.SESSION_DATA_PATH || './data/sessions',
@@ -631,7 +628,7 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=30d'
     ports:
-      - '9090:9090'
+      - '127.0.0.1:9090:9090'
     restart: unless-stopped
 
   grafana:
@@ -641,10 +638,10 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
       - grafana-data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
     ports:
-      - '3001:3000'
+      - '127.0.0.1:3001:3000'
     depends_on:
       - prometheus
       - loki
@@ -657,7 +654,7 @@ services:
       - loki-data:/loki
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - '3100:3100'
+      - '127.0.0.1:3100:3100'
     restart: unless-stopped
 
   promtail:
@@ -675,8 +672,10 @@ services:
     image: prom/alertmanager:v0.26.0
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      # Holds the Slack webhook URL; see the Alertmanager config below
+      - ./monitoring/slack_webhook_url:/etc/alertmanager/slack_webhook_url:ro
     ports:
-      - '9093:9093'
+      - '127.0.0.1:9093:9093'
     restart: unless-stopped
 
   node-exporter:
@@ -689,7 +688,7 @@ services:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
     ports:
-      - '9100:9100'
+      - '127.0.0.1:9100:9100'
     restart: unless-stopped
 
 volumes:
@@ -804,7 +803,8 @@ groups:
 # monitoring/alertmanager.yml
 global:
   resolve_timeout: 5m
-  slack_api_url: '${SLACK_WEBHOOK_URL}'
+  # Alertmanager does not expand env vars in its config, so mount the webhook URL as a file.
+  slack_api_url_file: /etc/alertmanager/slack_webhook_url
 
 route:
   group_by: ['alertname', 'severity']
@@ -845,11 +845,11 @@ receivers:
 All health endpoints are `@Public()` (no API key) and `@SkipThrottle()`, and live under the global
 `api` prefix. There is **no** `/health/detailed` endpoint.
 
-| Endpoint                | Purpose                                                                                                                                 | Body                                                           | Codes     |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | --------- |
-| `GET /api/health`       | Basic check                                                                                                                             | `{ status, timestamp, version }` (version from `package.json`) | 200       |
-| `GET /api/health/live`  | Liveness (deliberately static — a transient dependency outage must not KILL the pod)                                                    | `{ status: 'ok' }`                                             | 200       |
-| `GET /api/health/ready` | Readiness — probes **both** databases (`main` + `data`, `SELECT 1`, 3s timeout each) and reports 503 while draining (graceful shutdown) | `{ status, details: { mainDatabase, dataDatabase } }`          | 200 / 503 |
+| Endpoint                | Purpose                                                                                                                                 | Body                                                                                                                                   | Codes     |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `GET /api/health`       | Basic check                                                                                                                             | `{ status, timestamp, version? }`: `version` (from `package.json`) only for a request carrying a valid API key (`X-API-Key` or Bearer) | 200       |
+| `GET /api/health/live`  | Liveness (deliberately static — a transient dependency outage must not KILL the pod)                                                    | `{ status: 'ok' }`                                                                                                                     | 200       |
+| `GET /api/health/ready` | Readiness — probes **both** databases (`main` + `data`, `SELECT 1`, 3s timeout each) and reports 503 while draining (graceful shutdown) | `{ status, details: { mainDatabase, dataDatabase } }`                                                                                  | 200 / 503 |
 
 ```typescript
 // health/health.controller.ts
@@ -858,8 +858,14 @@ All health endpoints are `@Public()` (no API key) and `@SkipThrottle()`, and liv
 @SkipThrottle()
 export class HealthController {
   @Get()
-  check(): { status: string; timestamp: string; version: string } {
-    return { status: 'ok', timestamp: new Date().toISOString(), version: APP_VERSION };
+  async check(@Req() req: Request): Promise<{ status: string; timestamp: string; version?: string }> {
+    const body: { status: string; timestamp: string; version?: string } = {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    };
+    // The version is disclosed only to a caller presenting a valid key (X-API-Key or Bearer).
+    if (await this.hasValidApiKey(req)) body.version = APP_VERSION;
+    return body;
   }
 
   @Get('live')
@@ -896,7 +902,9 @@ short TTL (~5s, so back-to-back scrapes don't repeat the DB scan), and exposes i
 
 Access is **disabled by default**: the endpoint returns **404** unless `METRICS_TOKEN` is set. When
 set, scrapers must send `Authorization: Bearer <token>` (compared with `timingSafeEqual`); a missing or
-wrong token returns 401. The token is **separate** from the API key — the route is `@Public()` (skips
+wrong token returns 401. After 10 failed attempts from one client IP within a minute, that client is
+answered 429 (even with the correct token) until the window slides; a successful scrape does not count
+against the limit. The token is **separate** from the API key — the route is `@Public()` (skips
 the API-key guard) and `@SkipThrottle()`.
 
 ```typescript
@@ -937,25 +945,29 @@ export class MetricsService {
 
 **Exported metric names** (the complete set — nothing else is emitted):
 
-| Metric                                       | Type      | Labels                              | Meaning                                                                                      |
-| -------------------------------------------- | --------- | ----------------------------------- | -------------------------------------------------------------------------------------------- |
-| `openwa_up`                                  | gauge     | —                                   | Always `1` when scraped                                                                      |
-| `openwa_process_uptime_seconds`              | gauge     | —                                   | Process uptime                                                                               |
-| `openwa_process_resident_memory_bytes`       | gauge     | —                                   | RSS                                                                                          |
-| `openwa_process_heap_used_bytes`             | gauge     | —                                   | V8 heap used                                                                                 |
-| `openwa_stats_available`                     | gauge     | —                                   | 1 when the last overview read of the database-derived series below succeeded, 0 if it failed |
-| `openwa_sessions_total`                      | gauge     | —                                   | Configured sessions                                                                          |
-| `openwa_sessions_active`                     | gauge     | —                                   | READY (active) sessions                                                                      |
-| `openwa_sessions`                            | gauge     | `status`                            | Session count per status                                                                     |
-| `openwa_messages_total`                      | gauge     | `direction` (`incoming`/`outgoing`) | Current stored messages by direction                                                         |
-| `openwa_messages_failed_total`               | gauge     | —                                   | Current messages in FAILED state                                                             |
-| `openwa_webhook_delivery_failures_total`     | counter   | —                                   | Webhook delivery failures since process start: retries exhausted, or never sent              |
-| `openwa_session_reconnect_attempts_total`    | counter   | —                                   | Reconnect attempts scheduled across all sessions since process start                         |
-| `openwa_session_reconnect_loop_alerts_total` | counter   | —                                   | Reconnect-loop alerts emitted since process start                                            |
-| `openwa_sessions_restricted`                 | gauge     | —                                   | Sessions whose account WhatsApp is currently restricting                                     |
-| `openwa_send_pacing_refusals_total`          | counter   | `reason`                            | Sends refused by the pacing governor since process start                                     |
-| `http_requests_total`                        | counter   | `method`, `route`, `status`         | HTTP requests served, by method, route and status                                            |
-| `http_request_duration_seconds`              | histogram | `method`, `route`                   | HTTP request duration (`_bucket` / `_sum` / `_count`)                                        |
+| Metric                                       | Type      | Labels                              | Meaning                                                                                                                     |
+| -------------------------------------------- | --------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `openwa_up`                                  | gauge     | —                                   | Always `1` when scraped                                                                                                     |
+| `openwa_process_uptime_seconds`              | gauge     | —                                   | Process uptime                                                                                                              |
+| `openwa_process_resident_memory_bytes`       | gauge     | —                                   | RSS                                                                                                                         |
+| `openwa_process_heap_used_bytes`             | gauge     | —                                   | V8 heap used                                                                                                                |
+| `openwa_event_loop_delay_p99_seconds`        | gauge     | none                                | p99 event-loop delay since the previous uncached scrape                                                                     |
+| `openwa_event_loop_delay_max_seconds`        | gauge     | none                                | Maximum event-loop delay since the previous uncached scrape                                                                 |
+| `openwa_unhandled_rejections_total`          | counter   | `kind`                              | Unhandled promise rejections since process start (`other` or `page_context_lost`)                                           |
+| `openwa_queue_jobs`                          | gauge     | `queue`, `state`                    | BullMQ jobs per queue in `wait`/`active`/`delayed`/`failed` (cluster-wide, from Redis)                                      |
+| `openwa_stats_available`                     | gauge     | —                                   | 1 when the last overview read of the database-derived series below succeeded, 0 if it failed                                |
+| `openwa_sessions_total`                      | gauge     | —                                   | Configured sessions                                                                                                         |
+| `openwa_sessions_active`                     | gauge     | —                                   | READY (active) sessions                                                                                                     |
+| `openwa_sessions`                            | gauge     | `status`                            | Session count per status                                                                                                    |
+| `openwa_messages_total`                      | gauge     | `direction` (`incoming`/`outgoing`) | Current stored messages by direction                                                                                        |
+| `openwa_messages_failed_total`               | gauge     | —                                   | Current messages in FAILED state                                                                                            |
+| `openwa_webhook_delivery_failures_total`     | counter   | —                                   | Webhook delivery failures since process start: retries exhausted, never sent, or stopped by shutdown between direct retries |
+| `openwa_session_reconnect_attempts_total`    | counter   | —                                   | Reconnect attempts scheduled across all sessions since process start                                                        |
+| `openwa_session_reconnect_loop_alerts_total` | counter   | —                                   | Reconnect-loop alerts emitted since process start                                                                           |
+| `openwa_sessions_restricted`                 | gauge     | —                                   | Sessions whose account WhatsApp is currently restricting                                                                    |
+| `openwa_send_pacing_refusals_total`          | counter   | `reason`                            | Sends refused by the pacing governor since process start                                                                    |
+| `http_requests_total`                        | counter   | `method`, `route`, `status`         | HTTP requests served, by method, route and status                                                                           |
+| `http_request_duration_seconds`              | histogram | `method`, `route`                   | HTTP request duration (`_bucket` / `_sum` / `_count`)                                                                       |
 
 The last two are deliberately **unprefixed** so a generic RED dashboard or alert rule matches them
 without knowing anything about OpenWA. They come from `src/common/metrics/request-metrics.ts`, which
@@ -965,7 +977,15 @@ Not every row appears on every scrape, and the difference matters when you write
 database-derived series (`openwa_sessions*`, `openwa_messages*`) are **omitted entirely** when the
 overview cannot be read — `openwa_stats_available` is what tells the two cases apart, so alert on it
 rather than reading a missing series as zero. `openwa_send_pacing_refusals_total` appears only once
-the governor has refused something. For these, `absent()` is the correct alerting primitive.
+the governor has refused something. `openwa_queue_jobs` appears only with `QUEUE_ENABLED=true`, and a
+queue whose counts cannot be read within 2 s is left out of that scrape. For these, `absent()` is the
+correct alerting primitive.
+
+Two rows need care when aggregating. `openwa_queue_jobs` is read from the shared Redis, so every node
+reports the same cluster-wide value: aggregate it with `max`, not `sum`. The event-loop delay window
+runs from the previous uncached render (renders are cached for 5 s), so with several scrapers it is
+shared between them. `openwa_unhandled_rejections_total{kind="page_context_lost"}` counts the expected
+whatsapp-web.js navigation rejections; alert on `kind="other"`.
 
 `src/common/docs-metrics-list.spec.ts` compares this table against the metric names declared in
 `metrics.service.ts` and `request-metrics.ts`, and checks that every helper `render()` splices in is
@@ -981,9 +1001,9 @@ seen, so keep new renderers on that composition.
 > and still means "the process is alive". Alert on `openwa_stats_available == 0` for the degradation itself;
 > an alert written as `openwa_sessions_active == 0` would never fire for it, and one written with `absent()`
 > would. Because of the two caches, `openwa_stats_available` can keep reporting 1, and the series their last
-> values, for up to `STATS_CACHE_TTL_MS` + 5 s after the data database fails, so give an alert on it a `for:`
-> at least that long. `STATS_CACHE_TTL_MS=0` makes the signal live at the cost of a full overview query per
-> render.
+> values, for up to `STATS_CACHE_TTL_MS` + 5 s after the data database fails, so expect an alert on it to fire
+> up to that much later; a `for:` adds to that delay rather than offsetting it. `STATS_CACHE_TTL_MS=0` makes
+> the signal live at the cost of a full overview query per render.
 
 ### Grafana Dashboard Definition
 
@@ -1053,6 +1073,10 @@ defaulting to `json` under `NODE_ENV=production` and `pretty` elsewhere. Metadat
 looks like a secret (password, token, api-key, authorization, …) keeps the key and has its **value**
 replaced with `[REDACTED]` before the line is written.
 
+The same logger is installed as Nest's framework logger, so framework lines (route mapping, unhandled
+exception stacks from the exception handler) follow `LOG_LEVEL` and `LOG_FORMAT` and carry the
+request id like every other line; they are tagged `[OpenWA]` in pretty output, not `[Nest]`.
+
 There is no in-app Loki transport: in the stack above, logs reach Loki because **promtail** scrapes
 the container's stdout and stderr from `/var/lib/docker/containers`.
 
@@ -1093,29 +1117,50 @@ These are the metrics OpenWA actually exports at `GET /api/metrics`:
 | **System**   | `openwa_process_heap_used_bytes`              | V8 heap used                                            | Growth                           |
 | **System**   | `openwa_process_uptime_seconds`               | Process uptime                                          | Frequent restarts (resets)       |
 
-> OpenWA does **not** expose request-rate, latency-histogram, webhook, queue, or Node default
-> (`nodejs_*`) metrics. For host/container-level signals (CPU, memory pressure, event-loop), scrape
-> external exporters: `up` and `container_memory_usage_bytes` come from blackbox/cAdvisor, and
-> `node_*` from node-exporter — not from the app.
+> This table is a starting subset. The HTTP (`http_requests_total`, `http_request_duration_seconds`),
+> webhook (`openwa_webhook_delivery_failures_total`), queue (`openwa_queue_jobs`) and event-loop
+> (`openwa_event_loop_delay_*`) series are in the complete list under **Exported metric names** above.
+> OpenWA does **not** expose Node default (`nodejs_*`) metrics or host/container CPU and memory
+> signals; scrape cAdvisor (`container_*`) or node-exporter (`node_*`) for those. `up` is recorded by
+> Prometheus itself for every scrape target.
 
 ## 10.7 Backup & Recovery
 
 ### Backup Strategy
 
+`scripts/backup.sh` writes one local, unencrypted archive per run, created under `umask 077`. It does
+not schedule itself, encrypt, copy off-host or prune: a schedule, encryption at rest, an off-site copy
+and retention are the operator's to set up around the archive (see the
+[backup runbook](./11-operational-runbooks.md#runbook-database-backup)).
+
 ```mermaid
 flowchart TB
-    subgraph Daily["Daily Backup"]
-        DB[(Database)] --> DUMP[pg_dump]
-        DUMP --> COMPRESS[gzip]
-        COMPRESS --> ENCRYPT[encrypt]
-        ENCRYPT --> S3[S3 Storage]
+    subgraph Script["scripts/backup.sh (one run)"]
+        MAIN[(main.sqlite)] --> SNAP[sqlite3 .backup]
+        DATA[(data store)] --> SNAP
+        DATA -. DATABASE_TYPE=postgres .-> DUMP[pg_dump]
+        STATE["sessions/, baileys/, media/,<br/>plugin-packages/, plugin-state/,<br/>.env.generated, .api-key"] --> COPY[copy]
+        SNAP --> STAGE[staging dir]
+        DUMP --> STAGE
+        COPY --> STAGE
+        STAGE --> TAR[tar -czf + min-content check]
+        TAR --> ARCHIVE["BACKUP_DIR/openwa-backup-TIMESTAMP.tar.gz"]
     end
 
-    subgraph Retention["Retention Policy"]
-        D7[Daily: 7 days]
-        W4[Weekly: 4 weeks]
-        M12[Monthly: 12 months]
+    subgraph Operator["Operator-managed (not in the script)"]
+        CRON[schedule, e.g. cron]
+        ENC[encryption at rest]
+        OFF[off-host copy]
+        PRUNE[retention]
     end
+
+    ARCHIVE --> Operator
+```
+
+A retention step matching the script's default location and name, for example 30 days:
+
+```bash
+find ./backups -name 'openwa-backup-*.tar.gz' -mtime +30 -delete
 ```
 
 ### Backup Script
@@ -1152,9 +1197,10 @@ Size up from your own monitoring.
 
 **Not currently supported.** OpenWA is a single-process application with in-memory engine state, so
 multiple replicas against a shared session volume corrupt WhatsApp auth. Run exactly **one** API
-instance per session-data volume (`replicas: 1`). The DB-backed session registry / node-claim design
+instance per session-data volume (`replicas: 1`). Session claims and leases ship; the rest of the design
 that would be required to scale out is documented — as a future design sketch, not a shipped feature —
 in [13 - Horizontal Scaling Guide](./13-horizontal-scaling.md).
+
 ---
 
 <div align="center">

@@ -67,7 +67,7 @@ export function mergeChatMessages(db: ChatMessage[], history: ChatMessage[]): Ch
  * React Query cache with staleTime: Infinity, so every image/video/voice note that arrives while
  * the chat is open would otherwise pin its full base64 string in heap for the whole session —
  * scrolling through a media-rich chat grows the tab unboundedly. Past the cap the OLDEST
- * payloads are stripped to the omitted marker ({data: undefined, omitted: true}), which renders
+ * payloads and archived previews are replaced by the omitted marker, which renders
  * the same 📎 placeholder as a history row fetched without media; the newest `keep` stay
  * renderable (thread + lightbox). Count-based (not byte-based): payloads are bounded upstream
  * by the backend's media size cap.
@@ -87,17 +87,23 @@ export const MEDIA_PAYLOAD_CACHE_LIMIT = 100;
  */
 export function capMediaPayloads(list: ChatMessageView[], keep = MEDIA_PAYLOAD_CACHE_LIMIT): ChatMessageView[] {
   let payloadCount = 0;
-  for (const m of list) if (m.metadata?.media?.data) payloadCount++;
+  const retainsMedia = (message: ChatMessageView): boolean => {
+    const media = message.metadata?.media;
+    return Boolean(
+      media?.data || (media?.archived && HISTORY_MEDIA_TYPES.has(message.type) && message.type !== 'document'),
+    );
+  };
+  for (const m of list) if (retainsMedia(m)) payloadCount++;
   if (payloadCount <= keep) return list;
 
   const next = list.slice();
   let toStrip = payloadCount - keep;
   for (let i = 0; i < next.length && toStrip > 0; i++) {
     const media = next[i].metadata?.media;
-    if (!media?.data) continue;
+    if (!media || !retainsMedia(next[i])) continue;
     next[i] = {
       ...next[i],
-      metadata: { ...next[i].metadata, media: { ...media, data: undefined, omitted: true } },
+      metadata: { ...next[i].metadata, media: { ...media, data: undefined, archived: undefined, omitted: true } },
     };
     toStrip--;
   }
@@ -216,6 +222,11 @@ export type MessageMedia = {
   data?: string;
   omitted?: boolean;
   sizeBytes?: number;
+  /**
+   * Set alongside `omitted` when MESSAGE_INLINE_MEDIA=archive dropped the inline copy because the
+   * chat-media archive holds the bytes, the media route serves them, so the thread previews inline.
+   */
+  archived?: boolean;
 };
 
 export const getMediaSrc = (media?: MessageMedia): string => {

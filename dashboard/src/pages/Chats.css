@@ -10,6 +10,7 @@
 .chats-page .chats-layout {
   display: flex;
   flex: 1;
+  min-height: 0;
   background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -24,7 +25,7 @@
    ============================================================================= */
 .chats-page .chats-sidebar {
   width: 320px;
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   background: var(--bg-white);
@@ -294,6 +295,7 @@
 .chats-page .chats-room {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-light);
@@ -334,6 +336,7 @@
 
 .chats-page .room-container {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -360,7 +363,7 @@
   /* Reset the global `button` padding (0.6em 1.2em): with box-sizing:border-box it would consume
      the whole 36px width and collapse the arrow icon to 0px wide, making the button look empty. */
   padding: 0;
-  margin-left: -0.5rem;
+  margin-inline-start: -0.5rem;
   background: transparent;
   border: none;
   border-radius: 8px;
@@ -549,14 +552,14 @@
 .chats-page .message-bubble.incoming {
   background: var(--bg-white);
   color: var(--text-primary);
-  border-bottom-left-radius: 2px;
+  border-end-start-radius: 2px;
   border: 1px solid var(--border);
 }
 
 .chats-page .message-bubble.outgoing {
   background: #d9fdd3; /* Soft WhatsApp Green */
   color: #111b21;
-  border-bottom-right-radius: 2px;
+  border-end-end-radius: 2px;
 }
 
 /* Dark theme outgoing chat bubble override */
@@ -876,8 +879,8 @@
 }
 
 .chats-page .message-bubble.media-type {
-  border-top-left-radius: 12px;
-  border-top-right-radius: 12px;
+  border-start-start-radius: 12px;
+  border-start-end-radius: 12px;
 }
 
 /* =============================================================================
@@ -886,7 +889,7 @@
 @media (max-width: 768px) {
   .chats-page {
     padding: 1rem;
-    height: auto;
+    height: calc(100dvh - 3.5rem);
   }
 
   .chats-page .chats-layout {
@@ -899,7 +902,7 @@
   .chats-page .chats-sidebar {
     width: 100%;
     height: 100%;
-    border-right: none;
+    border-inline-end: none;
   }
 
   .chats-page .chats-room {
@@ -940,7 +943,7 @@
   .main-content:not(.expanded) .chats-page .chats-sidebar {
     width: 100%;
     height: 100%;
-    border-right: none;
+    border-inline-end: none;
   }
 
   .main-content:not(.expanded) .chats-page .chats-layout.has-active-chat .chats-sidebar {
@@ -1074,6 +1077,9 @@
 
 /* Hover Menu */
 .chats-page .message-actions-menu {
+  position: absolute;
+  top: 0.5rem;
+  inset-inline-end: 0.5rem;
   display: none;
   align-items: center;
   gap: 0.25rem;
@@ -1179,11 +1185,11 @@
 }
 
 .chats-page .message-bubble-wrapper.outgoing .message-reactions-badge {
-  right: 12px;
+  inset-inline-end: 12px;
 }
 
 .chats-page .message-bubble-wrapper.incoming .message-reactions-badge {
-  left: 12px;
+  inset-inline-start: 12px;
 }
 
 .chats-page .reaction-emoji-span {
@@ -1193,13 +1199,13 @@
 .chats-page .reactions-count-span {
   font-weight: 600;
   color: var(--text-secondary);
-  margin-left: 2px;
+  margin-inline-start: 2px;
 }
 
 /* Quoted Box inside Bubble */
 .chats-page .message-quote-box {
   background: rgba(0, 0, 0, 0.04);
-  border-left: 4px solid var(--primary);
+  border-inline-start: 4px solid var(--primary);
   border-radius: 4px;
   padding: 0.375rem 0.625rem;
   margin-bottom: 0.5rem;
@@ -1210,7 +1216,7 @@
 
 .chats-page .message-bubble.outgoing .message-quote-box {
   background: rgba(0, 0, 0, 0.05);
-  border-left-color: #008069;
+  border-inline-start-color: #008069;
 }
 
 [data-theme='dark'] .chats-page .message-quote-box {
@@ -1325,8 +1331,8 @@
 
 .chats-page .replying-preview-content {
   flex: 1;
-  border-left: 4px solid var(--primary);
-  padding-left: 0.75rem;
+  border-inline-start: 4px solid var(--primary);
+  padding-inline-start: 0.75rem;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1487,7 +1493,8 @@
   object-fit: cover;
 }
 
-/* Status viewer: shown in place of the image while a status media blob fails to load. */
+/* Shown in place of media that cannot be shown: a status media blob that fails to load, or a
+   channel post whose media has no URL. */
 .chats-page .status-media-placeholder {
   display: block;
   font-size: 0.85rem;
@@ -1529,7 +1536,7 @@
 }
 
 .chats-page .status-compose-modal .compose-type-toggle button:first-child {
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
 }
 
 .chats-page .status-compose-modal .compose-type-toggle button.active {

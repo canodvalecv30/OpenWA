@@ -64,3 +64,14 @@ test('a number too short to be a phone is dropped rather than sent', () => {
   assert.deepEqual(parseBulkRecipients('12345'), []);
   assert.deepEqual(parseBulkRecipients('123456'), ['123456@c.us']);
 });
+
+// A contact export carries an email column next to the phone. Passing every '@' field through sent
+// each address as a recipient that could only fail, and doubled the count held against the batch cap.
+test('an @ field without a WhatsApp chat id shape is dropped, so an email column is not a recipient', () => {
+  const csv = 'name,email,phone\nJohn,john@example.com,628123456789\nAmy,12345@qq.com,628987654321';
+  assert.deepEqual(parseBulkRecipients(csv), ['628123456789@c.us', '628987654321@c.us']);
+  assert.deepEqual(
+    parseBulkRecipients('628123456789@s.whatsapp.net\n120363123456789@newsletter\n628123456789:12@lid'),
+    ['628123456789@s.whatsapp.net', '120363123456789@newsletter', '628123456789:12@lid'],
+  );
+});

@@ -14,7 +14,17 @@ describe('AuthValidateController', () => {
       valid: true,
       role: ApiKeyRole.ADMIN,
       engineType: 'baileys',
+      scoped: false,
     });
+  });
+
+  it('reports a key restricted to selected sessions as scoped', () => {
+    // The dashboard gates the unscoped-only stats reads on this, so a scoped admin never sends them.
+    expect(controller.validate(makeKey({ role: ApiKeyRole.ADMIN, allowedSessions: ['s1'] }))).toMatchObject({
+      valid: true,
+      scoped: true,
+    });
+    expect(controller.validate(makeKey({ allowedSessions: [] }))).toMatchObject({ scoped: false });
   });
 
   it('reports the engine to an operator key, which cannot read the admin-only infra route', () => {
@@ -27,7 +37,7 @@ describe('AuthValidateController', () => {
     // The handler must NOT re-validate without an IP, which previously fail-closed and wrongly
     // reported valid:false for any key carrying an allowedIps restriction.
     const key = makeKey({ allowedIps: ['10.0.0.0/24'] });
-    expect(controller.validate(key)).toEqual({ valid: true, role: key.role, engineType: 'baileys' });
+    expect(controller.validate(key)).toEqual({ valid: true, role: key.role, engineType: 'baileys', scoped: false });
   });
 
   it('returns valid:false when no key is attached (defense-in-depth)', () => {

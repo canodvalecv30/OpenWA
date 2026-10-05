@@ -1,4 +1,5 @@
 import { registerUncaughtExceptionMonitor, registerUnhandledRejectionHandler } from './process-error-monitor';
+import { getUnhandledRejections } from '../common/metrics/process-error-metrics';
 
 const EVENT = 'uncaughtExceptionMonitor';
 
@@ -122,9 +123,30 @@ describe('registerUnhandledRejectionHandler', () => {
     expect(errors).toHaveLength(1);
   });
 
+  it('counts each rejection under its classification', () => {
+    const { handler } = register();
+    const before = getUnhandledRejections();
+    handler(new Error('something genuinely broke'));
+    handler(new Error('Execution context was destroyed'));
+    handler('a bare string');
+
+    expect(getUnhandledRejections()).toEqual({
+      other: before.other + 2,
+      page_context_lost: before.page_context_lost + 1,
+    });
+  });
+
   it('stringifies a non-Error rejection without throwing', () => {
     const { handler, errors } = register();
     expect(() => handler('a bare string')).not.toThrow();
     expect(errors[0][1]).toContain('a bare string');
+  });
+
+  // String() throws on a null-prototype object; a throw inside this listener would become an uncaught
+  // exception and take the process down, which is exactly what the handler exists to prevent.
+  it('logs a rejection value that String() cannot convert instead of throwing', () => {
+    const { handler, errors } = register();
+    expect(() => handler(Object.create(null))).not.toThrow();
+    expect(errors).toEqual([['Unhandled promise rejection', '[object Object]']]);
   });
 });

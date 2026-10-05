@@ -9,9 +9,10 @@ export const BULK_RECIPIENTS_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * Parse the bulk-recipients textarea into chat IDs: trims whitespace, drops blanks, de-dupes, and
- * normalizes bare phone numbers to `<digits>@c.us`. An entry containing '@' is treated as a full
- * chat ID and passes through untouched; anything else must carry at least MIN_PHONE_DIGITS digits
- * or it is dropped rather than sent as a meaningless or truncated id.
+ * normalizes bare phone numbers to `<digits>@c.us`. An entry with a WhatsApp chat id shape passes
+ * through untouched; any other entry containing '@', such as an email column, is dropped. Anything
+ * else must carry at least MIN_PHONE_DIGITS digits or it is dropped rather than sent as a
+ * meaningless or truncated id.
  *
  * Entries are separated by line endings AND by the comma/semicolon/tab a spreadsheet export writes,
  * because the file picker offers `.csv`. Phone-number formatting (spaces, parentheses, hyphens,
@@ -37,6 +38,13 @@ const FIELD_SEPARATORS = /[,;\t]/;
  */
 const MIN_PHONE_DIGITS = 6;
 
+/**
+ * A full chat id: a numeric user part (a device suffix or group hyphen allowed) on a WhatsApp
+ * server. The server list is what keeps an email out; a numeric local part alone would still let
+ * `12345@qq.com` through.
+ */
+const CHAT_ID = /^[0-9][0-9:-]*@(c\.us|g\.us|s\.whatsapp\.net|lid|newsletter|broadcast)$/i;
+
 export function parseBulkRecipients(text: string): string[] {
   const seen = new Set<string>();
   for (const rawLine of text.split(/\r\n?|\n/)) {
@@ -48,7 +56,7 @@ export function parseBulkRecipients(text: string): string[] {
       const field = rawField.trim();
       if (!field) continue;
       if (field.includes('@')) {
-        seen.add(field);
+        if (CHAT_ID.test(field)) seen.add(field);
         continue;
       }
       const digits = field.replace(/[^0-9]/g, '');

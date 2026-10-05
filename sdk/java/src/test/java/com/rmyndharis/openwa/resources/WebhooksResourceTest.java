@@ -7,10 +7,13 @@ import com.rmyndharis.openwa.ClientConfig;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.CreateWebhookRequest;
+import com.rmyndharis.openwa.model.RedriveWebhookDeliveriesRequest;
 import com.rmyndharis.openwa.model.UpdateWebhookRequest;
 import com.rmyndharis.openwa.model.WebhookEvent;
 import com.rmyndharis.openwa.model.WebhookFilterCondition;
 import com.rmyndharis.openwa.model.WebhookFilters;
+import com.rmyndharis.openwa.model.WebhookRedriveResult;
+import com.rmyndharis.openwa.model.WebhookDeliveryFailure;
 import com.rmyndharis.openwa.support.MockTransport;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -23,6 +26,32 @@ class WebhooksResourceTest {
     final MockTransport tx = new MockTransport();
     final OpenWAClient client = new OpenWAClient(
         ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build());
+
+    @Test
+    void deliveryFailurePreservesThePreviousConstructor() {
+        WebhookDeliveryFailure row = new WebhookDeliveryFailure(
+            "id", "webhook", "session", "message.received", "https://example.test",
+            "key", "delivery", 1, 503, "unavailable", "2026-10-05T00:00:00Z");
+        assertEquals("id", row.id());
+        assertEquals(false, row.replayable());
+    }
+
+    @Test
+    void redriveDeliveryFailuresPostsTheFilterOrAnEmptyBody() {
+        String result =
+            "{\"redriven\":1,\"delivered\":1,\"enqueued\":0,\"failed\":0,\"skipped\":0,\"remaining\":3}";
+        tx.respond(200, result);
+        WebhookRedriveResult out =
+            client.webhooks.redriveDeliveryFailures(
+                RedriveWebhookDeliveriesRequest.builder().sessionId("s").limit(10).build());
+        assertEquals("http://h/api/webhooks/delivery-failures/redrive", tx.lastRequest().url());
+        assertEquals(HttpMethod.POST, tx.lastRequest().method());
+        assertEquals("{\"sessionId\":\"s\",\"limit\":10}", tx.lastRequest().body());
+        assertEquals(3, out.remaining());
+        tx.respond(200, result);
+        client.webhooks.redriveDeliveryFailures(null);
+        assertEquals("{}", tx.lastRequest().body());
+    }
 
     @Test
     void listHitsWebhooksRoot() {

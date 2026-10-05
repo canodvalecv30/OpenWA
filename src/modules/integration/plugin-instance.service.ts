@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryDeepPartialEntity, Repository } from 'typeorm';
 import { PluginInstance } from './entities/plugin-instance.entity';
+import { isUniqueViolation } from '../../common/utils/db-errors';
 import type { PluginConfigSchema } from '../../core/plugins/plugin.interfaces';
 import { redactSecretConfig, restoreSecretConfig, SECRET_SENTINEL } from '../plugins/redact-config';
 // Type-only: the module binds this class to PLUGIN_INSTANCE_PORT with a `useExisting` alias, which
@@ -36,11 +37,22 @@ export class PluginInstanceService implements PluginInstancePort {
     instanceId: string,
     opts: { sessionScope?: string; verifyToken?: string; secret?: string; config?: Record<string, unknown> },
   ): Promise<PluginInstance> {
-    const id = `${pluginId}:${instanceId}`;
-    const existing = await this.repo.findOne({ where: { id } });
+    const existing = await this.resolve(pluginId, instanceId);
     if (existing) return existing;
+    return (
+      (await this.insert(pluginId, instanceId, opts)) ?? ((await this.resolve(pluginId, instanceId)) as PluginInstance)
+    );
+  }
+
+  // A plain INSERT, never save(): with the primary key set, save() re-selects and turns a concurrent
+  // duplicate into an UPDATE that overwrites the first row's secret. Null when the id already exists.
+  private async insert(
+    pluginId: string,
+    instanceId: string,
+    opts: { sessionScope?: string; verifyToken?: string; secret?: string; config?: Record<string, unknown> },
+  ): Promise<PluginInstance | null> {
     const inst = this.repo.create({
-      id,
+      id: `${pluginId}:${instanceId}`,
       pluginId,
       instanceId,
       sessionScope: opts.sessionScope || null,
@@ -49,7 +61,13 @@ export class PluginInstanceService implements PluginInstancePort {
       config: opts.config ?? null,
       enabled: true,
     });
-    return this.repo.save(inst);
+    try {
+      await this.repo.insert(inst as QueryDeepPartialEntity<PluginInstance>);
+    } catch (err) {
+      if (isUniqueViolation(err)) return null;
+      throw err;
+    }
+    return inst;
   }
 
   resolve(pluginId: string, instanceId: string): Promise<PluginInstance | null> {
@@ -72,19 +90,10 @@ export class PluginInstanceService implements PluginInstancePort {
     instanceId: string,
     opts: { sessionScope?: string; verifyToken?: string; secret?: string; config?: Record<string, unknown> },
   ): Promise<PluginInstance> {
-    const id = `${pluginId}:${instanceId}`;
-    if (await this.repo.findOne({ where: { id } })) throw new InstanceExistsError(pluginId, instanceId);
-    const inst = this.repo.create({
-      id,
-      pluginId,
-      instanceId,
-      sessionScope: opts.sessionScope || null,
-      secret: normalizeSecret(opts.secret),
-      verifyToken: opts.verifyToken || randomBytes(16).toString('hex'),
-      config: opts.config ?? null,
-      enabled: true,
-    });
-    return this.repo.save(inst);
+    if (await this.resolve(pluginId, instanceId)) throw new InstanceExistsError(pluginId, instanceId);
+    const inst = await this.insert(pluginId, instanceId, opts);
+    if (!inst) throw new InstanceExistsError(pluginId, instanceId);
+    return inst;
   }
 
   list(pluginId: string): Promise<PluginInstance[]> {
@@ -96,11 +105,15 @@ export class PluginInstanceService implements PluginInstancePort {
     return this.repo.find();
   }
 
-  async regenerateSecret(pluginId: string, instanceId: string): Promise<PluginInstance> {
+  // update() and regenerateSecret() write only the columns they change, and only to a row that still
+  // exists: a whole-row save() would re-insert a row deleted meanwhile, or write back a stale secret
+  // over a concurrent rotation. Both re-read the row after the write so the result carries the fresh
+  // updatedAt the database stamped.
+  async regenerateSecret(pluginId: string, instanceId: string): Promise<PluginInstance | null> {
     const inst = await this.resolve(pluginId, instanceId);
-    if (!inst) throw new Error(`instance ${instanceId} not found for plugin ${pluginId}`);
-    inst.secret = randomBytes(32).toString('hex');
-    return this.repo.save(inst);
+    const secret = randomBytes(32).toString('hex');
+    const written = inst ? (await this.repo.update({ id: inst.id }, { secret })).affected : 0;
+    return written ? this.resolve(pluginId, instanceId) : null;
   }
 
   async update(
@@ -111,15 +124,18 @@ export class PluginInstanceService implements PluginInstancePort {
   ): Promise<PluginInstance | null> {
     const inst = await this.resolve(pluginId, instanceId);
     if (!inst) return null;
-    if (patch.enabled !== undefined) inst.enabled = patch.enabled;
-    if (patch.sessionScope !== undefined) inst.sessionScope = patch.sessionScope || null;
+    const changes: Partial<Pick<PluginInstance, 'enabled' | 'sessionScope' | 'config'>> = {};
+    if (patch.enabled !== undefined) changes.enabled = patch.enabled;
+    if (patch.sessionScope !== undefined) changes.sessionScope = patch.sessionScope || null;
     if (patch.config !== undefined) {
       // The operator view masks secrets as the sentinel, so a round-tripped config carries '***' for
       // unchanged secrets. Restore the stored values instead of persisting the mask (which would corrupt
       // the credential); genuinely-new values are written as provided.
-      inst.config = restoreSecretConfig(patch.config, inst.config ?? undefined, schema);
+      changes.config = restoreSecretConfig(patch.config, inst.config ?? undefined, schema);
     }
-    return this.repo.save(inst);
+    if (Object.keys(changes).length === 0) return inst;
+    const { affected } = await this.repo.update({ id: inst.id }, changes as QueryDeepPartialEntity<PluginInstance>);
+    return affected ? this.resolve(pluginId, instanceId) : null;
   }
 
   async remove(pluginId: string, instanceId: string): Promise<boolean> {

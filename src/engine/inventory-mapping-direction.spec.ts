@@ -56,9 +56,29 @@ function isHandle(expr: ts.Expression, engine: Engine): boolean {
   return false;
 }
 
-function buildGraph(): Map<string, MethodFacts> {
+/**
+ * The engine an adapter file belongs to, or undefined for a module both adapters share. Mirrors the
+ * attribution in engine-parity.spec.ts, which also fails on an unprefixed file nobody attributed.
+ */
+function fileEngine(file: string): Engine | undefined {
+  if (file.startsWith('baileys') || file === 'safe-link-preview.ts') return 'baileys';
+  if (file.startsWith('wwebjs-') || file.startsWith('whatsapp-web-js') || file === 'chromium-profile-hygiene.ts') {
+    return 'wwjs';
+  }
+  return undefined;
+}
+
+/**
+ * One engine's call graph. Methods are keyed by bare name and every interface method has the same name
+ * in both adapters, so a graph over both would union their call edges and credit one engine with a
+ * symbol only the other's implementation reaches.
+ */
+function buildGraph(engine: Engine): Map<string, MethodFacts> {
   const methods = new Map<string, MethodFacts>();
-  for (const file of readdirSync(ADAPTER_DIR).filter(f => f.endsWith('.ts') && !f.endsWith('.spec.ts'))) {
+  const files = readdirSync(ADAPTER_DIR).filter(
+    f => f.endsWith('.ts') && !f.endsWith('.spec.ts') && (fileEngine(f) ?? engine) === engine,
+  );
+  for (const file of files) {
     const source = ts.createSourceFile(
       file,
       readFileSync(join(ADAPTER_DIR, file), 'utf8'),
@@ -105,10 +125,11 @@ function buildGraph(): Map<string, MethodFacts> {
   return methods;
 }
 
-const GRAPH = buildGraph();
+const GRAPHS: Record<Engine, Map<string, MethodFacts>> = { baileys: buildGraph('baileys'), wwjs: buildGraph('wwjs') };
 
 /** Every adapter method that reaches `symbol`, directly or through its own helpers. */
 function reachers(symbol: string, engine: Engine): Set<string> {
+  const GRAPH = GRAPHS[engine];
   const reached = new Set(
     [...GRAPH]
       .filter(([, f]) => f.lib[engine].has(symbol) || (f.computed[engine] && f.strings.has(symbol)))
@@ -158,9 +179,17 @@ function inventoryRows(engine: Engine): { symbol: string; listed: string[] }[] {
 }
 
 describe('docs/29 §29.5 inventory — the interface methods a row names can reach its symbol', () => {
-  it('the AST walk found the adapter methods', () => {
+  it.each<Engine>(['baileys', 'wwjs'])('the AST walk found the %s adapter methods', engine => {
     // Without this the reachability sets are empty and every assertion below passes vacuously.
-    expect(GRAPH.size).toBeGreaterThan(150);
+    expect(GRAPHS[engine].size).toBeGreaterThan(150);
+  });
+
+  it('does not credit one engine with a symbol only the other engine reaches', () => {
+    // Every interface method has the same name in both adapters. Baileys reaches `onWhatsApp` from
+    // getNumberId alone; its send paths must not borrow the wwjs send helpers' call edges.
+    expect(reachers('onWhatsApp', 'baileys').has('getNumberId')).toBe(true);
+    expect(reachers('onWhatsApp', 'baileys').has('sendTextMessage')).toBe(false);
+    expect(reachers('getBlockedContacts', 'wwjs').has('getContacts')).toBe(false);
   });
 
   describe.each<Engine>(['baileys', 'wwjs'])('%s', engine => {

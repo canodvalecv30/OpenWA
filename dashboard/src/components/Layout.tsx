@@ -23,7 +23,7 @@ import {
   Languages,
 } from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
-import { type UserRole } from '../hooks/useRole';
+import { useRole, type UserRole } from '../hooks/useRole';
 import { languageOptions, resolveSupportedLanguage, rtlLanguages, type SupportedLanguage } from '../i18n';
 import { healthApi, infraApi } from '../services/api';
 import './Layout.css';
@@ -33,17 +33,18 @@ interface LayoutProps {
   userRole: UserRole | null;
 }
 
+// unscopedOnly: every route behind the page refuses a key restricted to selected sessions, whatever its role.
 const allNavItems = [
   { to: '/', icon: LayoutDashboard, key: 'dashboard' as const, adminOnly: false },
   { to: '/sessions', icon: Smartphone, key: 'sessions' as const, adminOnly: false },
   { to: '/chats', icon: MessageSquare, key: 'chats' as const, adminOnly: false },
   { to: '/webhooks', icon: Webhook, key: 'webhooks' as const, adminOnly: false },
   { to: '/templates', icon: ClipboardList, key: 'templates' as const, adminOnly: false },
-  { to: '/api-keys', icon: Key, key: 'apiKeys' as const, adminOnly: true },
+  { to: '/api-keys', icon: Key, key: 'apiKeys' as const, adminOnly: true, unscopedOnly: true },
   { to: '/message-tester', icon: Send, key: 'messageTester' as const, adminOnly: false },
   // Backend /infra/* is ADMIN-only; hide the nav item from non-admins (UX + defense-in-depth).
-  { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, adminOnly: true },
-  { to: '/plugins', icon: Puzzle, key: 'plugins' as const, adminOnly: true },
+  { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, adminOnly: true, unscopedOnly: true },
+  { to: '/plugins', icon: Puzzle, key: 'plugins' as const, adminOnly: true, unscopedOnly: true },
   // Backend /audit is ADMIN-only too.
   { to: '/logs', icon: FileText, key: 'logs' as const, adminOnly: true },
 ];
@@ -52,11 +53,18 @@ const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
 export function Layout({ onLogout, userRole }: LayoutProps) {
   const { t, i18n } = useTranslation();
-  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { theme, toggleTheme } = useTheme();
   const ThemeIcon = themeIcons[theme];
   const themeLabel = t(`theme.${theme}`);
+  // toggleTheme cycles light, dark, system; the button names the state a click selects.
+  const nextThemeLabel = t('theme.toggleTo', {
+    value: t(`theme.${theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'}`),
+  });
 
-  const navItems = allNavItems.filter(item => !item.adminOnly || userRole === 'admin');
+  const { scoped } = useRole();
+  const navItems = allNavItems.filter(
+    item => (!item.adminOnly || userRole === 'admin') && (!item.unscopedOnly || !scoped),
+  );
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
@@ -64,8 +72,8 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
   // Show the build-time version immediately, then replace it with the live running version from the
   // backend so a stale-built bundle can't display the wrong number. Falls back silently on error.
   const [version, setVersion] = useState(__APP_VERSION__);
-  // A newer published release, shown to admins as a link to its notes. The route is ADMIN-only and
-  // the backend answers quietly when GitHub is unreachable or the check is turned off.
+  // A newer published release, shown to admins as a link to its notes. The route is ADMIN-only, refuses a
+  // session-scoped key, and answers quietly when GitHub is unreachable or the check is turned off.
   const [update, setUpdate] = useState<{ latest: string; url: string } | null>(null);
   const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
   const languageMenuRef = useRef<HTMLDivElement>(null);
@@ -96,7 +104,7 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
   }, []);
 
   useEffect(() => {
-    if (userRole !== 'admin') return;
+    if (userRole !== 'admin' || scoped) return;
     let active = true;
     infraApi
       .getUpdateCheck()
@@ -111,7 +119,7 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
     return () => {
       active = false;
     };
-  }, [userRole]);
+  }, [userRole, scoped]);
 
   const handleNavClick = () => {
     if (isMobile) setIsMobileOpen(false);
@@ -262,9 +270,9 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
           <div className="appearance-menu">
             <button
               className="theme-toggle-btn"
-              onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
-              title={t('theme.toggleTo', { value: t(resolvedTheme === 'dark' ? 'theme.light' : 'theme.dark') })}
-              aria-label={t('theme.toggleTo', { value: t(resolvedTheme === 'dark' ? 'theme.light' : 'theme.dark') })}
+              onClick={toggleTheme}
+              title={nextThemeLabel}
+              aria-label={nextThemeLabel}
             >
               <span className="appearance-button-cue" aria-hidden="true">
                 <ThemeIcon size={16} />

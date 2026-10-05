@@ -4,6 +4,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import Redis, { type RedisOptions } from 'ioredis';
 import type { Server, ServerOptions } from 'socket.io';
 import { createLogger } from '../../common/services/logger.service';
+import { redisConnectionOptions } from '../../config/redis-options';
 
 const logger = createLogger('RedisIoAdapter');
 
@@ -22,11 +23,7 @@ export function isWsRedisEnabled(): boolean {
 /** ioredis options for the pub/sub pair, mirroring the throttler/cache connection env exactly. */
 export function wsRedisOptions(): RedisOptions {
   return {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
-    username: process.env.REDIS_USERNAME,
-    password: process.env.REDIS_PASSWORD,
-    connectTimeout: parseInt(process.env.REDIS_CONNECT_TIMEOUT_MS || '5000', 10),
+    ...redisConnectionOptions(),
     // The adapter's SUBSCRIBE connection cannot issue ordinary commands, so a bounded retry that
     // gives up (returning null) would strand fan-out permanently after one blip. Reconnect forever
     // with capped backoff, matching the cache client.
@@ -51,7 +48,7 @@ export function wsRedisOptions(): RedisOptions {
  *
  * Failure posture: if the pub/sub clients cannot be created the server falls back to the in-memory
  * adapter — the local node keeps working, only cross-node fan-out is lost — rather than refusing to
- * boot. A Redis outage after boot is ioredis's problem to retry; the adapter recovers on reconnect.
+ * boot. A Redis outage, at boot or after it, is ioredis's problem to retry; the adapter recovers on reconnect.
  */
 export class RedisIoAdapter extends IoAdapter {
   private pubClient?: Redis;
@@ -67,13 +64,27 @@ export class RedisIoAdapter extends IoAdapter {
 
     try {
       const pubClient = new Redis(wsRedisOptions());
-      const subClient = pubClient.duplicate();
+      // The adapter issues its SUBSCRIBE/PSUBSCRIBE once, at construction. With a bounded per-request
+      // retry, an outage at boot flushes them before Redis is ever reached, and ioredis only replays
+      // subscriptions the server confirmed, so the replica would never subscribe. This connection
+      // carries nothing else, so keep its commands queued until the first connect.
+      const subClient = pubClient.duplicate({ maxRetriesPerRequest: null });
       for (const [name, client] of [
         ['pub', pubClient],
         ['sub', subClient],
       ] as const) {
         client.on('error', err => logger.warn(`Redis ${name} client error: ${err.message}`));
       }
+      // The adapter fires publish() on every broadcast and drops the promise. During an outage ioredis
+      // queues those commands and, each time its retries run out, rejects the whole queue, so every
+      // event emitted meanwhile surfaced as an unhandled rejection. The 'error' listener above already
+      // reports the outage once; a lost fan-out frame is only worth a debug line.
+      const publish = pubClient.publish.bind(pubClient);
+      pubClient.publish = (channel: string, message: string | Buffer) =>
+        publish(channel, message).catch((err: Error) => {
+          logger.debug(`Redis publish dropped: ${err.message}`);
+          return 0;
+        });
       this.pubClient = pubClient;
       this.subClient = subClient;
       server.adapter(createAdapter(pubClient, subClient));

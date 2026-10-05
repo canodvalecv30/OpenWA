@@ -8,6 +8,7 @@ import { WebhookReconcilerService } from './webhook-reconciler.service';
 import { Session } from '../session/entities/session.entity';
 import { WebhookService } from './webhook.service';
 import { WebhookDeliveryService } from './webhook-delivery.service';
+import { WebhookRedriveService } from './webhook-redrive.service';
 import { WebhookController } from './webhook.controller';
 import { WebhooksListController } from './webhooks-list.controller';
 import { EngineModule } from '../../engine/engine.module';
@@ -29,7 +30,13 @@ if (process.env.QUEUE_ENABLED === 'true') {
     ...queueModules,
   ],
   controllers: [WebhookController, WebhooksListController],
-  providers: [WebhookService, WebhookDeliveryService, WebhookOutboxService, WebhookReconcilerService],
+  providers: [
+    WebhookService,
+    WebhookDeliveryService,
+    WebhookOutboxService,
+    WebhookReconcilerService,
+    WebhookRedriveService,
+  ],
   exports: [WebhookService],
 })
 export class WebhookModule {}

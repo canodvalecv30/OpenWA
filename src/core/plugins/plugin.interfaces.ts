@@ -90,8 +90,9 @@ export interface PluginManifest {
 
   // Outbound-HTTP host allowlist for `ctx.net.fetch` (requires the `net:fetch` permission). Each
   // entry is `host:port` (exact) or a bare `host` (any port); `'*'` allows any public host. Absent /
-  // empty = deny all. `allowConfigHosts` additionally admits the host of each named config key (e.g. an
-  // operator-set base URL), resolved at fetch time. The SSRF guard still blocks internal IPs regardless.
+  // empty = deny all. `allowConfigHosts` additionally admits the https origin (host and port) of each
+  // named config key (e.g. an operator-set base URL), resolved at fetch time. The SSRF guard still
+  // blocks internal IPs regardless.
   net?: { allow?: string[]; allowConfigHosts?: string[] };
 
   // Localized dashboard text (name/description/config field titles) per locale code. English is the
@@ -101,6 +102,10 @@ export interface PluginManifest {
   // Integration SDK major.minor the plugin was authored against (e.g. '1' or '1.2'). Only the major
   // is enforced — see SUPPORTED_SDK_MAJOR / validateIngressManifest. Absent = treated as '1'.
   sdkVersion?: string;
+
+  // Oldest OpenWA release the plugin runs on (MAJOR.MINOR.PATCH). validatePluginManifest refuses the
+  // plugin at install and at boot load when the running host is older. Absent or null = no floor.
+  minOpenWAVersion?: string | null;
 
   // Inbound webhook routes this plugin claims (requires the `webhook:ingress` permission). Validated
   // by validateIngressManifest, which the loader calls on every external plugin load (loadPlugin).
@@ -219,6 +224,13 @@ export interface IngressSignatureSpec {
   dedupHeader?: string;
 }
 
+const INGRESS_SIGNATURE_SCHEMES: readonly IngressSignatureSpec['scheme'][] = [
+  'hmac-sha256',
+  'shared-secret',
+  'standard-webhooks',
+  'none',
+];
+
 /** Provider webhook-verification challenge (e.g. a GET handshake on route registration). */
 export interface IngressChallengeSpec {
   method: 'GET';
@@ -232,7 +244,7 @@ export interface IngressChallengeSpec {
 export type IngressPreflightCheck = {
   // Reject (503) when the route's concrete-scoped WhatsApp session is not alive (no live engine, or
   // EngineStatus.FAILED). Recoverable statuses (INITIALIZING/QR_READY/AUTHENTICATING/DISCONNECTED) and
-  // READY pass through to a normal 202+enqueue so the worker can fail fast and the dedup row holds the
+  // READY pass through to a normal ack + enqueue so the worker can fail fast and the dedup row holds the
   // delivery. Skipped for wildcard (sessionScope null/'*') scopes — there is no single session to probe.
   type: 'session-alive';
 };
@@ -366,6 +378,28 @@ export function validateIngressManifest(manifest: PluginManifest, allowUnsignedI
           `(no '/', '\\', '?', '#', '%', control character or lone surrogate, and not '.' or '..')`,
       );
     }
+    // The verifier treats any scheme it does not know as hmac-sha256, so a typo would load and then
+    // reject every delivery as a signature mismatch, with nothing pointing back at the manifest.
+    const signature: Partial<IngressSignatureSpec> | undefined =
+      r.signature && typeof r.signature === 'object' ? r.signature : undefined;
+    if (!signature?.scheme || !INGRESS_SIGNATURE_SCHEMES.includes(signature.scheme)) {
+      throw new Error(
+        `Plugin ${manifest.id}: route '${r.route}' signature.scheme must be one of ` +
+          `${INGRESS_SIGNATURE_SCHEMES.join(', ')} (got '${String(signature?.scheme)}')`,
+      );
+    }
+    // Only hmac-sha256 reads `encoding`; the other schemes ignore it, so a stray value there still loads.
+    if (
+      signature.scheme === 'hmac-sha256' &&
+      signature.encoding !== undefined &&
+      signature.encoding !== 'hex' &&
+      signature.encoding !== 'base64'
+    ) {
+      throw new Error(
+        `Plugin ${manifest.id}: route '${r.route}' signature.encoding must be 'hex' or 'base64' ` +
+          `(got '${String(signature.encoding)}')`,
+      );
+    }
     if (r.signature.scheme === 'none' && !allowUnsignedIngress) {
       throw new Error(
         `Plugin ${manifest.id}: ingress route '${r.route}' declares signature.scheme 'none', which is an ` +
@@ -460,14 +494,31 @@ export function warnUnauthenticatedIngressRoutes(
  * timestamp and a new delivery id forever. Binding the timestamp (`contentTemplate` containing
  * `{timestamp}`, e.g. `{timestamp}.{rawBody}`) makes the signed bytes expire with the window. The
  * inverse declaration — a `{timestamp}` token with no `timestampHeader` — signs the empty string,
- * which is equally inert. Warn-only (SDK v1 is additive within a major; a load-time rejection would
- * break already-installed manifests). Called from PluginLoaderService.loadPlugin.
+ * which is equally inert.
+ *
+ * It also warns about routes whose default header-keyed dedup is the only thing between a copy of a
+ * delivery and a second enqueue: an hmac-sha256 route that binds no timestamp, and a shared-secret
+ * route (which binds neither body nor time). The dedup header is not covered by the credential, so a
+ * copy sent with a different header value is accepted as new. `dedupOn: 'body'` silences it.
+ *
+ * Warn-only (SDK v1 is additive within a major; a load-time rejection would break already-installed
+ * manifests). Called from PluginLoaderService.loadPlugin.
  */
 export function warnUnsignedTimestampRoutes(
   manifest: PluginManifest,
   logger: { warn: (message: string, context?: Record<string, unknown>) => void },
 ): void {
   for (const r of manifest.ingress ?? []) {
+    if (r.signature.scheme === 'shared-secret' && r.dedupOn !== 'body') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' uses scheme 'shared-secret', which binds ` +
+          `neither the body nor a timestamp, and dedups on a header the secret does not cover: a copy of a ` +
+          `delivery sent with a different header value is accepted as new. Prefer an hmac-sha256 scheme ` +
+          `with a signed timestamp, or set dedupOn: 'body' if the provider's retries are byte-identical.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_replayable_route' },
+      );
+      continue;
+    }
     if (r.signature.scheme !== 'hmac-sha256') continue; // only hmac templates can bind a timestamp
     const signsTimestamp = (r.signature.contentTemplate ?? '{rawBody}').includes('{timestamp}');
     if (r.signature.timestampHeader && !signsTimestamp) {
@@ -484,6 +535,14 @@ export function warnUnsignedTimestampRoutes(
           `timestampHeader — the token binds the empty string and no freshness check runs. Declare the ` +
           `provider's timestamp header (and optionally toleranceSec) to activate the replay window.`,
         { pluginId: manifest.id, route: r.route, action: 'ingress_unsigned_timestamp' },
+      );
+    } else if (!r.signature.timestampHeader && r.dedupOn !== 'body') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' signs no timestamp and dedups on a header ` +
+          `the signature does not cover: a copy of a delivery sent with a different header value is ` +
+          `accepted as new. Declare and sign the provider's timestamp (timestampHeader plus {timestamp} ` +
+          `in the contentTemplate), or set dedupOn: 'body' if the provider's retries are byte-identical.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_replayable_route' },
       );
     }
   }
@@ -678,8 +737,9 @@ export interface PluginInstance {
   // Ignored for a global (sessionScoped:false) plugin. Persisted on the registry entry.
   activeSessions?: string[];
   // Per-session config overrides, keyed by sessionId. The config a hook sees for session S is the
-  // override shallow-merged over `config` (the '*' base) — see resolvePluginConfig. Absent = no
-  // overrides (every session gets the base). Persisted on the registry entry.
+  // override deep-merged over `config`, the '*' base (nested objects merge key by key; arrays and
+  // scalars replace) — see resolvePluginConfig. Absent = no overrides (every session gets the base).
+  // Persisted on the registry entry.
   sessionConfig?: Record<string, Record<string, unknown>>;
   // First-party built-ins (engines, bundled extensions) run in-process; plugins loaded from the
   // plugins directory are untrusted and run sandboxed in a worker. `false` => sandboxed.

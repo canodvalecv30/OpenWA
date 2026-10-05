@@ -9,9 +9,15 @@ import { SwaggerModule } from '@nestjs/swagger';
 import { AppModule, DASHBOARD_DIST, dashboardServingEnabled, dashboardBuildPresent } from './app.module';
 import { ShutdownService } from './common/services/shutdown.service';
 import { LoggerService, LogLevel, createLogger } from './common/services/logger.service';
-import { createSwaggerConfig, dropUnexpressibleOperations, exemptPublicOperations } from './config/swagger.config';
+import {
+  createSwaggerConfig,
+  documentErrorResponses,
+  dropUnexpressibleOperations,
+  exemptPublicOperations,
+} from './config/swagger.config';
 import { registerUncaughtExceptionMonitor, registerUnhandledRejectionHandler } from './config/process-error-monitor';
 import { runBootstrapOrExit } from './config/bootstrap-fatal';
+import { validateEnv } from './config/env.validation';
 import { resolveStorageRoot } from './config/storage-root';
 import { applyHttpTimeouts, HttpTimeoutConfig, HttpTimeoutSink } from './config/http-timeouts';
 import { applyGlobalValidation } from './config/app-validation';
@@ -21,6 +27,7 @@ import {
   isDashboardCspUpgradeTrapLikely,
   assertNoDefaultSecretsInProduction,
   isApiKeyPepperMissingInProduction,
+  isMainDbSynchronizeInProduction,
   isNodeEnvUnset,
 } from './config/bootstrap-security';
 import { BullBoardAuthMiddleware } from './common/security/bull-board-auth.middleware';
@@ -38,8 +45,7 @@ let appInstance: INestApplication | undefined;
 
 async function bootstrap() {
   // Apply the operator-configured log verbosity (LOG_LEVEL) before anything logs. Unset means INFO.
-  // A misspelling is skipped here; env.validation.ts rejects it and the boot fails inside
-  // NestFactory.create.
+  // A misspelling is skipped here; validateEnv below rejects it before the boot has any side effect.
   const requestedLevel = process.env.LOG_LEVEL?.trim().toLowerCase();
   if (requestedLevel && (Object.values(LogLevel) as string[]).includes(requestedLevel)) {
     LoggerService.setLogLevel(requestedLevel as LogLevel);
@@ -54,6 +60,11 @@ async function bootstrap() {
   // raw stack to stderr, bypassing the structured log pipeline, and exits(1). Route the stack through the
   // logger WITHOUT swallowing the exception, so the crash-and-restart posture is unchanged (see the helper).
   registerUncaughtExceptionMonitor(bootstrapLogger);
+
+  // Validate the environment before anything acts on it. ConfigModule.forRoot runs the same check, but
+  // only once NestFactory.create awaits it, which is after the storage root is created and a built-in
+  // PostgreSQL container is started; an invalid config would do both and then be reported twice.
+  validateEnv(process.env);
 
   // Advisory (not enforced): an unset/blank NODE_ENV is the deliberate local-dev default, but it
   // silently degrades four controls to their dev posture (the default-secret guard, wildcard CORS,
@@ -87,11 +98,22 @@ async function bootstrap() {
   });
 
   // Advisory (not enforced): without API_KEY_PEPPER, stored API-key hashes use plain SHA-256. Enabling
-  // a pepper re-hashes keys and invalidates existing ones, so we only nudge the operator (see api-key-hash.ts).
+  // a pepper on an install with keys locks every key out (see api-key-hash.ts), so we only nudge the operator.
   if (isApiKeyPepperMissingInProduction(process.env.NODE_ENV, process.env.API_KEY_PEPPER)) {
     bootstrapLogger.warn(
       'API_KEY_PEPPER is not set in production: stored API-key hashes use plain SHA-256. ' +
-        'Set API_KEY_PEPPER and re-issue keys to enable HMAC hashing.',
+        'Set API_KEY_PEPPER before the first boot to enable HMAC hashing; on an install with keys it locks out ' +
+        'every key until the previous pepper is restored, or api_keys is cleared and the instance restarted to ' +
+        'seed a new admin key.',
+    );
+  }
+
+  // Advisory (not enforced): the main DB normally runs its migration chain; synchronize is an opt-in.
+  if (isMainDbSynchronizeInProduction(process.env.NODE_ENV, process.env.MAIN_DATABASE_SYNCHRONIZE)) {
+    bootstrapLogger.warn(
+      'MAIN_DATABASE_SYNCHRONIZE=true in production: after its migrations the auth/audit schema is also ' +
+        "synchronized to this release's entities, and those changes are not recorded in the migration ledger. " +
+        'Unset it to use the main migrations alone.',
     );
   }
 
@@ -117,8 +139,10 @@ async function bootstrap() {
   // must be started before it, not from DockerService.onModuleInit (see the helper).
   await prestartBuiltinDatabase();
 
-  // Disable Nest's default body parser so we can set an explicit size cap below.
-  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  // Disable Nest's default body parser so we can set an explicit size cap below. Framework lines
+  // (route mapping, unhandled-exception stacks) go through the app logger so LOG_LEVEL, LOG_FORMAT and
+  // the request id apply to them too.
+  const app = await NestFactory.create(AppModule, { bodyParser: false, logger: createLogger('Nest') });
   appInstance = app;
 
   // Cross-replica WebSocket fan-out: when Redis is enabled, broadcasts reach clients on every
@@ -126,9 +150,9 @@ async function bootstrap() {
   // the adapter. Inert (plain in-memory adapter) without REDIS_ENABLED, so single-node pays nothing.
   app.useWebSocketAdapter(new RedisIoAdapter(app));
 
-  // The production HTTP surface: in-flight body budget, body parsers, request context, the CSP
-  // nonce, helmet, the SPA document handler and CORS. Extracted so the e2e lane runs the SAME
-  // stack instead of a copy of it (src/config/configure-app.ts).
+  // The production HTTP surface: request context, the CSP nonce, helmet, the SPA document handler,
+  // CORS, the encoded-NUL refusal, in-flight body budget, body parsers and the trailing-slash DELETE
+  // refusal. Extracted so the e2e lane runs the SAME stack instead of a copy of it (src/configure-app.ts).
   const { bodyLimit, inflightBudgetBytes } = configureApp(app);
   bootstrapLogger.log(`Request body caps: ${bodyLimit} per request, ${inflightBudgetBytes} bytes aggregate in flight`);
 
@@ -173,11 +197,12 @@ async function bootstrap() {
   if (swaggerEnabled) {
     const config = createSwaggerConfig();
     const document = SwaggerModule.createDocument(app, config);
-    // Same two passes, in the same order, as scripts/export-openapi.ts. The document is produced in
+    // Same passes, in the same order, as scripts/export-openapi.ts. The document is produced in
     // TWO places — here for the live /api/docs and there for the committed snapshot — and fixing only
     // the snapshot leaves a running gateway serving a document that fails schema validation.
     dropUnexpressibleOperations(document);
     exemptPublicOperations(document);
+    documentErrorResponses(document);
     SwaggerModule.setup('api/docs', app, document);
   }
 
@@ -218,20 +243,20 @@ async function bootstrap() {
   // sending #731 chasing BASE_URL/BIND_HOST/API_PORT instead of the real cause.
   const publicUrl = process.env.BASE_URL || `http://localhost:${port}`;
 
-  console.log(`🚀 OpenWA is running on: ${publicUrl}`);
+  bootstrapLogger.log(`OpenWA is running on: ${publicUrl}`);
   if (swaggerEnabled) {
-    console.log(`📚 Swagger docs: ${publicUrl}/api/docs`);
+    bootstrapLogger.log(`Swagger docs: ${publicUrl}/api/docs`);
   }
 
   // Make the dashboard-serving outcome explicit so a missing build (no UI on `/`)
   // is obvious instead of a silent 404.
   if (!dashboardServingEnabled) {
-    console.log('🖥️  Dashboard: serving disabled (SERVE_DASHBOARD=false); API only');
+    bootstrapLogger.log('Dashboard: serving disabled (SERVE_DASHBOARD=false); API only');
   } else if (dashboardBuildPresent) {
-    console.log(`🖥️  Dashboard: serving bundled UI at ${publicUrl}`);
+    bootstrapLogger.log(`Dashboard: serving bundled UI at ${publicUrl}`);
   } else {
-    console.warn(
-      `⚠️  Dashboard: no build at ${DASHBOARD_DIST} - UI disabled (API still serves /api). ` +
+    bootstrapLogger.warn(
+      `Dashboard: no build at ${DASHBOARD_DIST} - UI disabled (API still serves /api). ` +
         'Run `npm run build:all` to bundle it, or use the Vite dev server (`npm run dev`).',
     );
   }
@@ -247,8 +272,8 @@ async function bootstrap() {
       dashboardServed: dashboardServingEnabled && dashboardBuildPresent,
     })
   ) {
-    console.warn(
-      '⚠️  Dashboard: CSP upgrade-insecure-requests is ON (production default). If this instance is ' +
+    bootstrapLogger.warn(
+      'Dashboard: CSP upgrade-insecure-requests is ON (production default). If this instance is ' +
         "reached over plain HTTP, the browser will upgrade the UI's scripts to https:// and the " +
         'dashboard will render blank. Behind a TLS proxy? Ignore this. Serving direct HTTP? Set ' +
         'CSP_UPGRADE_INSECURE_REQUESTS=false.',

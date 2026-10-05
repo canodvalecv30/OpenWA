@@ -57,17 +57,25 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
   let gateway: EventsGateway;
   let authService: { validateApiKey: jest.Mock };
 
-  const makeSocket = (auth: { apiKey?: string } = {}): MockSocket => ({
-    id: 'sock-1',
-    handshake: { headers: {}, query: {}, auth, address: '203.0.113.5' },
-    data: {},
-    emit: jest.fn(),
-    disconnect: jest.fn(),
-    join: jest.fn(),
-    leave: jest.fn(),
-    // Socket.IO puts every socket in a room named after its own id.
-    rooms: new Set<string>(['sock-1']),
-  });
+  const makeSocket = (auth: { apiKey?: string } = {}): MockSocket => {
+    const s: MockSocket = {
+      id: 'sock-1',
+      handshake: { headers: {}, query: {}, auth, address: '203.0.113.5' },
+      data: {},
+      emit: jest.fn(),
+      // Like socket.io, a server-side close marks the socket disconnected at once.
+      disconnect: jest.fn(() => {
+        s.disconnected = true;
+      }),
+      join: jest.fn(),
+      leave: jest.fn(),
+      // Socket.IO puts every socket in a room named after its own id.
+      rooms: new Set<string>(['sock-1']),
+    };
+    return s;
+  };
+  const unauthorizedEmits = (s: MockSocket): unknown[] =>
+    s.emit.mock.calls.filter(([, frame]) => (frame as WSErrorResponse | undefined)?.code === 'UNAUTHORIZED');
   // Subscription rooms joined by the socket; the QR-denied role room is not a subscription.
   const sessionRoomJoins = (s: MockSocket): string[] =>
     s.join.mock.calls.map(([room]) => room as string).filter(room => room.startsWith('session:'));
@@ -133,6 +141,14 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     await gateway.handleConnection(asSocket(sock));
     expect(sock.disconnect).toHaveBeenCalled();
     expect(sock.emit).toHaveBeenCalled();
+    expect(auditService.logWarn).toHaveBeenCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({
+        apiKey: expect.objectContaining({ allowedChats: ['123@g.us'] }) as unknown,
+        ipAddress: '203.0.113.5',
+        metadata: { surface: 'websocket' },
+      }),
+    );
   });
 
   it('refuses a subscribe once the key has gained allowedChats after connect', async () => {
@@ -147,6 +163,15 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     expect(res.code).toBe('UNAUTHORIZED');
     expect(sock.disconnect).toHaveBeenCalled();
     expect(sessionRoomJoins(sock)).toEqual([]);
+    expect(unauthorizedEmits(sock)).toHaveLength(1);
+    expect(auditService.logWarn).toHaveBeenCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({
+        apiKey: expect.objectContaining({ allowedChats: ['123@g.us'] }) as unknown,
+        ipAddress: '203.0.113.5',
+        metadata: { surface: 'websocket' },
+      }),
+    );
   });
 
   it('re-validates on subscribe and disconnects a key revoked after connect', async () => {
@@ -154,11 +179,18 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     const sock = makeSocket({ apiKey: 'good' });
     await gateway.handleConnection(asSocket(sock));
 
-    authService.validateApiKey.mockResolvedValueOnce(null); // revoked on the subscribe re-check
+    // validateApiKey throws on a revoked key; it never resolves to a falsy value.
+    authService.validateApiKey.mockRejectedValueOnce(new UnauthorizedException('API key revoked'));
     const res = (await gateway.handleMessage(asSocket(sock), subscribeMsg('sess-1', ['*']))) as WSErrorResponse;
 
     expect(sock.disconnect).toHaveBeenCalled();
     expect(res.code).toBe('UNAUTHORIZED');
+    expect(unauthorizedEmits(sock)).toHaveLength(1);
+    expect(auditService.logWarn).toHaveBeenCalledWith(AuditAction.API_KEY_AUTH_FAILED, {
+      ipAddress: '203.0.113.5',
+      metadata: { surface: 'websocket' },
+      errorMessage: 'API key revoked',
+    });
   });
 
   it('allows subscribe when the key still re-validates', async () => {
@@ -328,6 +360,61 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     }
   });
 
+  it('holds a frame that arrives while the handshake is still validating until it completes', async () => {
+    // socket.io sends CONNECT before Nest runs handleConnection, so a client that subscribes from its
+    // 'connect' handler can land here before the key is stored on the socket.
+    let finishHandshake!: (key: unknown) => void;
+    authService.validateApiKey.mockReturnValueOnce(new Promise(resolve => (finishHandshake = resolve)));
+    authService.validateApiKey.mockResolvedValue({ id: 'k1', name: 'k', allowedSessions: null });
+    const sock = makeSocket({ apiKey: 'good' });
+    const connecting = gateway.handleConnection(asSocket(sock));
+
+    const subscribing = gateway.handleMessage(asSocket(sock), subscribeMsg('sess-1', ['message.received']));
+    finishHandshake({ id: 'k1', name: 'k', allowedSessions: null });
+    await connecting;
+
+    const res = (await subscribing) as WSSubscribedResponse;
+    expect(res.type).toBe('subscribed');
+    expect(sock.disconnect).not.toHaveBeenCalled();
+    expect(sessionRoomJoins(sock)).toEqual([buildRoomName('sess-1', 'message.received')]);
+  });
+
+  it('drops a frame that arrived during a handshake that was then refused', async () => {
+    let failHandshake!: (err: Error) => void;
+    authService.validateApiKey.mockReturnValueOnce(new Promise((_, reject) => (failHandshake = reject)));
+    const sock = makeSocket({ apiKey: 'bad' });
+    sock.disconnect.mockImplementation(() => (sock.disconnected = true));
+    const connecting = gateway.handleConnection(asSocket(sock));
+
+    const subscribing = gateway.handleMessage(asSocket(sock), subscribeMsg('sess-1', ['message.received']));
+    failHandshake(new UnauthorizedException('Invalid API key'));
+    await connecting;
+
+    expect(await subscribing).toBeUndefined();
+    // Only the handshake's own refusal reached the client, and the frame never re-validated.
+    expect(sock.emit).toHaveBeenCalledTimes(1);
+    expect(authService.validateApiKey).toHaveBeenCalledTimes(1);
+    expect(sessionRoomJoins(sock)).toEqual([]);
+  });
+
+  it('answers an unsubscribe without a sessionId with INVALID_SESSION and leaves the rooms alone', async () => {
+    authService.validateApiKey.mockResolvedValue({ name: 'k', allowedSessions: null });
+    const sock = makeSocket({ apiKey: 'good' });
+    await gateway.handleConnection(asSocket(sock));
+    sock.rooms.add(buildRoomName('sess-1', 'message.received'));
+
+    for (const sessionId of [undefined, null, 5]) {
+      const res = (await gateway.handleMessage(asSocket(sock), {
+        type: 'unsubscribe',
+        sessionId,
+        requestId: 'r1',
+      } as unknown as WSClientMessage)) as WSErrorResponse;
+      expect(res.code).toBe('INVALID_SESSION');
+      expect(res.requestId).toBe('r1');
+    }
+    expect(sock.leave).not.toHaveBeenCalledWith(buildRoomName('sess-1', 'message.received'));
+  });
+
   it('forbids a session-scoped key from subscribing to the * wildcard', async () => {
     authService.validateApiKey.mockResolvedValue({ name: 'k', allowedSessions: ['sess-1'] });
     const sock = makeSocket({ apiKey: 'good' });
@@ -452,6 +539,29 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
 
     // The periodic sweep (expiry, revocation, deletion, narrowing) reads the api_keys table, so it is
     // exercised against a real one in events.gateway.authz-sweep.spec.ts rather than a stub here.
+  });
+
+  it('runs the authorization sweep every minute from afterInit until onModuleDestroy', async () => {
+    jest.useFakeTimers();
+    try {
+      const sweep = jest
+        .spyOn(gateway as unknown as { sweepApiKeyAuthorization: () => Promise<void> }, 'sweepApiKeyAuthorization')
+        .mockRejectedValueOnce(new Error('database is locked'))
+        .mockResolvedValue(undefined);
+      gateway.afterInit();
+
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+      // A failed tick is logged, and the next one still runs.
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+
+      gateway.onModuleDestroy();
+      await jest.advanceTimersByTimeAsync(120_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

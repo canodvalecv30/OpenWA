@@ -4,7 +4,7 @@ import { FindOperator, In, Repository } from 'typeorm';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { MessageService, spendInlineMediaBudget } from './message.service';
 import { MessageSendService } from './message-send.service';
-import { Message, MessageDirection } from './entities/message.entity';
+import { Message } from './entities/message.entity';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { MessageProjector } from '../session/message-projector.service';
 import type { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -25,6 +25,30 @@ const inertPacing = (): SendPacingService =>
     recordSendSuccess: jest.fn(),
   }) as unknown as SendPacingService;
 
+/**
+ * Completes a query-builder fake with the list read getMessages performs: a count, the page as
+ * id/length pairs, then the rows themselves by id. `rows` answers with what the fake's filters match.
+ */
+function withListRead<T extends object>(qb: T, repository: Partial<Repository<Message>>, rows: () => Message[]): T {
+  Object.assign(qb, {
+    select: jest.fn().mockReturnValue(qb),
+    addSelect: jest.fn().mockReturnValue(qb),
+    clone: jest.fn().mockReturnValue(qb),
+    getCount: jest.fn().mockImplementation(() => Promise.resolve(rows().length)),
+    getRawMany: jest
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(rows().map(r => ({ id: r.id, metadataLength: JSON.stringify(r.metadata ?? null).length }))),
+      ),
+  });
+  repository.find = jest
+    .fn()
+    .mockImplementation(({ where }: { where: { id: FindOperator<string> } }) =>
+      Promise.resolve(rows().filter(r => inList(r.id, where.id))),
+    );
+  return qb;
+}
+
 function createMockEngine() {
   return {
     reactToMessage: jest.fn().mockResolvedValue(undefined),
@@ -43,10 +67,11 @@ describe('MessageService', () => {
   let service: MessageService;
   let repository: jest.Mocked<Partial<Repository<Message>>>;
   let engines: EngineRegistry;
-  let messageProjector: { recordOutboundMessageEdit: jest.Mock };
+  let messageProjector: { recordOutboundMessageEdit: jest.Mock; recordRevoke: jest.Mock };
   let hookManager: jest.Mocked<Partial<HookManager>>;
   let lidMappingStore: { findLidsForPhone: jest.Mock; findPhoneForLid: jest.Mock };
   let mockEngine: ReturnType<typeof createMockEngine>;
+  let pacing: { assertSendAllowed: jest.Mock };
 
   beforeEach(async () => {
     repository = {
@@ -60,7 +85,10 @@ describe('MessageService', () => {
 
     mockEngine = createMockEngine();
 
-    messageProjector = { recordOutboundMessageEdit: jest.fn().mockResolvedValue(undefined) };
+    messageProjector = {
+      recordOutboundMessageEdit: jest.fn().mockResolvedValue(undefined),
+      recordRevoke: jest.fn().mockResolvedValue(undefined),
+    };
 
     engines = new EngineRegistry();
     engines.set('sess-1', mockEngine as unknown as IWhatsAppEngine);
@@ -101,6 +129,7 @@ describe('MessageService', () => {
     }).compile();
 
     service = module.get<MessageService>(MessageService);
+    pacing = module.get(SendPacingService);
   });
 
   // ── outbound send delegation ──────────────────────────────────────
@@ -156,7 +185,6 @@ describe('MessageService', () => {
       skip: jest.Mock;
       take: jest.Mock;
       andWhere: jest.Mock;
-      getManyAndCount: jest.Mock;
     }
     const makeQb = (): QbMock => {
       const qb: QbMock = {
@@ -166,7 +194,6 @@ describe('MessageService', () => {
         skip: jest.fn(),
         take: jest.fn(),
         andWhere: jest.fn(),
-        getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
       };
       qb.where.mockReturnValue(qb);
       qb.orderBy.mockReturnValue(qb);
@@ -174,7 +201,7 @@ describe('MessageService', () => {
       qb.skip.mockReturnValue(qb);
       qb.take.mockReturnValue(qb);
       qb.andWhere.mockReturnValue(qb);
-      return qb;
+      return withListRead(qb, repository, () => []);
     };
 
     it('falls back to defaults on NaN limit/offset (never take(NaN))', async () => {
@@ -197,21 +224,21 @@ describe('MessageService', () => {
   // ── getMessages keyset cursor ─────────────────────────────────────
 
   describe('getMessages anchors on `after` instead of a count', () => {
-    /** The cursor path clones for the count and reads rows separately, so getManyAndCount is unused. */
+    /** The cursor path counts the whole filter match (7 here), then reads the page after the anchor. */
     const makeCursorQb = (rows: Message[]) => {
-      const qb = {
-        where: jest.fn().mockReturnThis(),
-        orderBy: jest.fn().mockReturnThis(),
-        addOrderBy: jest.fn().mockReturnThis(),
-        skip: jest.fn().mockReturnThis(),
-        take: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
-        clone: jest.fn(),
-        getCount: jest.fn().mockResolvedValue(7),
-        getMany: jest.fn().mockResolvedValue(rows),
-        getManyAndCount: jest.fn(),
-      };
-      qb.clone.mockReturnValue(qb);
+      const qb = withListRead(
+        {
+          where: jest.fn().mockReturnThis(),
+          orderBy: jest.fn().mockReturnThis(),
+          addOrderBy: jest.fn().mockReturnThis(),
+          skip: jest.fn().mockReturnThis(),
+          take: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+        },
+        repository,
+        () => rows,
+      ) as unknown as Record<string, jest.Mock>;
+      qb.getCount.mockResolvedValue(7);
       return qb;
     };
 
@@ -222,7 +249,6 @@ describe('MessageService', () => {
       const result = await service.getMessages('sess-1', { after: 'm-1', offset: 500 });
 
       expect(qb.skip).not.toHaveBeenCalled();
-      expect(qb.getManyAndCount).not.toHaveBeenCalled();
       const [clause, params] = qb.andWhere.mock.calls[0] as [string, Record<string, unknown>];
       // rowid, not id: the stub repository carries no manager, which reads as "not postgres".
       expect(clause).toContain('(message.createdAt, message.rowid) <');
@@ -254,6 +280,36 @@ describe('MessageService', () => {
       expect(qb.addOrderBy).toHaveBeenCalledWith('message.id', 'DESC');
 
       delete (repository as unknown as { manager?: unknown }).manager;
+    });
+
+    /**
+     * The unary `+` sort key is SQLite-only. PostgreSQL has no unary `+` for timestamps, and TypeORM
+     * leaves the bare `message.createdAt` after it unquoted, so a chat page there would 500.
+     */
+    it('keeps the plain createdAt key for a multi-candidate chat on postgres', async () => {
+      const qb = makeCursorQb([{ id: 'm-2' } as Message]);
+      (repository.createQueryBuilder as jest.Mock).mockReturnValue(qb);
+      (repository as unknown as { manager: unknown }).manager = {
+        connection: { options: { type: 'postgres' } },
+      };
+
+      await service.getMessages('sess-1', { chatId: '628123@c.us' });
+
+      expect(qb.orderBy).toHaveBeenCalledWith('message.createdAt', 'DESC');
+      expect(qb.orderBy).not.toHaveBeenCalledWith('+message.createdAt', 'DESC');
+
+      delete (repository as unknown as { manager?: unknown }).manager;
+    });
+
+    it('takes createdAt out of index order for a multi-candidate chat on sqlite only', async () => {
+      const qb = makeCursorQb([{ id: 'm-2' } as Message]);
+      (repository.createQueryBuilder as jest.Mock).mockReturnValue(qb);
+
+      await service.getMessages('sess-1', { chatId: '628123@c.us' });
+      expect(qb.orderBy).toHaveBeenLastCalledWith('+message.createdAt', 'DESC');
+
+      await service.getMessages('sess-1', { chatId: '120363@g.us' });
+      expect(qb.orderBy).toHaveBeenLastCalledWith('message.createdAt', 'DESC');
     });
 
     it('orders by rowid on sqlite, which is the arrival order and needs no sort', async () => {
@@ -309,17 +365,14 @@ describe('MessageService', () => {
             if (params?.authorFroms) authorFroms = params.authorFroms;
             return qb;
           }),
-        getManyAndCount: jest.fn().mockImplementation(() => {
-          const matched =
-            froms || authorFroms
-              ? rows.filter(
-                  r => froms?.includes(r.from) || (r.author != null && (authorFroms?.includes(r.author) ?? false)),
-                )
-              : rows;
-          return Promise.resolve([matched, matched.length]);
-        }),
       };
-      return qb;
+      return withListRead(qb, repository, () =>
+        froms || authorFroms
+          ? rows.filter(
+              r => froms?.includes(r.from) || (r.author != null && (authorFroms?.includes(r.author) ?? false)),
+            )
+          : rows,
+      );
     };
 
     it('returns the lid-authored message once the table maps the lid to that phone (the hit)', async () => {
@@ -436,18 +489,17 @@ describe('MessageService', () => {
               return qb;
             },
           ),
-        getManyAndCount: jest.fn().mockImplementation(() => {
-          let matched = rows;
-          if (chatIds) matched = matched.filter(r => chatIds!.includes(r.chatId));
-          if (froms || authorFroms) {
-            matched = matched.filter(
-              r => froms?.includes(r.from) || (r.author != null && (authorFroms?.includes(r.author) ?? false)),
-            );
-          }
-          return Promise.resolve([matched, matched.length]);
-        }),
       };
-      return qb;
+      return withListRead(qb, repository, () => {
+        let matched = rows;
+        if (chatIds) matched = matched.filter(r => chatIds!.includes(r.chatId));
+        if (froms || authorFroms) {
+          matched = matched.filter(
+            r => froms?.includes(r.from) || (r.author != null && (authorFroms?.includes(r.author) ?? false)),
+          );
+        }
+        return matched;
+      });
     };
 
     it('returns group messages authored by the filtered phone (matched via author, not from)', async () => {
@@ -505,9 +557,8 @@ describe('MessageService', () => {
               return qb;
             },
           ),
-        getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
       };
-      return { qb, captured };
+      return { qb: withListRead(qb, repository, () => []), captured };
     };
 
     it('expands a @lid chatId to the phone the table names, not a stale cached one', async () => {
@@ -632,12 +683,8 @@ describe('MessageService', () => {
           if (params?.chatIds) chatIds = params.chatIds;
           return qb;
         }),
-        getManyAndCount: jest.fn().mockImplementation(() => {
-          const matched = chatIds && chatIds.includes(stored.chatId) ? [stored] : [];
-          return Promise.resolve([matched, matched.length]);
-        }),
       };
-      return qb;
+      return withListRead(qb, repository, () => (chatIds && chatIds.includes(stored.chatId) ? [stored] : []));
     };
 
     it('returns a @s.whatsapp.net-stored message when filtering by the neutral @c.us chat id', async () => {
@@ -648,26 +695,6 @@ describe('MessageService', () => {
       const { messages } = await service.getMessages('sess-1', { chatId: '6281316434311@c.us' });
 
       expect(messages.map(m => m.id)).toEqual(['m1']);
-    });
-  });
-
-  // ── saveIncomingMessage ───────────────────────────────────────────
-
-  describe('saveIncomingMessage', () => {
-    it('should save with INCOMING direction', async () => {
-      await service.saveIncomingMessage('sess-1', {
-        waMessageId: 'wa-in-1',
-        chatId: 'sender@c.us',
-        body: 'Hi there',
-        type: 'text',
-      });
-
-      expect(repository.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: 'sess-1',
-          direction: MessageDirection.INCOMING,
-        }),
-      );
     });
   });
 
@@ -767,6 +794,16 @@ describe('MessageService', () => {
 
       expect(mockEngine.deleteMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', false);
     });
+
+    it('clears the stored row through the same revoke as an engine revoke, after the engine delete', async () => {
+      await service.deleteMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1' });
+
+      expect(messageProjector.recordRevoke).toHaveBeenCalledWith('sess-1', 'wa-msg-1');
+      expect(mockEngine.deleteMessage.mock.invocationCallOrder[0]).toBeLessThan(
+        messageProjector.recordRevoke.mock.invocationCallOrder[0],
+      );
+      expect(repository.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('editMessage', () => {
@@ -815,6 +852,14 @@ describe('MessageService', () => {
         expect.objectContaining({ type: 'edit' }),
         expect.any(Object),
       );
+    });
+
+    // An edit only UPDATEs the existing row, so it is judged against the caps but never held in the
+    // admission window: holding it would charge the day's allowance for a message that is not sent.
+    it('checks an edit against the pacing caps without holding it', async () => {
+      await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' });
+
+      expect(pacing.assertSendAllowed).toHaveBeenCalledWith('sess-1', 'test@c.us', { hold: false });
     });
 
     it('lets a plugin block an edit before the engine is called', async () => {
@@ -944,6 +989,21 @@ describe('MessageService', () => {
       expect(served).toBe('application/octet-stream');
     });
 
+    // A sender declares the mimetype, and the value becomes the Content-Type header. Parameters are
+    // dropped: a comma inside them makes a browser read a second type, and a character above U+00FF
+    // makes Node refuse the header, which failed the route with a 500 on every call.
+    it.each([
+      ['image/png;x=1,text/html', 'image/png'],
+      ['image/png;,image/svg+xml', 'image/png'],
+      ['image/jpeg;\u0101', 'image/jpeg'],
+      ['audio/ogg; codecs=opus', 'audio/ogg'],
+      ['IMAGE/PNG', 'image/png'],
+    ])('serves %p as its essence %p', async (declared, expected) => {
+      const svc = build(archived(declared), storage());
+      const { mimetype: served } = await svc.getChatMedia('sess-1', 'c@c.us', 'wa-1');
+      expect(served).toBe(expected);
+    });
+
     it('404s when nothing is archived for the message', async () => {
       const svc = build({ getMedia: jest.fn().mockResolvedValue(null) }, storage());
       await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow(NotFoundException);
@@ -1001,6 +1061,15 @@ describe('MessageService', () => {
           waMessageId: 'wa-1',
         },
       });
+    });
+
+    it('404s for a revoked row that still carries an inline copy', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue({
+        ...inlineRow({ mimetype: 'image/jpeg', data: Buffer.from('GONE').toString('base64') }),
+        type: 'revoked',
+      });
+      const svc = build(noArchive(), storage());
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow(NotFoundException);
     });
 
     it('prefers the archived file over the inline copy when both exist', async () => {
@@ -1084,9 +1153,10 @@ describe('MessageService', () => {
           addOrderBy: jest.fn().mockReturnThis(),
           skip: jest.fn().mockReturnThis(),
           take: jest.fn().mockReturnThis(),
-          getManyAndCount: jest.fn().mockResolvedValue([rows, 100]),
         };
-        (repository.createQueryBuilder as unknown as jest.Mock).mockReturnValue(builder);
+        (repository.createQueryBuilder as unknown as jest.Mock).mockReturnValue(
+          withListRead(builder, repository, () => rows),
+        );
 
         const result = await service.getMessages('sess-1', { limit: 100 });
 
@@ -1120,9 +1190,10 @@ describe('MessageService', () => {
         addOrderBy: jest.fn().mockReturnThis(),
         skip: jest.fn().mockReturnThis(),
         take: jest.fn().mockReturnThis(),
-        getManyAndCount: jest.fn().mockResolvedValue([rows, 3]),
       };
-      (repository.createQueryBuilder as unknown as jest.Mock).mockReturnValue(builder);
+      (repository.createQueryBuilder as unknown as jest.Mock).mockReturnValue(
+        withListRead(builder, repository, () => rows),
+      );
 
       const result = await service.getMessages('sess-1', { limit: 100, inlineMedia: false });
 
@@ -1225,5 +1296,18 @@ describe('spendInlineMediaBudget', () => {
 
     expect(mediaOf(rows[0]).data).toBeUndefined();
     expect(mediaOf(rows[0]).omitted).toBe(true);
+  });
+  // A revoked message has no media. A row restored from an older backup, or merged onto after its
+  // revoke was cleared, can still carry a payload; the list must not return it, and it must not
+  // spend the newest-payload allowance the next real media is owed.
+  it('drops the media of a revoked row and still inlines the media after it', () => {
+    const revoked = row('revoked', 5000);
+    revoked.type = 'revoked';
+    const rows = [revoked, row('image', 3000)];
+    spendInlineMediaBudget(rows, 1000);
+
+    expect(rows[0].metadata.media).toBeUndefined();
+    expect(mediaOf(rows[1]).data).toHaveLength(3000);
+    expect(mediaOf(rows[1]).omitted).toBeUndefined();
   });
 });

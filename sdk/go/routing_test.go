@@ -2,6 +2,7 @@ package openwa
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -76,6 +77,7 @@ func TestRouting(t *testing.T) {
 		{"Groups.Get", func(c *Client) { c.Groups.Get(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1"},
 		{"Groups.Create", func(c *Client) { c.Groups.Create(ctx, "s1", CreateGroupRequest{}) }, "POST", "/api/sessions/s1/groups"},
 		{"Groups.JoinGroup", func(c *Client) { c.Groups.JoinGroup(ctx, "s1", JoinGroupRequest{}) }, "POST", "/api/sessions/s1/groups/join"},
+		{"Groups.JoinInfo", func(c *Client) { c.Groups.JoinInfo(ctx, "s1", "abc") }, "GET", "/api/sessions/s1/groups/join-info"},
 		{"Groups.AddParticipants", func(c *Client) { c.Groups.AddParticipants(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/participants"},
 		{"Groups.RemoveParticipants", func(c *Client) { c.Groups.RemoveParticipants(ctx, "s1", "g1", nil) }, "DELETE", "/api/sessions/s1/groups/g1/participants"},
 		{"Groups.PromoteParticipants", func(c *Client) { c.Groups.PromoteParticipants(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/participants/promote"},
@@ -97,6 +99,13 @@ func TestRouting(t *testing.T) {
 		{"Webhooks.Update", func(c *Client) { c.Webhooks.Update(ctx, "s1", "w1", UpdateWebhookRequest{}) }, "PUT", "/api/sessions/s1/webhooks/w1"},
 		{"Webhooks.Delete", func(c *Client) { c.Webhooks.Delete(ctx, "s1", "w1") }, "DELETE", "/api/sessions/s1/webhooks/w1"},
 		{"Webhooks.Test", func(c *Client) { c.Webhooks.Test(ctx, "s1", "w1") }, "POST", "/api/sessions/s1/webhooks/w1/test"},
+		{"Webhooks.ListAll", func(c *Client) { c.Webhooks.ListAll(ctx, nil) }, "GET", "/api/webhooks"},
+		{"Webhooks.DeliveryFailures", func(c *Client) { c.Webhooks.DeliveryFailures(ctx, nil) }, "GET", "/api/webhooks/delivery-failures"},
+		{"Webhooks.RedriveDeliveryFailures", func(c *Client) { c.Webhooks.RedriveDeliveryFailures(ctx, nil) }, "POST", "/api/webhooks/delivery-failures/redrive"},
+
+		{"Media.ConversionStatus", func(c *Client) { c.Media.ConversionStatus(ctx, "s1") }, "GET", "/api/sessions/s1/media/convert"},
+		{"Media.ConvertVoice", func(c *Client) { c.Media.ConvertVoice(ctx, "s1", ConvertMediaInput{}) }, "POST", "/api/sessions/s1/media/convert/voice"},
+		{"Media.ConvertVideo", func(c *Client) { c.Media.ConvertVideo(ctx, "s1", ConvertMediaInput{}) }, "POST", "/api/sessions/s1/media/convert/video"},
 
 		{"Chats.List", func(c *Client) { c.Chats.List(ctx, "s1", nil) }, "GET", "/api/sessions/s1/chats"},
 		{"Chats.MarkRead", func(c *Client) { c.Chats.MarkRead(ctx, "s1", MarkChatReadRequest{}) }, "POST", "/api/sessions/s1/chats/read"},
@@ -169,6 +178,25 @@ func TestRouting(t *testing.T) {
 
 		{"Calls.RejectCall", func(c *Client) { c.Calls.RejectCall(ctx, "s1", "call1") }, "POST", "/api/sessions/s1/calls/call1/reject"},
 		{"Calls.CreateLink", func(c *Client) { c.Calls.CreateLink(ctx, "s1", CreateCallLinkRequest{}) }, "POST", "/api/sessions/s1/calls/link"},
+	}
+
+	// Every exported method of every service must have a row, so a new method
+	// cannot ship without its route being asserted.
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		covered[tc.name] = true
+	}
+	ct := reflect.TypeOf(Client{})
+	for i := 0; i < ct.NumField(); i++ {
+		f := ct.Field(i)
+		if !f.IsExported() || f.Type.Kind() != reflect.Pointer {
+			continue
+		}
+		for j := 0; j < f.Type.NumMethod(); j++ {
+			if name := f.Name + "." + f.Type.Method(j).Name; !covered[name] {
+				t.Errorf("%s has no TestRouting row", name)
+			}
+		}
 	}
 
 	for _, tc := range cases {

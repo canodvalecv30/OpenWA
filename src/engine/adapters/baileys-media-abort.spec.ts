@@ -30,7 +30,13 @@ function build(dispatcher?: object): { events: BaileysEvents; warns: string[] } 
     getSocket: () => ({ updateMediaMessage: jest.fn() }) as unknown as WASocket,
     getSocketOrNull: () => null,
     logger: { ...createLogger('BaileysMediaAbortSpec'), warn: (m: string) => warns.push(m) },
-    loadLib: () => Promise.resolve({ normalizeMessageContent: (c: unknown) => c, downloadMediaMessage }),
+    loadLib: () =>
+      Promise.resolve({
+        normalizeMessageContent: (c: unknown) => c,
+        extractMessageContent: (c: unknown) => c,
+        getContentType: (c: Record<string, unknown> | undefined) => Object.keys(c ?? {})[0],
+        downloadMediaMessage,
+      }),
     getFetchDispatcher: () => dispatcher,
     toNeutralJid: (jid: string) => jid,
     normalizedSelfJid: () => '6280000000000@s.whatsapp.net',

@@ -2,6 +2,7 @@ package com.rmyndharis.openwa.http;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.Gson;
@@ -22,6 +23,34 @@ class HttpTest {
     }
 
     @Test
+    void encodeSegmentRefusesEmptyAndDotSegments() {
+        for (String id : new String[] {"", ".", ".."}) {
+            assertThrows(IllegalArgumentException.class, () -> Http.encodeSegment(id), id);
+        }
+        // Dots inside an id are not a dot segment.
+        assertEquals("a.b", Http.encodeSegment("a.b"));
+        assertEquals("...", Http.encodeSegment("..."));
+    }
+
+    @Test
+    void buildUrlRefusesDotSegmentsButKeepsEmptyOnes() {
+        for (String path : new String[] {"/api/sessions/s1/..", "/api/./x", "/api/sessions/s1/labels/%2E%2e"}) {
+            assertThrows(IllegalArgumentException.class, () -> Http.buildUrl("http://h", path, null, gson), path);
+        }
+        assertEquals("http://h/api/sessions/", Http.buildUrl("http://h", "/api/sessions/", null, gson));
+        assertEquals("http://h/a//b", Http.buildUrl("http://h", "/a//b", null, gson));
+        assertEquals("http://h/api/labels/a.b?x=/..", Http.buildUrl("http://h", "/api/labels/a.b?x=/..", null, gson));
+    }
+
+    @Test
+    void buildUrlRefusesPathWithoutLeadingSlash() {
+        // Appended to the base, these would change the host the request and its API key go to.
+        for (String path : new String[] {".evil.example/x", "@evil.example/x", "api/sessions", ""}) {
+            assertThrows(IllegalArgumentException.class, () -> Http.buildUrl("https://api.example.com", path, null, gson), path);
+        }
+    }
+
+    @Test
     void buildUrlStripsTrailingSlashAndPreservesPrefix() {
         assertEquals("http://h:2785/api/sessions", Http.buildUrl("http://h:2785/", "/api/sessions", null, gson));
         assertEquals("http://h/v1/api/sessions", Http.buildUrl("http://h/v1", "/api/sessions", null, gson));
@@ -34,6 +63,14 @@ class HttpTest {
         assertTrue(url.contains("chatId=x%40c.us") || url.contains("chatId=x@c.us"));
         assertTrue(url.contains("limit=50"));
         assertFalse(url.contains("cursor"));
+    }
+
+    @Test
+    void buildUrlAppendsQueryToPathThatAlreadyHasOne() {
+        // A second "?" would fold the query into the last value of the path's own query string.
+        assertEquals(
+            "http://h/m?a=1&limit=50",
+            Http.buildUrl("http://h", "/m?a=1", new Query(null, 50, null), gson));
     }
 
     @Test

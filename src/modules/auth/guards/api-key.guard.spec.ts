@@ -250,11 +250,15 @@ describe('ApiKeyGuard', () => {
       await settle();
       expect(auditService.logWarn).toHaveBeenCalledTimes(10);
 
-      for (const message of ['API key is revoked', 'API key has expired', 'API key not authorized for this session']) {
-        (authService.validateApiKey as jest.Mock).mockRejectedValue(new UnauthorizedException(message));
-        await expect(
-          guard.canActivate(createMockContext({ 'x-api-key': 'stored' }, {}, '198.51.100.74')),
-        ).rejects.toThrow(message);
+      for (const err of [
+        new UnauthorizedException('API key is revoked'),
+        new UnauthorizedException('API key has expired'),
+        new ForbiddenException('API key not authorized for this session'),
+      ]) {
+        (authService.validateApiKey as jest.Mock).mockRejectedValue(err);
+        await expect(guard.canActivate(createMockContext({ 'x-api-key': 'stored' }, {}, '198.51.100.74'))).rejects.toBe(
+          err,
+        );
       }
       await settle();
       expect(auditService.logWarn).toHaveBeenCalledTimes(13);

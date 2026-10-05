@@ -119,6 +119,13 @@ describe('parsePluginPackage', () => {
     );
   });
 
+  it('rejects a package that needs a newer OpenWA with a 400', () => {
+    const bad = { ...validManifest, minOpenWAVersion: '999.0.0' };
+    const zip = zipOf({ 'manifest.json': JSON.stringify(bad), 'index.js': 'x' });
+    expect(() => parsePluginPackage(zip)).toThrow(BadRequestException);
+    expect(() => parsePluginPackage(zip)).toThrow(/requires OpenWA >= 999\.0\.0/);
+  });
+
   it('rejects a non-string required field (numeric main) with a clean 400, not a TypeError/500', () => {
     // A non-string `main` is truthy, so a bare falsy check would pass it through and then crash
     // path.posix.normalize with an uncaught TypeError (HTTP 500). It must be rejected as a 400.
@@ -182,6 +189,36 @@ describe('parsePluginPackage', () => {
     z.addFile('evil.js', Buffer.from('pwned'));
     z.getEntries().find(e => e.entryName === 'evil.js')!.entryName = '../evil.js';
     expect(() => parsePluginPackage(z.toBuffer())).toThrow(/unsafe path/i);
+  });
+
+  it('rejects two entries that normalize to the same path, so the validated manifest is the one written', () => {
+    const z = new AdmZip();
+    z.addFile('manifest.json', Buffer.from(JSON.stringify(validManifest)));
+    z.addFile('index.js', Buffer.from('x'));
+    z.addFile('other.json', Buffer.from(JSON.stringify({ ...validManifest, id: 'other-id' })));
+    z.getEntries().find(e => e.entryName === 'other.json')!.entryName = 'z/../manifest.json';
+    expect(() => parsePluginPackage(z.toBuffer())).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that differ only in case (one file on a case-insensitive filesystem)', () => {
+    const buf = zipOf({ 'manifest.json': JSON.stringify(validManifest), 'index.js': 'x', 'INDEX.js': 'y' });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that collide only under Unicode case folding (long s folds to s)', () => {
+    const other = JSON.stringify({ ...validManifest, id: 'other-id' });
+    const buf = zipOf({ 'manifest.json': JSON.stringify(validManifest), 'index.js': 'x', 'manife\u017Ft.json': other });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that differ only in Unicode normalization (NFC vs NFD)', () => {
+    const buf = zipOf({
+      'manifest.json': JSON.stringify(validManifest),
+      'index.js': 'x',
+      'caf\u00e9.js': 'a',
+      'cafe\u0301.js': 'b',
+    });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
   });
 
   it('rejects a package missing its declared main file', () => {

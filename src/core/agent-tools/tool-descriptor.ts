@@ -11,7 +11,7 @@ export interface ToolDescriptor<I = unknown> {
   /** Input contract: validates the call AND is advertised to the agent. */
   inputSchema: z.ZodType<I>;
   tier: 'read' | 'write';
-  /** True for irreversible/dangerous ops (none are exposed in v1). */
+  /** True for irreversible or state-overwriting ops; surfaced to MCP clients as destructiveHint. */
   destructive?: boolean;
   /** Safe to repeat without additional effect. Defaults to (tier === 'read'). */
   idempotent?: boolean;

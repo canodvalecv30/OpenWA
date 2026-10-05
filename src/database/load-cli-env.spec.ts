@@ -48,4 +48,17 @@ describe('loadCliEnv (migration CLI env precedence)', () => {
 
     expect(process.env[KEY]).toBe('postgres');
   });
+
+  it("loads both files without printing dotenv's banner to stdout", () => {
+    fs.writeFileSync(path.join(dir, '.env'), 'DATABASE_TYPE=postgres\n');
+    fs.writeFileSync(path.join(dir, 'data', '.env.generated'), 'DATABASE_TYPE=sqlite\n');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      loadCliEnv(dir);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

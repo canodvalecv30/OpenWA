@@ -5,6 +5,7 @@ import static com.rmyndharis.openwa.http.Http.encodeSegment;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.BinaryResponse;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.BatchCancelResponse;
 import com.rmyndharis.openwa.model.BatchStatusResponse;
 import com.rmyndharis.openwa.model.BulkMessageResponse;
 import com.rmyndharis.openwa.model.ChatHistoryMessage;
@@ -58,87 +59,141 @@ public final class MessagesResource {
 
     /** Send a text message. */
     public MessageResponse sendText(String sessionId, SendTextRequest body) {
+        return sendText(sessionId, body, null);
+    }
+
+    public MessageResponse sendText(String sessionId, SendTextRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-text",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** Send an image (url or base64). */
     public MessageResponse sendImage(String sessionId, SendMediaRequest body) {
-        return sendMedia(sessionId, "send-image", body);
+        return sendImage(sessionId, body, null);
+    }
+
+    public MessageResponse sendImage(String sessionId, SendMediaRequest body, String idempotencyKey) {
+        return sendMedia(sessionId, "send-image", body, idempotencyKey);
     }
 
     /** Send a video (url or base64). */
     public MessageResponse sendVideo(String sessionId, SendMediaRequest body) {
-        return sendMedia(sessionId, "send-video", body);
+        return sendVideo(sessionId, body, null);
+    }
+
+    public MessageResponse sendVideo(String sessionId, SendMediaRequest body, String idempotencyKey) {
+        return sendMedia(sessionId, "send-video", body, idempotencyKey);
     }
 
     /** Send an audio file (url or base64). */
     public MessageResponse sendAudio(String sessionId, SendAudioRequest body) {
-        return sendMedia(sessionId, "send-audio", body);
+        return sendAudio(sessionId, body, null);
     }
 
-    /** Send a document (url or base64; {@code filename} required). */
+    public MessageResponse sendAudio(String sessionId, SendAudioRequest body, String idempotencyKey) {
+        return sendMedia(sessionId, "send-audio", body, idempotencyKey);
+    }
+
+    /**
+     * Send a document (url or base64). {@code filename} is optional and is the name the recipient
+     * sees; without it the gateway uses {@code "file"}, or the URL basename for a URL send on
+     * whatsapp-web.js.
+     */
     public MessageResponse sendDocument(String sessionId, SendMediaRequest body) {
-        return sendMedia(sessionId, "send-document", body);
+        return sendDocument(sessionId, body, null);
+    }
+
+    public MessageResponse sendDocument(String sessionId, SendMediaRequest body, String idempotencyKey) {
+        return sendMedia(sessionId, "send-document", body, idempotencyKey);
     }
 
     /** Send a sticker (url or base64). */
     public MessageResponse sendSticker(String sessionId, SendMediaRequest body) {
-        return sendMedia(sessionId, "send-sticker", body);
+        return sendSticker(sessionId, body, null);
+    }
+
+    public MessageResponse sendSticker(String sessionId, SendMediaRequest body, String idempotencyKey) {
+        return sendMedia(sessionId, "send-sticker", body, idempotencyKey);
     }
 
     /** Send a location. */
     public MessageResponse sendLocation(String sessionId, SendLocationRequest body) {
+        return sendLocation(sessionId, body, null);
+    }
+
+    public MessageResponse sendLocation(String sessionId, SendLocationRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-location",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** Send a contact card. */
     public MessageResponse sendContact(String sessionId, SendContactRequest body) {
+        return sendContact(sessionId, body, null);
+    }
+
+    public MessageResponse sendContact(String sessionId, SendContactRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-contact",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** Render and send a stored message template. */
     public MessageResponse sendTemplate(String sessionId, SendTemplateRequest body) {
+        return sendTemplate(sessionId, body, null);
+    }
+
+    public MessageResponse sendTemplate(String sessionId, SendTemplateRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-template",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** Send a native WhatsApp poll (2–12 options). */
     public MessageResponse sendPoll(String sessionId, SendPollRequest body) {
+        return sendPoll(sessionId, body, null);
+    }
+
+    public MessageResponse sendPoll(String sessionId, SendPollRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-poll",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** Reply to a specific message. */
     public MessageResponse reply(String sessionId, ReplyMessageRequest body) {
+        return reply(sessionId, body, null);
+    }
+
+    public MessageResponse reply(String sessionId, ReplyMessageRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/reply",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /**
@@ -156,12 +211,17 @@ public final class MessagesResource {
 
     /** Forward a message to another chat. */
     public MessageResponse forward(String sessionId, ForwardMessageRequest body) {
+        return forward(sessionId, body, null);
+    }
+
+    public MessageResponse forward(String sessionId, ForwardMessageRequest body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/forward",
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 
     /** React to a message (an empty {@code emoji} removes the reaction). */
@@ -306,25 +366,33 @@ public final class MessagesResource {
             BatchStatusResponse.class);
     }
 
-    /** Cancel a running batch. Requires an OPERATOR-level key. */
-    public BatchStatusResponse cancelBatch(String sessionId, String batchId) {
+    /**
+     * Cancel a running batch. Requires an OPERATOR-level key. The reply carries no per-item results;
+     * call {@link #batchStatus} for those.
+     */
+    public BatchCancelResponse cancelBatch(String sessionId, String batchId) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/batch/" + encodeSegment(batchId) + "/cancel",
             null,
             null,
-            BatchStatusResponse.class);
+            BatchCancelResponse.class);
     }
 
     // ── Internal ───────────────────────────────────────────────────────
 
     /** POST {@code /messages/send-<kind>} for the five media send helpers. */
     private MessageResponse sendMedia(String sessionId, String kind, Object body) {
+        return sendMedia(sessionId, kind, body, null);
+    }
+
+    private MessageResponse sendMedia(String sessionId, String kind, Object body, String idempotencyKey) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/" + kind,
             null,
             body,
-            MessageResponse.class);
+            MessageResponse.class,
+            idempotencyKey);
     }
 }

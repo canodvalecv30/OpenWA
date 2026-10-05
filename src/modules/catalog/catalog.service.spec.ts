@@ -4,7 +4,7 @@ import { EngineRegistry } from '../../engine/engine-registry.service';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 import type { SendPacingService } from '../message/send-pacing.service';
-import type { HookManager } from '../../core/hooks';
+import { HookManager } from '../../core/hooks';
 import type {
   IWhatsAppEngine,
   Catalog,
@@ -128,7 +128,7 @@ describe('CatalogService', () => {
 
       await expect(svc.sendProduct('s1', '628123@c.us', 'prod-1', 'Back in stock!')).resolves.toBe(sent);
       expect(order).toEqual(['pace', 'send']);
-      expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', '628123@c.us');
+      expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', '628123@c.us', { untilSettled: true });
       expect(sendProduct).toHaveBeenCalledWith('628123@c.us', 'prod-1', 'Back in stock!');
     });
 
@@ -192,6 +192,51 @@ describe('CatalogService', () => {
       expect(sendProduct).not.toHaveBeenCalled();
     });
 
+    // A product send writes no row of its own, so one that provably never went out must stop counting
+    // against the pacing caps at once; one whose outcome is unknown may still be echoed, and stays held.
+    it.each([
+      ['a plugin vetoes it', { veto: true }, true],
+      ['the session is not started', { noEngine: true }, true],
+      ['the engine cannot send products', { engineError: new EngineNotSupportedError('sendProduct') }, true],
+      ['the engine fails with an unknown outcome', { engineError: new Error('socket closed') }, false],
+    ])('when %s, releases its pacing admission: %p', async (_label, setup, released) => {
+      const {
+        veto = false,
+        noEngine = false,
+        engineError,
+      } = setup as {
+        veto?: boolean;
+        noEngine?: boolean;
+        engineError?: Error;
+      };
+      const release = jest.fn();
+      const pacing = { assertSendAllowed: jest.fn().mockResolvedValue(release) };
+      const hookManager = veto ? { execute: jest.fn().mockResolvedValue({ continue: false }) } : passThroughHooks();
+      const sendProduct = jest.fn().mockRejectedValue(engineError);
+      const { svc } = makeService(noEngine ? undefined : { sendProduct }, pacing, hookManager);
+
+      await expect(svc.sendProduct('s1', '628123@c.us', 'prod-1')).rejects.toBeDefined();
+      // Held otherwise for a window from the engine's answer, while the own-send echo may still land.
+      expect(release.mock.calls).toEqual([[!released]]);
+    });
+
+    // No row exists until the own-send echo, after the engine call, which a catalog query and an image
+    // fetch can stretch past the hold window: the admission is held until the engine returns.
+    it('holds its pacing admission until the engine call returns', async () => {
+      const release = jest.fn();
+      const pacing = { assertSendAllowed: jest.fn().mockResolvedValue(release) };
+      let settledDuringSend = -1;
+      const sendProduct = jest.fn().mockImplementation(() => {
+        settledDuringSend = release.mock.calls.length;
+        return Promise.resolve(sent);
+      });
+      const { svc } = makeService({ sendProduct }, pacing, passThroughHooks());
+
+      await expect(svc.sendProduct('s1', '628123@c.us', 'prod-1')).resolves.toBe(sent);
+      expect(settledDuringSend).toBe(0);
+      expect(release.mock.calls).toEqual([[true]]);
+    });
+
     it('propagates an engine failure from sendProduct', async () => {
       const down = new Error('socket closed');
       const sendProduct = jest.fn().mockRejectedValue(down);
@@ -219,6 +264,17 @@ describe('CatalogService', () => {
       await expect(svc.sendProduct('s1', '628123@c.us', 'prod-404')).rejects.toBeInstanceOf(NotFoundException);
       await expect(svc.sendProduct('s1', '628123@c.us', 'prod-1')).rejects.toBeInstanceOf(EngineNotSupportedError);
       expect(pacing.recordSendFailure).not.toHaveBeenCalled();
+    });
+
+    // A JSON null body passes the DTO (IsOptional) and, with no plugin installed, the gate hands the
+    // caller's own envelope back. It must send like an absent body, not fail as a plugin's bad output.
+    it('sends a null body as no body when no plugin is installed', async () => {
+      const sendProduct = jest.fn().mockResolvedValue(sent);
+      const { svc } = makeService({ sendProduct }, undefined, new HookManager() as never);
+
+      await expect(svc.sendProduct('s1', '628123@c.us', 'prod-1', null as unknown as string)).resolves.toBe(sent);
+
+      expect(sendProduct).toHaveBeenCalledWith('628123@c.us', 'prod-1', undefined);
     });
   });
 });

@@ -48,9 +48,18 @@ export class IngressEvent {
 
   // NULL once the dispatch outcome is recorded (see the storage-shape comment above). The reconciler
   // only replays 'pending' rows, which always still carry the payload. NULL on a 'pending' row is
-  // unreadable history (e.g. imported without one) — the reconciler skips it loudly.
+  // unreadable history (e.g. imported without one); the reconciler's sweep query excludes it silently,
+  // and it stays pending until INGRESS_DEDUP_RETENTION_DAYS prunes it.
+  // `method` is the request's HTTP method, so a replay reaches the handler as the live attempt did. Rows
+  // written before it was persisted lack it, and dispatch falls back to 'POST' for them.
   @Column({ type: jsonColumnType(), nullable: true })
-  payload!: { headers: Record<string, string>; query: Record<string, string>; body: string; rawBody: string } | null;
+  payload!: {
+    headers: Record<string, string>;
+    query: Record<string, string>;
+    body: string;
+    rawBody: string;
+    method?: string;
+  } | null;
 
   // sha256 hex of the rawBody, written at recordOrSkip. Survives payload retirement so operators can
   // still correlate a dedup row with a provider delivery without storing the payload. NULL on rows

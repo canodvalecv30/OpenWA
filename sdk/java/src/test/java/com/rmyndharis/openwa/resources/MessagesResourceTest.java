@@ -2,12 +2,16 @@ package com.rmyndharis.openwa.resources;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.rmyndharis.openwa.ClientConfig;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.BinaryResponse;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.BatchCancelResponse;
 import com.rmyndharis.openwa.model.BulkMessageContent;
 import com.rmyndharis.openwa.model.BulkMessageItem;
 import com.rmyndharis.openwa.model.BulkMessageType;
@@ -33,8 +37,10 @@ import com.rmyndharis.openwa.model.VotePollRequest;
 import com.rmyndharis.openwa.model.UnpinMessageRequest;
 import com.rmyndharis.openwa.support.MockTransport;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
 class MessagesResourceTest {
@@ -43,6 +49,91 @@ class MessagesResourceTest {
         ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build());
 
     private static final String MSG = "{\"messageId\":\"m1\",\"timestamp\":123}";
+
+    @Test
+    void sendsKeepKeysLocalToEachCallAndPreserveJson() {
+        var media = SendMediaRequest.builder().chatId("c@c.us").url("http://media").caption("caption").build();
+        Map<String, Consumer<String>> sends = new LinkedHashMap<>();
+        sends.put("send-text", key -> client.messages.sendText(
+            "s", SendTextRequest.builder().chatId("c@c.us").text("hi").mentions(List.of("1@c.us")).build(), key));
+        sends.put("send-image", key -> client.messages.sendImage("s", media, key));
+        sends.put("send-video", key -> client.messages.sendVideo("s", media, key));
+        sends.put("send-audio", key -> client.messages.sendAudio(
+            "s", SendAudioRequest.builder().chatId("c@c.us").url("http://audio").ptt(true).build(), key));
+        sends.put("send-document", key -> client.messages.sendDocument(
+            "s", SendMediaRequest.builder().chatId("c@c.us").base64("YQ==")
+                .mimetype("application/pdf").filename("a.pdf").build(), key));
+        sends.put("send-sticker", key -> client.messages.sendSticker("s", media, key));
+        sends.put("send-location", key -> client.messages.sendLocation(
+            "s", SendLocationRequest.builder().chatId("c@c.us").latitude(1.0).longitude(2.0).build(), key));
+        sends.put("send-contact", key -> client.messages.sendContact(
+            "s", SendContactRequest.builder().chatId("c@c.us").contactName("A").contactNumber("628").build(), key));
+        sends.put("send-template", key -> client.messages.sendTemplate(
+            "s", SendTemplateRequest.builder().chatId("c@c.us").templateName("welcome")
+                .vars(Map.of("name", "A")).build(), key));
+        sends.put("send-poll", key -> client.messages.sendPoll(
+            "s", SendPollRequest.builder().chatId("c@c.us").name("Question").options(List.of("A", "B")).build(), key));
+        sends.put("reply", key -> client.messages.reply(
+            "s", ReplyMessageRequest.builder().chatId("c@c.us").quotedMessageId("q").text("reply").build(), key));
+        sends.put("forward", key -> client.messages.forward(
+            "s", ForwardMessageRequest.builder().fromChatId("a@c.us").toChatId("b@c.us").messageId("m").build(), key));
+
+        tx.respond(201, MSG);
+        for (var entry : sends.entrySet()) {
+            entry.getValue().accept(null);
+            String originalBody = tx.lastRequest().body();
+            assertFalse(tx.lastRequest().headers().containsKey("Idempotency-Key"), entry.getKey());
+            for (String key : List.of("first-key", "second-key")) {
+                entry.getValue().accept(key);
+                assertEquals(HttpMethod.POST, tx.lastRequest().method(), entry.getKey());
+                assertEquals("http://h/api/sessions/s/messages/" + entry.getKey(), tx.lastRequest().url());
+                assertEquals(key, tx.lastRequest().headers().get("Idempotency-Key"), entry.getKey());
+                assertEquals(originalBody, tx.lastRequest().body(), entry.getKey());
+            }
+            entry.getValue().accept(null);
+            assertFalse(tx.lastRequest().headers().containsKey("Idempotency-Key"), entry.getKey());
+            assertEquals(originalBody, tx.lastRequest().body(), entry.getKey());
+        }
+    }
+
+    @Test
+    void explicitKeyOverridesMixedCaseDefaultsWithoutChangingLaterCalls() {
+        var transport = new MockTransport().respond(201, MSG);
+        Map<String, String> headers = Map.of("iDeMpOtEnCy-KeY", "default-key", "X-Trace", "trace");
+        var configured = new OpenWAClient(ClientConfig.builder().baseUrl("http://h").apiKey("k")
+            .defaultHeaders(headers).transport(transport).build());
+        var body = SendTextRequest.builder().chatId("c@c.us").text("hi").build();
+        configured.messages.sendText("s", body, "explicit-key");
+        assertEquals("explicit-key", transport.lastRequest().headers().get("Idempotency-Key"));
+        assertEquals(1L, transport.lastRequest().headers().keySet().stream()
+            .filter(name -> name.equalsIgnoreCase("Idempotency-Key")).count());
+        assertEquals("trace", transport.lastRequest().headers().get("X-Trace"));
+        assertEquals("default-key", headers.get("iDeMpOtEnCy-KeY"));
+        configured.messages.sendText("s", body);
+        assertEquals("default-key", transport.lastRequest().headers().get("iDeMpOtEnCy-KeY"));
+    }
+
+    @Test
+    void invalidKeysAreRejectedBeforeTransport() {
+        tx.respond(201, MSG);
+        var body = SendTextRequest.builder().chatId("c@c.us").text("hi").build();
+        client.messages.sendText("s", body, "valid-key");
+        var previous = tx.lastRequest();
+        for (String key : List.of("", "has space", " key", "key ", "key\n", "key\t", "caf\u00e9", "x".repeat(256))) {
+            assertThrows(IllegalArgumentException.class, () -> client.messages.sendText("s", body, key));
+            assertSame(previous, tx.lastRequest());
+        }
+    }
+
+    @Test
+    void visibleAsciiKeysAtBothLengthLimitsAreAccepted() {
+        tx.respond(201, MSG);
+        var body = SendTextRequest.builder().chatId("c@c.us").text("hi").build();
+        for (String key : List.of("!", "x".repeat(255))) {
+            client.messages.sendText("s", body, key);
+            assertEquals(key, tx.lastRequest().headers().get("Idempotency-Key"));
+        }
+    }
 
     @Test
     void listHitsMessagesPathWithQuery() {
@@ -368,8 +459,13 @@ class MessagesResourceTest {
 
     @Test
     void cancelBatchHitsCancelPath() {
-        tx.respond(200, "{\"batchId\":\"b1\",\"status\":\"cancelled\"}");
-        client.messages.cancelBatch("s", "b1");
+        tx.respond(
+            200,
+            "{\"batchId\":\"b1\",\"status\":\"cancelled\","
+                + "\"progress\":{\"total\":2,\"sent\":1,\"failed\":0,\"pending\":0,\"cancelled\":1}}");
+        BatchCancelResponse res = client.messages.cancelBatch("s", "b1");
+        assertEquals("b1", res.batchId());
+        assertEquals(1, res.progress().cancelled());
         assertEquals("http://h/api/sessions/s/messages/batch/b1/cancel", tx.lastRequest().url());
         assertEquals(HttpMethod.POST, tx.lastRequest().method());
     }

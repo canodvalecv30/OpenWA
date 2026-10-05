@@ -14,6 +14,7 @@
 import '../test-helpers/register-hooks.ts';
 import { test, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Session } from '../services/api';
@@ -100,10 +101,15 @@ function resetFetchCalls(): void {
   startFailure = null;
   startGate = null;
   startResult = null;
+  createFailure = null;
   stopFailure = null;
+  forceKillFailure = null;
+  confirmGate = null;
   qrGate = null;
   listGate = null;
   pairingGate = null;
+  configPatchGate = null;
+  proxyPatchGate = null;
   afterMutation = null;
 }
 
@@ -129,8 +135,14 @@ let startFailure: { status: number; message: string; leaves?: Partial<Session> }
 // When set, a successful POST .../start answers with the session's row merged with `answer`, and applies
 // `leaves` (by default `answer` itself) to the row the page reads back, instead of answering a stopped row.
 let startResult: { answer: Partial<Session>; leaves?: Partial<Session> } | null = null;
+// When set, the next POST /api/sessions answers with this error. Spent by that one create.
+let createFailure: { status: number; message: string } | null = null;
 // When set, POST .../stop answers with this error.
 let stopFailure: { status: number; message: string } | null = null;
+// When set, POST .../force-kill answers with this status and body.
+let forceKillFailure: { status: number; body: Record<string, unknown> } | null = null;
+// When set, DELETE /api/sessions/:id and POST .../force-kill answer only once this settles.
+let confirmGate: Promise<void> | null = null;
 // When set, POST .../start answers, whichever way it answers, only once this settles.
 let startGate: Promise<void> | null = null;
 // When set, GET .../qr for that one session answers only once `until` settles.
@@ -140,6 +152,10 @@ let qrGate: { sessionId: string; until: Promise<void> } | null = null;
 let listGate: Promise<void> | null = null;
 // When set, POST .../pairing-code answers only once this settles.
 let pairingGate: Promise<void> | null = null;
+// When set, PATCH .../config is applied and answered only once this settles.
+let configPatchGate: Promise<void> | null = null;
+// When set, PATCH .../proxy answers only once this settles.
+let proxyPatchGate: Promise<void> | null = null;
 // When set, runs on the macrotask after a create or delete has answered: a push that lands before
 // React has rendered what that answer wrote.
 let afterMutation: (() => void) | null = null;
@@ -184,6 +200,11 @@ function installFetchStub(): void {
     }
 
     if (method === 'POST' && path === '/api/sessions') {
+      if (createFailure) {
+        const { status, message } = createFailure;
+        createFailure = null;
+        return Promise.resolve(jsonResponse({ message }, status));
+      }
       if (afterMutation) setImmediate(afterMutation);
       const payload = body as { name?: string; proxyUrl?: string; proxyType?: string } | undefined;
       const name = payload?.name ?? 'unnamed';
@@ -207,7 +228,7 @@ function installFetchStub(): void {
     }
     if (method === 'DELETE' && sessionIdMatch) {
       if (afterMutation) setImmediate(afterMutation);
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return (confirmGate ?? Promise.resolve()).then(() => new Response(null, { status: 204 }));
     }
 
     const configMatch = path.match(/^\/api\/sessions\/([^/]+)\/config$/);
@@ -216,9 +237,12 @@ function installFetchStub(): void {
       if (method === 'PATCH') {
         // Per-test switch: the revert case needs the write to fail while the initial read succeeds,
         // which a single stub response cannot express.
-        if (configPatchFails) return Promise.resolve(jsonResponse({ message: 'nope' }, 500));
-        Object.assign(sessionConfig, body as Record<string, unknown>);
-        return Promise.resolve(jsonResponse({ ...sessionConfig }));
+        const answer = (): Response => {
+          if (configPatchFails) return jsonResponse({ message: 'nope' }, 500);
+          Object.assign(sessionConfig, body as Record<string, unknown>);
+          return jsonResponse({ ...sessionConfig });
+        };
+        return configPatchGate ? configPatchGate.then(answer) : Promise.resolve(answer());
       }
     }
 
@@ -240,7 +264,8 @@ function installFetchStub(): void {
             hasCredentials: !!(parsed.username || parsed.password),
           };
         }
-        return Promise.resolve(jsonResponse({ ...sessionProxy }));
+        const answer = jsonResponse({ ...sessionProxy });
+        return proxyPatchGate ? proxyPatchGate.then(() => answer) : Promise.resolve(answer);
       }
     }
 
@@ -273,6 +298,9 @@ function installFetchStub(): void {
         if (lifecycleMatch[2] === 'stop' && stopFailure) {
           return jsonResponse({ message: stopFailure.message }, stopFailure.status);
         }
+        if (lifecycleMatch[2] === 'force-kill' && forceKillFailure) {
+          return jsonResponse(forceKillFailure.body, forceKillFailure.status);
+        }
         if (isStart && startResult) {
           const answered = { ...base, ...startResult.answer };
           if (found) Object.assign(found, startResult.leaves ?? startResult.answer);
@@ -281,6 +309,7 @@ function installFetchStub(): void {
         return jsonResponse({ ...base, status: 'disconnected', engineLoaded: false });
       };
       if (isStart && startGate) return startGate.then(answer);
+      if (lifecycleMatch[2] === 'force-kill' && confirmGate) return confirmGate.then(answer);
       return Promise.resolve(answer());
     }
 
@@ -358,7 +387,7 @@ test('the session list renders, and action buttons gate on engineLoaded rather t
   within(staleCard).getByRole('button', { name: 'Stop' });
   within(staleCard).getByRole('button', { name: 'Unlink' });
   within(staleCard).getByRole('button', { name: 'Kill Stuck' });
-  assert.equal(within(staleCard).queryByRole('button', { name: 'Start' }), null);
+  assert.equal(within(staleCard).queryByRole('button', { name: 'Start' }) === null, true);
 
   const qrCard = screen.getByText('new-device').closest('.session-card') as HTMLElement;
   within(qrCard).getByRole('button', { name: 'Show QR' });
@@ -377,8 +406,8 @@ test('a linked session that is reconnecting keeps its identity rows, not the pai
   within(card).getByText('Starting...');
   // What must NOT be there: the pairing placeholder, which claims a QR is coming for an account that
   // is already linked.
-  assert.equal(within(card).queryByText('Preparing QR code...'), null);
-  assert.equal(card.querySelector('.qr-placeholder'), null);
+  assert.equal(within(card).queryByText('Preparing QR code...') === null, true);
+  assert.equal(card.querySelector('.qr-placeholder') === null, true);
   // What must be there: the number the operator needs to recognise the account.
   within(card).getByText('15550002222');
 });
@@ -415,6 +444,50 @@ test('creating a session issues POST /api/sessions with the entered name', async
   });
 
   await screen.findByText('backup-bot');
+});
+
+test('a create that succeeds after a refused one clears the refusal from the page', async () => {
+  const { screen, fireEvent, waitFor, within } = rtl;
+  resetFetchCalls();
+  createFailure = { status: 409, message: 'Session name already in use' };
+  renderSessions();
+
+  await screen.findByText('new-device');
+  fireEvent.click(screen.getByRole('button', { name: 'New Session' }));
+  const dialog = await screen.findByRole('dialog');
+  fireEvent.change(within(dialog).getByPlaceholderText('e.g., marketing-bot'), { target: { value: 'retry-bot' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+  // The refusal shows twice: in its toast and in the page banner.
+  await waitFor(() => assert.equal(screen.getAllByText('Session name already in use').length, 2));
+  const banner = screen.getAllByText('Session name already in use').find(el => !el.closest('.toast'));
+  assert.ok(banner, 'expected the refusal in the page banner');
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+  await screen.findByText('retry-bot');
+  assert.equal(banner.isConnected, false, 'the refused create left its banner after the retry succeeded');
+});
+
+test('a refused and then successful create leave a failed list read in the banner', async () => {
+  const { screen, fireEvent, within } = rtl;
+  resetFetchCalls();
+  sessionListFailures = 1;
+  createFailure = { status: 409, message: 'Session name already in use' };
+  // No connect, so the recovery effect does not re-read the list behind the test's back.
+  holdConnect();
+  renderSessions();
+
+  await screen.findByText('gateway unavailable');
+  fireEvent.click(screen.getByRole('button', { name: 'New Session' }));
+  const dialog = await screen.findByRole('dialog');
+  fireEvent.change(within(dialog).getByPlaceholderText('e.g., marketing-bot'), { target: { value: 'retry-bot' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+  // The refusal is reported by its toast; the banner keeps the read failure, which still describes the list.
+  await screen.findAllByText('Session name already in use');
+  assert.ok(screen.queryByText('gateway unavailable'), 'the refused create replaced the failed read banner');
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+  await screen.findByText('retry-bot');
+  assert.ok(screen.queryByText('gateway unavailable'), 'the create cleared the failed read banner');
 });
 
 test('Enter in the name field follows the same gate as the Create button', async () => {
@@ -482,6 +555,56 @@ test('saving proxy settings issues PATCH /api/sessions/:id/proxy', async () => {
       proxyUrl: 'http://user:pass@proxy.internal:8080',
     });
   });
+});
+
+// The API accepts a session proxy only from an ADMIN key, so an operator is not offered the controls.
+test('an operator key is not offered proxy writes, in the create modal or the proxy modal', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_user_role', 'operator');
+  try {
+    renderSessions();
+    await screen.findByText('new-device');
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Session' }));
+    const createDialog = await screen.findByRole('dialog');
+    assert.equal(createDialog.querySelector('#create-use-proxy') === null, true);
+    fireEvent.click(within(createDialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+    const qrCard = screen.getByText('new-device').closest('.session-card') as HTMLElement;
+    fireEvent.click(within(qrCard).getByRole('button', { name: 'Proxy' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => assert.ok(findFetchCall('GET', '/api/sessions/sess-qr-1/proxy')));
+    const toggle = (await within(dialog).findByRole('checkbox')) as HTMLInputElement;
+    assert.equal(toggle.disabled, true);
+    assert.equal(within(dialog).queryByRole('button', { name: 'Save' }) === null, true);
+  } finally {
+    window.sessionStorage.setItem('openwa_user_role', 'admin');
+  }
+});
+
+// Creating a session and changing its proxy are refused for any session-scoped key, admin included,
+// so neither is offered; the proxy settings stay readable.
+test('a session-scoped admin key is offered neither New Session nor a proxy Save', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_key_scoped', 'true');
+  try {
+    renderSessions();
+    await screen.findByText('new-device');
+    assert.equal(screen.queryByRole('button', { name: 'New Session' }) === null, true);
+
+    const qrCard = screen.getByText('new-device').closest('.session-card') as HTMLElement;
+    fireEvent.click(within(qrCard).getByRole('button', { name: 'Proxy' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => assert.ok(findFetchCall('GET', '/api/sessions/sess-qr-1/proxy')));
+    const toggle = (await within(dialog).findByRole('checkbox')) as HTMLInputElement;
+    assert.equal(toggle.disabled, true);
+    assert.equal(within(dialog).queryByRole('button', { name: 'Save' }) === null, true);
+  } finally {
+    window.sessionStorage.removeItem('openwa_key_scoped');
+  }
 });
 
 test('a typed pairing phone number survives toggling to the QR tab and back', async () => {
@@ -1269,6 +1392,45 @@ test('a list read in flight does not undo a create, a stop or a delete', async (
   }
 });
 
+test('a list read in flight does not undo a start', async () => {
+  const { screen, fireEvent, within, waitFor, act } = rtl;
+  resetFetchCalls();
+  window.sessionStorage.setItem('openwa_api_key', 'test-key');
+  startResult = { answer: { status: 'initializing', engineLoaded: true } };
+  SESSIONS.push({ ...SESSION_QR, id: 'sess-start-race', name: 'start-race', status: 'created', engineLoaded: false });
+  const releases: (() => void)[] = [];
+  const gateNextRead = () => {
+    listGate = new Promise<void>(resolve => releases.push(resolve));
+  };
+  try {
+    renderSessions();
+    const card = (await screen.findByText('start-race')).closest('.session-card') as HTMLElement;
+    const reads = () => fetchCalls.filter(c => c.method === 'GET' && c.path === '/api/sessions').length;
+
+    // A push's read snapshots the row before the start and answers late.
+    gateNextRead();
+    const before = reads();
+    pushSessionStatus(SESSION_TIMELOCKED.id, 'action_required');
+    await waitFor(() => assert.equal(reads(), before + 1));
+
+    // The start's own re-read is held too, so the older read answers first.
+    gateNextRead();
+    fireEvent.click(within(card).getByRole('button', { name: 'Start' }));
+    await waitFor(() => assert.equal(reads(), before + 2));
+    assert.ok(!within(card).queryByRole('button', { name: 'Start' }), 'the start answer was not rendered');
+
+    releases[0]();
+    await act(() => new Promise<void>(resolve => setTimeout(resolve, 20)));
+    assert.ok(
+      !within(card).queryByRole('button', { name: 'Start' }),
+      'a read older than the start put the session back to not started',
+    );
+  } finally {
+    releases.forEach(release => release());
+    SESSIONS.pop();
+  }
+});
+
 // A push for another session, handled before React renders a create or a delete, must patch the list
 // that write produced rather than the one on screen before it.
 test('a status push landing right after a create or a delete keeps what it wrote', async () => {
@@ -1393,7 +1555,7 @@ test('an unrestricted session shows no restriction row', async () => {
 
   const card = (await screen.findByText('stale-engine')).closest('.session-card') as HTMLElement;
 
-  assert.equal(within(card).queryByText('Restriction'), null);
+  assert.equal(within(card).queryByText('Restriction') === null, true);
 });
 
 // ── Live feed banner ─────────────────────────────────────────────────────────
@@ -1593,6 +1755,139 @@ test('a rejected write reverts the toggle instead of leaving it showing a state 
   configPatchFails = false;
 });
 
+// Close stays enabled while a toggle is saving, so another session's modal can be open by the time the
+// answer lands. That answer, or the revert of a failed one, belongs to the session it was sent for.
+test('a toggle answer that lands after its modal closed does not change another session', async () => {
+  const { screen, within, fireEvent, waitFor } = rtl;
+  resetFetchCalls();
+  sessionConfig = { autoRejectCalls: false, maxReconnectAttempts: null, reconnectBaseDelay: 5000 };
+  configPatchFails = false;
+  let release!: () => void;
+  configPatchGate = new Promise<void>(resolve => (release = resolve));
+  renderSessions();
+
+  fireEvent.click(await openDetailFor('new-device'));
+  await waitFor(() => assert.ok(fetchCalls.some(c => c.method === 'PATCH')));
+  fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]);
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+  const other = await openDetailFor('stale-engine');
+  assert.equal(other.checked, false);
+  assert.equal(other.disabled, false, 'the pending toggle of the closed modal locked this one');
+  release();
+  await waitFor(() => assert.equal(sessionConfig.autoRejectCalls, true));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((screen.getByRole('checkbox') as HTMLInputElement).checked, false);
+});
+
+test('a session reopened while its toggle saves keeps the toggle locked until that save answers', async () => {
+  const { screen, within, fireEvent, waitFor } = rtl;
+  resetFetchCalls();
+  sessionConfig = { autoRejectCalls: false, maxReconnectAttempts: null, reconnectBaseDelay: 5000 };
+  configPatchFails = false;
+  let release!: () => void;
+  configPatchGate = new Promise<void>(resolve => (release = resolve));
+  renderSessions();
+
+  fireEvent.click(await openDetailFor('new-device'));
+  await waitFor(() => assert.ok(fetchCalls.some(c => c.method === 'PATCH')));
+  fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]);
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+  const reopened = await openDetailFor('new-device');
+  assert.equal(reopened.disabled, true, 'a second write could overlap the one still pending');
+  release();
+  await waitFor(() => assert.equal((screen.getByRole('checkbox') as HTMLInputElement).disabled, false));
+});
+
+test("one session's toggle answer does not unlock another session's pending toggle", async () => {
+  const { screen, within, fireEvent, waitFor } = rtl;
+  resetFetchCalls();
+  sessionConfig = { autoRejectCalls: false, maxReconnectAttempts: null, reconnectBaseDelay: 5000 };
+  configPatchFails = false;
+  let releaseFirst!: () => void;
+  configPatchGate = new Promise<void>(resolve => (releaseFirst = resolve));
+  renderSessions();
+
+  fireEvent.click(await openDetailFor('new-device'));
+  await waitFor(() => assert.equal(fetchCalls.filter(c => c.method === 'PATCH').length, 1));
+  fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]);
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+  let releaseSecond!: () => void;
+  configPatchGate = new Promise<void>(resolve => (releaseSecond = resolve));
+  fireEvent.click(await openDetailFor('stale-engine'));
+  await waitFor(() => assert.equal(fetchCalls.filter(c => c.method === 'PATCH').length, 2));
+  releaseFirst();
+  await waitFor(() => assert.equal(sessionConfig.autoRejectCalls, true));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal((screen.getByRole('checkbox') as HTMLInputElement).disabled, true);
+  releaseSecond();
+  await waitFor(() => assert.equal((screen.getByRole('checkbox') as HTMLInputElement).disabled, false));
+});
+
+test('a failed toggle that lands after its modal closed does not revert another session', async () => {
+  const { screen, within, fireEvent, waitFor } = rtl;
+  resetFetchCalls();
+  sessionConfig = { autoRejectCalls: false, maxReconnectAttempts: null, reconnectBaseDelay: 5000 };
+  configPatchFails = true;
+  let release!: () => void;
+  configPatchGate = new Promise<void>(resolve => (release = resolve));
+  renderSessions();
+
+  try {
+    fireEvent.click(await openDetailFor('new-device'));
+    await waitFor(() => assert.ok(fetchCalls.some(c => c.method === 'PATCH')));
+    fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Close' })[0]);
+    await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+    // The second session has auto-reject on.
+    sessionConfig = { autoRejectCalls: true, maxReconnectAttempts: null, reconnectBaseDelay: 5000 };
+    const other = await openDetailFor('stale-engine');
+    assert.equal(other.checked, true);
+    assert.equal(other.disabled, false, 'the pending toggle of the closed modal locked this one');
+    release();
+    await screen.findByRole('alert');
+    assert.equal((screen.getByRole('checkbox') as HTMLInputElement).checked, true);
+  } finally {
+    configPatchFails = false;
+  }
+});
+
+// Cancel stays enabled while a proxy save runs, so another session's proxy modal can be open by the
+// time it answers. That modal must be neither locked by the save nor closed when it lands.
+test('a proxy save that lands after its modal closed leaves another session proxy modal alone', async () => {
+  const { screen, fireEvent, within, waitFor } = rtl;
+  resetFetchCalls();
+  let release!: () => void;
+  proxyPatchGate = new Promise<void>(resolve => (release = resolve));
+  renderSessions();
+
+  const firstCard = (await screen.findByText('new-device')).closest('.session-card') as HTMLElement;
+  fireEvent.click(within(firstCard).getByRole('button', { name: 'Proxy' }));
+  let dialog = await screen.findByRole('dialog');
+  fireEvent.click(await within(dialog).findByRole('checkbox'));
+  fireEvent.change(within(dialog).getByLabelText('Proxy URL'), { target: { value: 'http://proxy.internal:8080' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  await waitFor(() => assert.ok(findFetchCall('PATCH', '/api/sessions/sess-qr-1/proxy')));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
+
+  const secondCard = screen.getByText('stale-engine').closest('.session-card') as HTMLElement;
+  fireEvent.click(within(secondCard).getByRole('button', { name: 'Proxy' }));
+  dialog = await screen.findByRole('dialog');
+  await waitFor(() => assert.ok(findFetchCall('GET', '/api/sessions/sess-stale-1/proxy')));
+  // Not locked by the first session's save: its form is editable and Save is offered.
+  assert.equal(((await within(dialog).findByRole('checkbox')) as HTMLInputElement).disabled, false);
+  await within(dialog).findByRole('button', { name: 'Save' });
+
+  release();
+  await screen.findByText('Proxy Saved');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(screen.getByRole('dialog') === dialog, true);
+  within(dialog).getByText('stale-engine');
+});
+
 test('a failed proxy read offers no Save, so it cannot clear a proxy nobody could see', async () => {
   const { screen, fireEvent, within, waitFor } = rtl;
   resetFetchCalls();
@@ -1610,8 +1905,8 @@ test('a failed proxy read offers no Save, so it cannot clear a proxy nobody coul
 
   // No editable form and no Save: an "off" toggle here would read as "no proxy configured", and
   // saving from that state sends proxyUrl:null, destroying the stored URL and its credentials.
-  await waitFor(() => assert.equal(within(dialog).queryByRole('button', { name: 'Save' }), null));
-  assert.equal(within(dialog).queryByRole('checkbox'), null);
+  await waitFor(() => assert.equal(within(dialog).queryByRole('button', { name: 'Save' }) === null, true));
+  assert.equal(within(dialog).queryByRole('checkbox') === null, true);
   assert.equal(findFetchCall('PATCH', '/api/sessions/sess-qr-1/proxy'), undefined);
 });
 
@@ -1630,7 +1925,7 @@ test('saving without retyping the URL leaves the stored proxy and its credential
   // The URL field is deliberately empty: credentials are never sent back to render.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
-  await waitFor(() => assert.equal(screen.queryByRole('dialog'), null));
+  await waitFor(() => assert.equal(screen.queryByRole('dialog') === null, true));
   assert.equal(
     findFetchCall('PATCH', '/api/sessions/sess-qr-1/proxy'),
     undefined,
@@ -1651,4 +1946,72 @@ test('a failed stop is reported instead of only logged', async () => {
   assert.ok(alert.classList.contains('toast-error'), 'the stop failure was not shown as an error toast');
   within(alert).getByText('Stop Failed');
   within(alert).getByText('Session is busy');
+});
+
+// The session is already stopped when the gateway reports the kill incomplete, so the toast carries its
+// guidance. A 502 without that code may come from a reverse proxy and stays generic.
+for (const [label, body, shown] of [
+  [
+    'a force-kill the gateway reports incomplete shows its guidance',
+    { message: 'Engine process may still be running. Restart the node.', code: 'SESSION_FORCE_KILL_INCOMPLETE' },
+    'Engine process may still be running. Restart the node.',
+  ],
+  [
+    'a force-kill 502 without the gateway code stays generic',
+    { message: 'Bad Gateway' },
+    'Failed to force-kill the session.',
+  ],
+] as const) {
+  test(label, async () => {
+    const { screen, fireEvent, within } = rtl;
+    resetFetchCalls();
+    forceKillFailure = { status: 502, body };
+    renderSessions();
+
+    const card = (await screen.findByText('stale-engine')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Kill Stuck' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Kill Session' }));
+
+    const alert = await screen.findByRole('alert');
+    assert.ok(alert.classList.contains('toast-error'), 'the force-kill failure was not shown as an error toast');
+    within(alert).getByText('Force-Kill Failed');
+    within(alert).getByText(shown);
+  });
+}
+
+// The confirm modal closes only once its request answers, so a second click on its button in that
+// window must not send the request again.
+for (const [label, cardButton, confirmButton, method, path] of [
+  ['a double-clicked Delete sends one delete', 'Delete', 'Delete', 'DELETE', '/api/sessions/sess-stale-1'],
+  [
+    'a double-clicked Kill Session sends one force-kill',
+    'Kill Stuck',
+    'Kill Session',
+    'POST',
+    '/api/sessions/sess-stale-1/force-kill',
+  ],
+] as const) {
+  test(label, async () => {
+    const { screen, fireEvent, within, waitFor } = rtl;
+    resetFetchCalls();
+    let release!: () => void;
+    confirmGate = new Promise<void>(resolve => (release = resolve));
+    renderSessions();
+
+    const card = (await screen.findByText('stale-engine')).closest('.session-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: cardButton }));
+    const confirm = within(await screen.findByRole('dialog')).getByRole('button', { name: confirmButton });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    release();
+    await waitFor(() => assert.ok(!screen.queryByRole('dialog'), 'the confirm modal did not close'));
+    assert.equal(fetchCalls.filter(c => c.method === method && c.path === path).length, 1);
+  });
+}
+
+// Hebrew and Arabic mirror the page: left-aligned pairing instructions read backwards, and a value
+// aligned right sits on the start side of its row instead of against the end.
+test('Sessions.css aligns text to the text direction, not a physical side', () => {
+  const css = readFileSync(new URL('./Sessions.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.doesNotMatch(css, /text-align\s*:\s*(left|right)\b/, 'text is aligned to a physical side');
 });

@@ -48,7 +48,10 @@ public record SendMediaRequest(
             return this;
         }
 
-        /** Required for documents; max 255 chars. */
+        /**
+         * Shown only on document sends; defaults to {@code file} when omitted (whatsapp-web.js
+         * first tries the URL basename). Max 255 chars.
+         */
         public Builder filename(String v) {
             this.filename = v;
             return this;

@@ -27,7 +27,10 @@ func (s *ChatsService) List(ctx context.Context, sessionID string, query *ListCh
 func (s *ChatsService) SubscribePresence(ctx context.Context, sessionID string, body SubscribePresenceRequest) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/presence/subscribe", nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // GetPresence returns the last presence reported for a chat, or nil when none has been — the chat
@@ -50,7 +53,9 @@ func (s *ChatsService) MarkUnread(ctx context.Context, sessionID string, body Ma
 	return s.post(ctx, sessionID, "/unread", body)
 }
 
-// Delete deletes a chat.
+// Delete deletes a chat. On success the gateway also deletes its stored copy of
+// the chat's messages (rows, inline and archived media, search entries); export
+// the history first if you need it.
 func (s *ChatsService) Delete(ctx context.Context, sessionID string, body DeleteChatRequest) (*SuccessResult, error) {
 	return s.post(ctx, sessionID, "/delete", body)
 }
@@ -79,7 +84,9 @@ func (s *ChatsService) Mute(ctx context.Context, sessionID string, body MuteChat
 
 // ClearMessages deletes every message in a chat, keeping the chat itself. A
 // false Success means the engine declined — an unknown chat, or on Baileys a
-// chat with no known history.
+// chat with no known history. On success the gateway also deletes its stored
+// copy of the chat's messages (rows, inline and archived media, search
+// entries); export the history first if you need it.
 func (s *ChatsService) ClearMessages(ctx context.Context, sessionID, chatID string) (*SuccessResult, error) {
 	var out SuccessResult
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/messages"

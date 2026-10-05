@@ -53,7 +53,7 @@ const LOOP_REPLACE = `                const decoded = await extractSyncdPatches(
 function applyAppStatePatch(baileysDir = DEFAULT_BAILEYS) {
   const file = path.join(baileysDir, CHATS_PATH);
   if (!fs.existsSync(file)) {
-    return { skipped: true, reason: `${CHATS_PATH} not found — nothing to patch` };
+    throw new Error(`@whiskeysockets/baileys ${CHATS_PATH} not found at ${file}`);
   }
   const source = fs.readFileSync(file, 'utf8');
   if (source.includes(PATCHED_MARKER)) {
@@ -89,8 +89,8 @@ if (require.main === module) run();
 
 /**
  * The stand-down branch above as a predicate, for the startup guard (engine-patch-status.ts).
- * Unreadable reads as applied: a tree we cannot inspect is not evidence of a broken one, and the
- * apply function treats a missing chats.js as nothing to patch rather than a fault.
+ * Unreadable reads as applied: a tree we cannot inspect is not evidence of a broken one, and a
+ * missing chats.js already fails the image build, where the apply function refuses it.
  */
 function isApplied(baileysDir = DEFAULT_BAILEYS) {
   try {

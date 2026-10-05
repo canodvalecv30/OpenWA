@@ -1,6 +1,8 @@
+import { DECORATORS } from '@nestjs/swagger';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
+  CustomLinkPreviewDto,
   SendTextMessageDto,
   SendMediaMessageDto,
   SendAudioMessageDto,
@@ -15,10 +17,14 @@ import {
   SEND_POLL_BODY_EXAMPLES,
 } from './send-message.dto';
 import { SendLocationDto, SendContactDto, SendPollDto } from './message-actions.dto';
+import { SendTemplateMessageDto } from './send-template.dto';
+import { GLOBAL_VALIDATION_OPTIONS } from '../../../config/app-validation';
 
-// Mirror the global ValidationPipe (main.ts): whitelist + forbidNonWhitelisted strip/reject unknown props.
+// Read the production pipe's own options rather than restating them, so these cases cannot assert a
+// contract the running app does not apply (a restated copy left out implicit conversion). Validated
+// directly instead of through pipe.transform so the cases can name the property that failed.
 const validateDto = (cls: new () => object, obj: unknown) =>
-  validate(plainToInstance(cls, obj), { whitelist: true, forbidNonWhitelisted: true });
+  validate(plainToInstance(cls, obj, GLOBAL_VALIDATION_OPTIONS.transformOptions), GLOBAL_VALIDATION_OPTIONS);
 
 describe('SendTextMessageDto mentions', () => {
   it('accepts an optional array of mention WIDs', async () => {
@@ -249,5 +255,61 @@ describe('SendMediaMessageDto url', () => {
       url: 'cdn/banner.jpg',
     });
     expect(errors.map(e => e.property)).toContain('url');
+  });
+});
+
+describe('SendMediaMessageDto base64', () => {
+  // A url next to it must not switch the type check off: buildMediaInput reads base64 first, so a
+  // non-string there reached the engine whatever the url said.
+  it('rejects a non-string base64 even when a url is present', async () => {
+    const errors = await validateDto(SendMediaMessageDto, {
+      chatId: 'c@c.us',
+      url: 'https://example.com/a.jpg',
+      base64: ['x'],
+      mimetype: 'image/jpeg',
+    });
+    expect(errors.map(e => e.property)).toContain('base64');
+  });
+});
+
+// @nestjs/swagger derives no bounds from the validators, so each one is declared on the decorator;
+// without it the published schema advertises an unbounded field the server answers 400 for.
+describe('SendTemplateMessageDto identifiers', () => {
+  // TemplateService.resolve reads templateId first, so a templateName next to it must not switch the
+  // type check off.
+  it('rejects a non-string templateId even when a templateName is present', async () => {
+    const errors = await validateDto(SendTemplateMessageDto, {
+      chatId: 'c@c.us',
+      templateId: ['a'],
+      templateName: 'x',
+    });
+    expect(errors.map(e => e.property)).toContain('templateId');
+  });
+
+  it('rejects a non-string templateName even when a templateId is present', async () => {
+    const errors = await validateDto(SendTemplateMessageDto, {
+      chatId: 'c@c.us',
+      templateId: 'a',
+      templateName: ['x'],
+    });
+    expect(errors.map(e => e.property)).toContain('templateName');
+  });
+});
+
+describe('published schema bounds', () => {
+  const published = (cls: new () => object, key: string): Record<string, unknown> | undefined =>
+    Reflect.getMetadata(DECORATORS.API_MODEL_PROPERTIES, cls.prototype as object, key) as
+      Record<string, unknown> | undefined;
+
+  it.each([SendTextMessageDto, SendMediaMessageDto, SendTemplateMessageDto])('%p bounds mentions', cls => {
+    expect(published(cls, 'mentions')).toMatchObject({
+      maxItems: 1024,
+      items: { type: 'string', maxLength: 64 },
+    });
+  });
+
+  it('bounds the media filename and the custom preview url', () => {
+    expect(published(SendMediaMessageDto, 'filename')?.maxLength).toBe(255);
+    expect(published(CustomLinkPreviewDto, 'url')?.maxLength).toBe(2048);
   });
 });

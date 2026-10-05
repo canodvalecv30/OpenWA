@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { BullBoardModule } from '@bull-board/nestjs';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
@@ -8,9 +7,13 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { WebhookProcessor } from './processors/webhook.processor';
 import { IngressProcessor } from './processors/ingress.processor';
 import { QUEUE_NAMES } from './queue-names';
+import { queueConnectionOptions } from './redis-connection';
 import { Webhook } from '../webhook/entities/webhook.entity';
+import { WebhookOutboxService } from '../webhook/webhook-outbox.service';
+import { WebhookOutboxEvent } from '../webhook/entities/webhook-outbox-event.entity';
 import { WebhookDeliveryFailure } from '../webhook/entities/webhook-delivery-failure.entity';
 import { IntegrationDeliveryFailure } from '../integration/entities/integration-delivery-failure.entity';
+import { IngressEvent } from '../integration/entities/ingress-event.entity';
 import { HooksModule } from '../../core/hooks/hooks.module';
 import { PluginsModule } from '../../core/plugins/plugins.module';
 
@@ -31,26 +34,19 @@ export const WEBHOOK_QUEUE_JOB_OPTIONS = {
 @Module({
   imports: [
     // Required for WebhookProcessor to inject Repository<Webhook> + Repository<WebhookDeliveryFailure>;
-    // IngressProcessor to inject Repository<IntegrationDeliveryFailure> (both on the 'data' connection).
-    TypeOrmModule.forFeature([Webhook, WebhookDeliveryFailure, IntegrationDeliveryFailure], 'data'),
+    // IngressProcessor to inject Repository<IntegrationDeliveryFailure> + Repository<IngressEvent> (all on
+    // the 'data' connection).
+    TypeOrmModule.forFeature(
+      [Webhook, WebhookDeliveryFailure, WebhookOutboxEvent, IntegrationDeliveryFailure, IngressEvent],
+      'data',
+    ),
     // Required for WebhookProcessor/IngressProcessor to inject HookManager
     HooksModule,
     // Required for IngressProcessor to inject PluginLoaderService (already @Global(), imported
     // explicitly for clarity, matching HooksModule above).
     PluginsModule,
     BullModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        connection: {
-          host: configService.get<string>('redis.host', 'localhost'),
-          port: configService.get<number>('redis.port', 6379),
-          username: configService.get<string>('redis.username'),
-          password: configService.get<string>('redis.password'),
-          connectTimeout: configService.get<number>('redis.connectTimeoutMs', 5000),
-          enableOfflineQueue: false,
-        },
-      }),
+      useFactory: () => ({ connection: queueConnectionOptions() }),
     }),
     BullModule.registerQueue({
       name: QUEUE_NAMES.WEBHOOK,
@@ -78,7 +74,7 @@ export const WEBHOOK_QUEUE_JOB_OPTIONS = {
       adapter: BullMQAdapter,
     }),
   ],
-  providers: [WebhookProcessor, IngressProcessor],
+  providers: [WebhookProcessor, IngressProcessor, WebhookOutboxService],
   exports: [BullModule],
 })
 export class QueueModule {}

@@ -1,3 +1,5 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { generateSafeLinkPreview } from './safe-link-preview';
 import * as ssrfGuard from '../../common/security/ssrf-guard';
 
@@ -44,7 +46,10 @@ describe('generateSafeLinkPreview', () => {
 
       await generateSafeLinkPreview('https://example.com/a', { sessionProxyUrl: 'socks5://proxy.invalid:1080' });
 
-      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({ proxyUrl: 'socks5://proxy.invalid:1080' });
+      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({
+        proxyUrl: 'socks5://proxy.invalid:1080',
+        followRedirects: true,
+      });
     });
 
     it('leaves an unproxied session fetching direct', async () => {
@@ -52,7 +57,7 @@ describe('generateSafeLinkPreview', () => {
 
       await generateSafeLinkPreview('https://example.com/a');
 
-      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({ proxyUrl: undefined });
+      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({ proxyUrl: undefined, followRedirects: true });
     });
 
     it('fetches direct when the operator switches the session-proxy URL fetch off', async () => {
@@ -64,7 +69,7 @@ describe('generateSafeLinkPreview', () => {
         delete process.env.SESSION_PROXY_URL_FETCH;
       }
 
-      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({ proxyUrl: undefined });
+      expect((withSafeFetch.mock.calls[0] as unknown[])[3]).toEqual({ proxyUrl: undefined, followRedirects: true });
     });
 
     // The guard rejects a blocked destination by throwing. That must surface as "no preview", never
@@ -105,6 +110,46 @@ describe('generateSafeLinkPreview', () => {
       await generateSafeLinkPreview('example.com/path');
 
       expect((withSafeFetch.mock.calls[0] as unknown[])[0]).toBe('https://example.com/path');
+    });
+  });
+
+  // A bare domain that answers with its www host, an http link moved to https and every short link
+  // arrive as a redirect. Each hop is checked by the guard again before it is fetched.
+  describe('follows a redirect through the guard', () => {
+    let server: Server;
+    let origin: string;
+    const allowed = process.env.SSRF_ALLOWED_HOSTS;
+
+    beforeAll(async () => {
+      server = createServer((req, res) => {
+        if (req.url === '/short') res.writeHead(301, { location: '/page' }).end();
+        // Reachable but not allowlisted: the same server under a hostname the guard refuses, so a hop
+        // followed without the guard would land on the page and produce a preview.
+        else if (req.url === '/internal')
+          res.writeHead(302, { location: `http://localhost:${(server.address() as AddressInfo).port}/page` }).end();
+        else res.writeHead(200, { 'content-type': 'text/html' }).end('<title>Landing</title>');
+      });
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+      origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      process.env.SSRF_ALLOWED_HOSTS = '127.0.0.1';
+    });
+
+    afterAll(async () => {
+      if (allowed === undefined) delete process.env.SSRF_ALLOWED_HOSTS;
+      else process.env.SSRF_ALLOWED_HOSTS = allowed;
+      await new Promise(resolve => server.close(resolve));
+    });
+
+    it('previews the page a redirect lands on, under the URL that was sent', async () => {
+      await expect(generateSafeLinkPreview(`${origin}/short`)).resolves.toEqual({
+        'matched-text': `${origin}/short`,
+        'canonical-url': `${origin}/short`,
+        title: 'Landing',
+      });
+    });
+
+    it('returns nothing when a hop points at a blocked address', async () => {
+      await expect(generateSafeLinkPreview(`${origin}/internal`)).resolves.toBeUndefined();
     });
   });
 
@@ -176,6 +221,15 @@ describe('generateSafeLinkPreview', () => {
       await expect(generateSafeLinkPreview('https://example.com')).resolves.toMatchObject({
         title: 'Shop > Shoes',
         description: 'Size 42 > 41',
+      });
+    });
+
+    it('keeps a quote of the other kind inside a value', async () => {
+      respondWith(`<meta property="og:title" content="Don't Panic"><meta name='description' content='say "hi"'>`);
+
+      await expect(generateSafeLinkPreview('https://example.com')).resolves.toMatchObject({
+        title: "Don't Panic",
+        description: 'say "hi"',
       });
     });
   });

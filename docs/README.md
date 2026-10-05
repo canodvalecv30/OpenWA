@@ -83,19 +83,20 @@
 git clone https://github.com/rmyndharis/OpenWA.git
 cd OpenWA
 
-# Install the locked dependencies & configure
+# Install the locked dependencies (also installs dashboard dependencies)
 npm ci
-cp .env.minimal .env
 
-# Create data directories
-mkdir -p data/sessions data/media
+# Optional: .env.minimal pins database, storage, Redis/queue, session path, engine and Puppeteer
+# settings over Dashboard > Infrastructure, and turns off session auto-start
+# cp .env.minimal .env
 
-# Run
-npm run start:dev
+# Run the API and the dashboard
+npm run dev
 ```
 
 Access:
 
+- Dashboard: `http://localhost:2886`
 - API: `http://localhost:2785/api`
 - Swagger: `http://localhost:2785/api/docs`
 - Health: `http://localhost:2785/api/health`
@@ -115,7 +116,7 @@ Access (the dashboard is bundled into the API and served on the same port):
 
 - Dashboard: `http://localhost:2785`
 - API: `http://localhost:2785/api`
-- Swagger: `http://localhost:2785/api/docs`
+- Swagger: `http://localhost:2785/api/docs` (off under this compose file's `NODE_ENV=production` unless `ENABLE_SWAGGER=true`)
 
 ### API Key
 
@@ -124,7 +125,9 @@ OpenWA seeds a default API key on first run and writes it to:
 - `data/.api-key` (development)
 - `/app/data/.api-key` inside the API container when using Docker
 
-The startup logs also print the initial key. By default a cryptographically
+With Docker, read it with `docker exec openwa-api cat /app/data/.api-key`.
+
+The startup log prints the full key only on the boot that created it; later boots show a masked prefix. By default a cryptographically
 random `owa_k1_...` admin key is generated on first run in all environments; set
 `ALLOW_DEV_API_KEY=true` to seed the well-known `dev-admin-key` for local
 development only. Use an admin key to create additional keys with
@@ -183,25 +186,25 @@ socket.on('message', msg => {
 
 ## Features (Current)
 
-| Feature                             | Status                                   |
-| ----------------------------------- | ---------------------------------------- |
-| REST API for WhatsApp               | Ready                                    |
-| WebSocket Events (Socket.IO)        | Ready                                    |
-| Multi-session Support               | Ready                                    |
-| Web Dashboard                       | Ready                                    |
-| Docker Deployment                   | Ready                                    |
-| Webhooks with HMAC Signature        | Ready                                    |
-| SQLite / PostgreSQL Storage         | Ready                                    |
-| API Key Authentication & Roles      | Ready                                    |
-| CIDR IP Whitelisting                | Ready                                    |
-| Rate Limiting                       | Ready                                    |
-| Audit Logging                       | Ready                                    |
-| Groups / Contacts / Labels API      | Ready                                    |
-| Channels / Status API               | Experimental (engine-limited)            |
-| Catalog / Product API               | Endpoints defined; `501` on both engines |
-| Pluggable Engine (wwebjs / Baileys) | Ready (set `ENGINE_TYPE`)                |
-| Plugin Extension System             | Ready                                    |
-| Queue-based Webhook Retries         | Optional (QUEUE_ENABLED=true)            |
+| Feature                             | Status                                       |
+| ----------------------------------- | -------------------------------------------- |
+| REST API for WhatsApp               | Ready                                        |
+| WebSocket Events (Socket.IO)        | Ready                                        |
+| Multi-session Support               | Ready                                        |
+| Web Dashboard                       | Ready                                        |
+| Docker Deployment                   | Ready                                        |
+| Webhooks with HMAC Signature        | Ready                                        |
+| SQLite / PostgreSQL Storage         | Ready                                        |
+| API Key Authentication & Roles      | Ready                                        |
+| CIDR IP Whitelisting                | Ready                                        |
+| Rate Limiting                       | Ready                                        |
+| Audit Logging                       | Ready                                        |
+| Groups / Contacts / Labels API      | Ready                                        |
+| Channels / Status API               | Experimental (engine-limited)                |
+| Catalog / Product API               | Baileys only (whatsapp-web.js answers `501`) |
+| Pluggable Engine (wwebjs / Baileys) | Ready (set `ENGINE_TYPE`)                    |
+| Plugin Extension System             | Ready                                        |
+| Queue-based Webhook Retries         | Optional (QUEUE_ENABLED=true)                |
 
 ## Tech Stack
 

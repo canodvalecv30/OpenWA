@@ -71,7 +71,9 @@ class ChatsResource
     }
 
     /**
-     * Delete every message in a chat, keeping the chat itself.
+     * Delete every message in a chat, keeping the chat itself. On success the gateway
+     * also deletes its stored copy of the chat's messages (rows, inline and archived
+     * media, search entries); export the history first if you need it.
      *
      * @return array<string,mixed>
      */
@@ -121,7 +123,13 @@ class ChatsResource
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/chats/mute", [], $body) ?? [];
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Delete a chat from the chat list. On success the gateway also deletes its stored
+     * copy of the chat's messages (rows, inline and archived media, search entries);
+     * export the history first if you need it.
+     *
+     * @return array<string,mixed>
+     */
     public function delete(string $sessionId, array $body): array
     {
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/chats/delete", [], $body);

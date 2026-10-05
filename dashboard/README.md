@@ -32,8 +32,8 @@ Modern web dashboard for managing OpenWA WhatsApp API Gateway sessions, webhooks
 
 ### Prerequisites
 
-- Node.js 20+
-- npm or yarn
+- Node.js 22.22.2+ or 24.15+ (jsdom, used by the unit tests, requires it)
+- npm (the lockfile and the `overrides` security pins are npm-specific)
 
 ### Development
 

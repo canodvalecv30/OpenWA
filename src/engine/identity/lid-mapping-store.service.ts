@@ -45,6 +45,10 @@ export interface LidMappingStore {
   resolveLid(jid: string): string | null;
   /** Sync reverse lookup: the lids currently mapped to this phone (used by the message from-filter). */
   lidsForPhone(phone: string): string[];
+  /** The phone the table holds for a lid JID, read from the database; null when none is stored. */
+  findPhoneForLid?(jid: string): Promise<string | null>;
+  /** The lids the table maps to these phone digits, read from the database. */
+  findLidsForPhone?(phone: string): Promise<string[]>;
   /** Write-through, last-write-wins: update the cache + persist. A `null` phone records a negative result. */
   remember(lid: string, phone: string | null, sessionId?: string): Promise<void>;
 }
@@ -93,8 +97,14 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit {
    * maps synchronously and writes the table afterwards, so between the two a table read answers "no
    * row" about a mapping that is about to exist. The forward map cannot stand in for this: the LRU
    * can evict the entry inside that same window, leaving it indistinguishable from never-learned.
+   * Counted per lid, so the first of two overlapping writes settling does not clear the second.
    */
-  private readonly unsettledWrites = new Set<string>();
+  private readonly unsettledWrites = new Map<string, number>();
+  /**
+   * Lids a write started for while their table read was in flight. That read may have run before the
+   * write committed, so whatever it answers predates the mapping this process now holds.
+   */
+  private readonly racedLookups = new Set<string>();
   // 0 = unbounded (legacy behaviour). Every other long-lived map in the engine surface is bounded, so
   // the default is finite; the env override exists for operators who explicitly want the old behaviour.
   private readonly maxCachedLids: number;
@@ -118,6 +128,9 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit {
    * fail the import — resolution falls back to engine re-resolution until the table is readable.
    */
   async reload(): Promise<void> {
+    // Dropped before the read too: a restore may have replaced the table, so if the read fails, a lid
+    // not cached must read through rather than trust a stale absence.
+    this.absentFromTable.clear();
     try {
       // Deterministic preload: an unordered find() followed by LRU eviction keeps an ARBITRARY
       // subset once the table exceeds the cap. Order by last-write and take at most the cap, so
@@ -263,7 +276,8 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit {
       return; // unseen-or-changed only; a no-op write would just churn updatedAt
     }
     this.index(lid, phone);
-    this.unsettledWrites.add(lid);
+    this.unsettledWrites.set(lid, (this.unsettledWrites.get(lid) ?? 0) + 1);
+    if (this.pendingLookups.has(lid)) this.racedLookups.add(lid);
     try {
       await this.repo.upsert({ lid, phone, sessionId: sessionId ?? null, updatedAt: new Date() }, ['lid']);
     } catch (err) {
@@ -271,7 +285,9 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit {
         `Failed to persist lid->phone mapping for ${lid}: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
-      this.unsettledWrites.delete(lid);
+      const left = (this.unsettledWrites.get(lid) ?? 1) - 1;
+      if (left > 0) this.unsettledWrites.set(lid, left);
+      else this.unsettledWrites.delete(lid);
     }
   }
 
@@ -294,18 +310,23 @@ export class LidMappingStoreService implements LidMappingStore, OnModuleInit {
     void this.repo
       .findOne({ where: { lid } })
       .then(row => {
-        // Last-write-wins: a remember() that landed while the lookup was in flight is newer.
+        // A write that was unsettled when the query ran, or started while it was in flight, is newer
+        // than either answer: a row would be the phone it replaces, served as a hit after the write
+        // commits, and an absence would block the warm-back once the LRU evicts the forward entry.
+        // Neither is recorded, so the next miss reads the table again.
+        if (writeInFlight || this.racedLookups.has(lid)) return;
+        // Last-write-wins: a mapping indexed while the lookup was in flight is newer.
         if (row && !this.lidToPhone.has(row.lid)) {
           this.index(row.lid, row.phone);
           return;
         }
-        // Same rule for the negative: an absence recorded over a mapping this process already holds,
-        // or is still writing, would block the warm-back once the LRU evicts the forward entry, and
-        // the row would then be unreachable until something taught the same lid again.
-        if (!row && !this.lidToPhone.has(lid) && !writeInFlight) this.noteAbsent(lid);
+        if (!row && !this.lidToPhone.has(lid)) this.noteAbsent(lid);
       })
       .catch(() => undefined)
-      .finally(() => this.pendingLookups.delete(lid));
+      .finally(() => {
+        this.pendingLookups.delete(lid);
+        this.racedLookups.delete(lid);
+      });
   }
 
   /** Update both in-memory indexes, dropping any stale reverse entry from a previous phone. */

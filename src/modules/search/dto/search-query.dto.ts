@@ -63,14 +63,19 @@ export class SearchQueryDto {
   @IsNumber()
   dateTo?: number;
 
-  @ApiPropertyOptional({ description: 'Max hits to return', type: Number })
+  @ApiPropertyOptional({ description: 'Max hits to return', type: 'integer', minimum: 1 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   limit?: number;
 
-  @ApiPropertyOptional({ description: `Pagination offset, at most ${SEARCH_OFFSET_MAX}`, type: Number })
+  @ApiPropertyOptional({
+    description: `Pagination offset, at most ${SEARCH_OFFSET_MAX}`,
+    type: 'integer',
+    minimum: 0,
+    maximum: SEARCH_OFFSET_MAX,
+  })
   @IsOptional()
   @ToStrictNumber()
   @Type(() => Number)

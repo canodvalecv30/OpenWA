@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { DataSource } from 'typeorm';
+import { DataSource, TableColumn } from 'typeorm';
 import { Message, MessageDirection } from '../../../modules/message/entities/message.entity';
 import { Session } from '../../../modules/session/entities/session.entity';
 import { BuiltInFtsProvider } from './builtin-fts.provider';
@@ -153,6 +153,33 @@ describe('BuiltInFtsProvider — backfilling an index built after the rows', () 
 
     expect(await docsize()).toBe(2);
     expect(await found('legacy')).toHaveLength(2);
+  });
+
+  /**
+   * A synchronize-driven table rebuild. TypeORM's SQLite column change copies the rows into a new
+   * table without their implicit rowid, so after any delete the survivors are renumbered and every
+   * index entry keyed on an old rowid now describes a different message. The gap repair alone sees
+   * nothing missing for the renumbered rows and leaves the index pointing at the wrong bodies.
+   */
+  it('re-indexes from scratch after a table rebuild renumbered the rowids', async () => {
+    expect(await nullBodies()).toBe(0);
+    const repo = ds.getRepository(Message);
+    await new BuiltInFtsProvider(ds).onModuleInit();
+    await repo.insert([row('charlie fresh', 3)]);
+    await repo.delete({ body: 'alpha legacy' });
+
+    const qr = ds.createQueryRunner();
+    await qr.addColumn('messages', new TableColumn({ name: 'rebuilt', type: 'text', isNullable: true }));
+    await qr.release();
+    const rowids: Array<{ rowid: number }> = await ds.query(`SELECT rowid FROM "messages" ORDER BY rowid`);
+    expect(rowids.map(r => r.rowid)).toEqual([1, 2]); // renumbered: the precondition of this case
+
+    await new BuiltInFtsProvider(ds).onModuleInit();
+
+    expect(await found('bravo')).toEqual(['bravo legacy']);
+    expect(await found('charlie')).toEqual(['charlie fresh']);
+    expect(await found('alpha')).toEqual([]);
+    expect(await indexMatchesContent()).toBe('consistent');
   });
 
   /**

@@ -18,16 +18,15 @@ See `docs/03-system-architecture.md` for the bigger picture.
 
 ## Getting started
 
-OpenWA targets **Node.js 22+**.
+OpenWA targets **Node.js 22.19 or newer** (`engines.node`).
 
 ```bash
-# backend
-npm install
-npm run start:dev           # hot-reload, default port 2785
-
-# dashboard (separate terminal)
-cd dashboard && npm install && npm run dev
+npm ci
+npm run dev   # API on 2785, dashboard (Vite) on 2886
 ```
+
+Dashboard dependencies install with the root ones (postinstall). `npm run start:dev` runs the API
+alone. Use `npm install` only when intentionally changing dependencies.
 
 Default storage is SQLite, so no external services are required to run locally.
 

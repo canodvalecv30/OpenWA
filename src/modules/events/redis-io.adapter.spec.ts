@@ -11,11 +11,16 @@ class FakeRedis {
   readonly handlers: Record<string, (err: Error) => void> = {};
   quit = jest.fn().mockResolvedValue('OK');
   disconnect = jest.fn();
+  readonly sent = jest.fn().mockResolvedValue(1);
+  publish(channel: string, message: string): Promise<number> {
+    return this.sent(channel, message) as Promise<number>;
+  }
   constructor(public readonly opts?: unknown) {
     redisInstances.push(this);
   }
-  duplicate(): FakeRedis {
-    return new FakeRedis(this.opts);
+  // Like ioredis, a duplicate inherits the options and takes overrides on top.
+  duplicate(override?: object): FakeRedis {
+    return new FakeRedis({ ...(this.opts as object), ...override });
   }
   on(event: string, handler: (err: Error) => void): this {
     this.handlers[event] = handler;
@@ -85,6 +90,15 @@ describe('RedisIoAdapter', () => {
       expect(typeof opts.retryStrategy).toBe('function');
       expect((opts.retryStrategy as (n: number) => number)(100)).toBe(5000);
     });
+
+    it('connects over TLS when REDIS_TLS=true', () => {
+      process.env.REDIS_TLS = 'true';
+      try {
+        expect(wsRedisOptions().tls).toEqual({});
+      } finally {
+        delete process.env.REDIS_TLS;
+      }
+    });
   });
 
   describe('createIOServer', () => {
@@ -117,6 +131,38 @@ describe('RedisIoAdapter', () => {
         expect(adapterFn).toHaveBeenCalledWith(
           expect.objectContaining({ tag: 'redis-adapter-fn', pub: redisInstances[0], sub: redisInstances[1] }),
         );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('keeps the subscriber commands queued for as long as Redis is down at boot', () => {
+      process.env.REDIS_ENABLED = 'true';
+      const spy = withBaseServer(fakeServer().server);
+      try {
+        new RedisIoAdapter({} as never).createIOServer(2785);
+        const [pub, sub] = redisInstances as [FakeRedis, FakeRedis];
+        // The adapter subscribes once; a flushed SUBSCRIBE is never sent again, so the sub client
+        // must not give up on it. The publisher stays bounded.
+        expect((sub.opts as { maxRetriesPerRequest?: unknown }).maxRetriesPerRequest).toBeNull();
+        expect((pub.opts as { maxRetriesPerRequest?: unknown }).maxRetriesPerRequest).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('gives a failed publish an owner, since the adapter drops the promise it returns', async () => {
+      process.env.REDIS_ENABLED = 'true';
+      const { server } = fakeServer();
+      const spy = withBaseServer(server);
+      try {
+        new RedisIoAdapter({} as never).createIOServer(2785);
+        const [pub] = redisInstances;
+        // What ioredis does to every publish queued during an outage once its retries run out.
+        pub.sent.mockRejectedValueOnce(new Error('Reached the max retries per request limit (which is 20).'));
+        await expect(pub.publish('socket.io#/events#', 'frame')).resolves.toBe(0);
+        await expect(pub.publish('socket.io#/events#', 'frame')).resolves.toBe(1);
+        expect(pub.sent).toHaveBeenCalledWith('socket.io#/events#', 'frame');
       } finally {
         spy.mockRestore();
       }

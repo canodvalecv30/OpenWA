@@ -49,7 +49,10 @@ export class OverviewStatsResponseDto {
 }
 
 export class TimeSeriesPointDto {
-  @ApiProperty({ description: 'Bucket start, ISO-8601.', example: '2026-08-07T12:00:00.000Z' })
+  @ApiProperty({
+    description: 'Bucket start in UTC as zone-less text: YYYY-MM-DD HH:00:00 for period=24h, YYYY-MM-DD for 7d/30d.',
+    example: '2026-08-07 12:00:00',
+  })
   timestamp!: string;
 
   @ApiProperty({ example: 12 }) sent!: number;
@@ -117,12 +120,15 @@ export class SessionStatsTopChatDto {
 
   @ApiProperty({ example: 42 }) count!: number;
 
-  @ApiProperty({ description: 'ISO-8601 timestamp of the last message.', example: '2026-08-07T12:00:00.000Z' })
+  @ApiProperty({
+    description: 'Time of the last message in UTC as zone-less text, YYYY-MM-DD HH:MM:SS.',
+    example: '2026-08-07 12:00:00',
+  })
   lastActive!: string;
 }
 
 export class SessionHourlyActivityDto {
-  @ApiProperty({ description: 'Hour of day, 0-23.', example: 9 }) hour!: number;
+  @ApiProperty({ description: 'Hour of day in UTC, 0-23.', example: 9 }) hour!: number;
   @ApiProperty({ example: 12 }) sent!: number;
   @ApiProperty({ example: 34 }) received!: number;
 }

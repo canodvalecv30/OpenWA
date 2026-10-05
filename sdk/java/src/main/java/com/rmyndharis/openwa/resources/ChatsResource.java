@@ -85,7 +85,11 @@ public final class ChatsResource {
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/unread", null, body, SuccessResult.class);
     }
 
-    /** Delete every message in a chat, keeping the chat itself. */
+    /**
+     * Delete every message in a chat, keeping the chat itself. On success the gateway also deletes
+     * its stored copy of the chat's messages (rows, inline and archived media, search entries);
+     * export the history first if you need it.
+     */
     public SuccessResult clearMessages(String sessionId, String chatId) {
         return client.request(
             HttpMethod.DELETE,
@@ -125,7 +129,11 @@ public final class ChatsResource {
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/mute", null, body, SuccessResult.class);
     }
 
-    /** Delete a chat from the chat list. */
+    /**
+     * Delete a chat from the chat list. On success the gateway also deletes its stored copy of the
+     * chat's messages (rows, inline and archived media, search entries); export the history first if
+     * you need it.
+     */
     public SuccessResult delete(String sessionId, DeleteChatRequest body) {
         return client.request(
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/delete", null, body, SuccessResult.class);

@@ -41,13 +41,23 @@ describe('AutomationRuleController', () => {
     // Distinct from ruleEntity()'s name/replyText, so a projection that reads the DTO's slots
     // instead of the entity's cannot pass by echoing identical values.
     const dto = { name: 'Away-hours autoresponder', replyText: 'We are closed — we reply next business day.' };
-    service.create.mockResolvedValue(ruleEntity());
+    const entity = ruleEntity();
+    service.create.mockResolvedValue(entity);
 
     const result = await controller.create('s1', dto);
 
     expect(service.create).toHaveBeenCalledWith('s1', dto);
-    expect(result.id).toBe('rule-1');
-    expect(result.sessionId).toBe('s1');
+    expect(result).toEqual({
+      id: 'rule-1',
+      sessionId: 's1',
+      name: entity.name,
+      enabled: true,
+      conditions: null,
+      replyText: entity.replyText,
+      cooldownSeconds: 60,
+      createdAt: entity.createdAt,
+      updatedAt: entity.updatedAt,
+    });
     expect(result).not.toHaveProperty('session');
   });
 
@@ -100,6 +110,14 @@ describe('AutomationRuleController', () => {
     service.findOne.mockRejectedValue(error);
 
     await expect(controller.findOne('s1', 'rule-404')).rejects.toBe(error);
+  });
+
+  it.each(['create', 'update'] as const)('declares the validation 400 on %s', handler => {
+    const responses = (Reflect.getMetadata(
+      'swagger/apiResponse',
+      Object.getOwnPropertyDescriptor(AutomationRuleController.prototype, handler)?.value as object,
+    ) ?? {}) as Record<string, unknown>;
+    expect(Object.keys(responses)).toContain('400');
   });
 
   it('remove propagates not-found rejections unmapped', async () => {

@@ -119,7 +119,7 @@
     ]
   },
   "baileys": {
-    "version": "7.0.0-rc13",
+    "version": "7.0.0-rc14",
     "socketMethods": [
       "addChatLabel",
       "addLabel",

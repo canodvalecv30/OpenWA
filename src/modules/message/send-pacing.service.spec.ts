@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { SendPacingService, SEND_PACING_LIMITED, countsTowardSendBreaker } from './send-pacing.service';
+import { EnginePageError } from '../../common/errors/engine-page.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
@@ -279,6 +280,17 @@ describe('computeSendPacingConfig', () => {
     expect(parsed).toEqual(computeSendPacingConfig({}).warmupSchedule);
   });
 
+  // A container env cannot carry the empty value: the blank-clearing at boot deletes it, and the
+  // default schedule applies instead. `0` and `off` survive that, so they are the portable off switch.
+  it.each(['', '0', 'off', ' OFF '])('disables the cold-reachout rule for %p', raw => {
+    expect(computeSendPacingConfig({ SEND_PACING_COLD_DAILY_CAP: raw }).coldSchedule).toEqual([]);
+  });
+
+  it.each(['0', 'off'])('keeps the warm-up schedule on its default for %p', raw => {
+    const parsed = computeSendPacingConfig({ SEND_PACING_WARMUP_SCHEDULE: raw }).warmupSchedule;
+    expect(parsed).toEqual(computeSendPacingConfig({}).warmupSchedule);
+  });
+
   it.each([
     ['SEND_PACING_BREAKER_THRESHOLD', 'breakerThreshold'],
     ['SEND_PACING_BREAKER_COOLDOWN_MS', 'breakerCooldownMs'],
@@ -352,7 +364,7 @@ describe('send paths consult the governor', () => {
 
     await expect(service.sendProduct('s1', 'c@c.us', 'p1')).rejects.toBeInstanceOf(HttpException);
 
-    expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', 'c@c.us');
+    expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', 'c@c.us', { untilSettled: true });
     expect(hookManager.execute).not.toHaveBeenCalled();
     expect(engine.sendProduct).not.toHaveBeenCalled();
   });
@@ -411,7 +423,7 @@ describe('send paths consult the governor', () => {
 
     await (service as unknown as { processBatch: (id: string) => Promise<void> }).processBatch('b1');
 
-    expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', 'c@c.us');
+    expect(pacing.assertSendAllowed).toHaveBeenCalledWith('s1', 'c@c.us', { untilSettled: true });
     expect(hookManager.execute).not.toHaveBeenCalledWith('message:sending', expect.anything(), expect.anything());
     expect(engine.sendTextMessage).not.toHaveBeenCalled();
   });
@@ -505,7 +517,7 @@ describe('SendPacingService cold-reachout cap', () => {
   it('does not count a chat this account already has history with', async () => {
     const { service, exists } = build(cold(), 0, sessionAged(0), { hasHistory: true, coldToday: 99 });
 
-    await expect(service.assertSendAllowed('s1', 'known@c.us')).resolves.toBeUndefined();
+    await expect(service.assertSendAllowed('s1', 'known@c.us')).resolves.toBeInstanceOf(Function);
 
     // Probed under both user-id dialects: stored rows may carry either spelling.
     expect(exists).toHaveBeenCalledWith({
@@ -519,7 +531,7 @@ describe('SendPacingService cold-reachout cap', () => {
   it("allows a cold reachout while the day's allowance remains", async () => {
     const { service } = build(cold(), 0, sessionAged(0), { hasHistory: false, coldToday: 2 });
 
-    await expect(service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeUndefined();
+    await expect(service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeInstanceOf(Function);
   });
 
   it('refuses the cold reachout that would exceed the allowance', async () => {
@@ -537,7 +549,7 @@ describe('SendPacingService cold-reachout cap', () => {
     await expectPacingRefusal(young.service.assertSendAllowed('s1', 'stranger@c.us'));
 
     const older = build(cold({ coldSchedule: [3, 30] }), 0, sessionAged(1), { hasHistory: false, coldToday: 5 });
-    await expect(older.service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeUndefined();
+    await expect(older.service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeInstanceOf(Function);
   });
 
   // A status post addresses no one in particular, so it is not a reachout and must never consume the
@@ -556,7 +568,7 @@ describe('SendPacingService cold-reachout cap', () => {
       coldToday: 999,
     });
 
-    await expect(service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeUndefined();
+    await expect(service.assertSendAllowed('s1', 'stranger@c.us')).resolves.toBeInstanceOf(Function);
 
     expect(exists).not.toHaveBeenCalled();
   });
@@ -601,6 +613,10 @@ describe('countsTowardSendBreaker', () => {
     ['a WhatsApp refusal (403 EngineRefusedError)', new EngineRefusedError('not allowed to send here')],
     ['a raw engine error', new Error('ack error 500')],
     ['a server-side fault', new InternalServerErrorException('boom')],
+    [
+      'a failure WhatsApp Web threw in the page (500 EnginePageError)',
+      new EnginePageError({ name: 'TypeError', message: 'x' }, new Error('page threw {}')),
+    ],
   ])('counts %s', (_label, error) => {
     expect(countsTowardSendBreaker(error)).toBe(true);
   });

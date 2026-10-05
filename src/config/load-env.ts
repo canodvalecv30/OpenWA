@@ -1,8 +1,13 @@
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
+import { createLogger } from '../common/services/logger.service';
 import { writeSecretFile } from '../common/utils/secret-file';
 import { clearBlankEnv, recordOsEnvKeys, recordPinnedEnvKeys, BLANK_SHADOWED_ENV_KEYS } from './env-precedence';
+
+// LoggerService reads its format and level per write and nothing at import, so it is safe to use
+// before the env files below are merged in.
+const logger = createLogger('Bootstrap');
 
 /**
  * Load configuration into process.env BEFORE any application module is imported.
@@ -56,8 +61,8 @@ export function loadEnvironment(): void {
 
   // 2. User-managed .env (does not override real process env)
   if (fs.existsSync(userEnvPath)) {
-    console.log('[Bootstrap] Loading .env from:', userEnvPath);
-    dotenv.config({ path: userEnvPath, override: false });
+    logger.log(`Loading .env from: ${userEnvPath}`);
+    dotenv.config({ path: userEnvPath, override: false, quiet: true });
   }
 
   // Snapshot the layers that will SHADOW the dashboard-saved file — process env plus the .env just
@@ -68,20 +73,20 @@ export function loadEnvironment(): void {
 
   // 3. Dashboard-saved config (does not override .env or process env)
   if (fs.existsSync(generatedEnvPath)) {
-    console.log('[Bootstrap] Loading saved configuration from:', generatedEnvPath);
-    const { parsed = {} } = dotenv.config({ path: generatedEnvPath, override: false });
+    logger.log(`Loading saved configuration from: ${generatedEnvPath}`);
+    const { parsed = {} } = dotenv.config({ path: generatedEnvPath, override: false, quiet: true });
     // Compose forwards DATABASE_SSL*, and templates older than 0.18 set DATABASE_SSL=false in .env, so
     // a stale line can outrank TLS turned on in the dashboard. The override stands; the log names it.
     for (const key of ['DATABASE_SSL', 'DATABASE_SSL_REJECT_UNAUTHORIZED']) {
       if (parsed[key] !== undefined && process.env[key] !== parsed[key]) {
-        console.warn(
-          `[Bootstrap] ${key}=${process.env[key]} from the environment or .env overrides ${key}=${parsed[key]} ` +
+        logger.warn(
+          `${key}=${process.env[key]} from the environment or .env overrides ${key}=${parsed[key]} ` +
             'saved in data/.env.generated (Dashboard > Infrastructure)',
         );
       }
     }
   } else {
-    console.log('[Bootstrap] First run detected, creating default configuration...');
+    logger.log('First run detected, creating default configuration...');
     // Create minimal .env.generated with sensible defaults
     const minimalConfig = `# OpenWA Configuration
 # Generated automatically on first run
@@ -105,8 +110,8 @@ STORAGE_LOCAL_PATH=./data/media
 # Docker Profiles: none (minimal setup)
 `;
     writeSecretFile(generatedEnvPath, minimalConfig);
-    console.log('[Bootstrap] Created default configuration at:', generatedEnvPath);
-    dotenv.config({ path: generatedEnvPath, override: false });
+    logger.log(`Created default configuration at: ${generatedEnvPath}`);
+    dotenv.config({ path: generatedEnvPath, override: false, quiet: true });
   }
 }
 

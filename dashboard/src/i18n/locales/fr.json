@@ -38,6 +38,7 @@
     "hoursAgo_other": "Il y a {{count}} heures",
     "hoursAgo_many": "Il y a {{count}} heures",
     "optional": "optionnel",
+    "fieldTooLong": "Limité à {{max}} caractères ({{count}} actuellement).",
     "language": "Langue",
     "back": "Retour",
     "next": "Suivant",
@@ -93,6 +94,7 @@
     "unreadBadge": "{{count}} message non lu",
     "unreadBadge_other": "{{count}} messages non lus",
     "unreadBadge_many": "{{count}} messages non lus",
+    "markedUnread": "Marqué comme non lu",
     "loadingMessages": "Chargement des messages...",
     "loadingOlderMessages": "Chargement des messages plus anciens...",
     "loadOlderMessagesError": "Impossible de charger les messages plus anciens. Faites défiler vers le haut pour réessayer.",
@@ -124,7 +126,6 @@
       "unknownType": "Type inconnu"
     },
     "you": "Vous",
-    "youPrefix": "Vous : ",
     "yesterday": "Hier",
     "attachTitle": "Envoyer un fichier / une image",
     "emojiTitle": "Choisir un emoji",
@@ -352,7 +353,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "Aucun proxy configuré",
       "hasCredentials": "Les identifiants sont enregistrés mais ne sont pas affichés. Saisissez une URL complète pour les modifier.",
-      "hint": "Les modifications s'appliquent au prochain démarrage de la session, pas à une connexion en cours. Le proxy doit être réel et joignable : une valeur injoignable bloque l'envoi du QR code et le démarrage renvoie 504.",
+      "hint": "Les modifications s'appliquent au prochain démarrage de la session, pas à une connexion en cours. Le proxy doit être réel et joignable : une valeur injoignable bloque l'envoi du QR code. Avec whatsapp-web.js, le démarrage renvoie 504 ; avec Baileys, le démarrage réussit et la session continue de réessayer.",
       "createHint": "Nécessaire uniquement si votre réseau ne peut pas joindre WhatsApp directement. Doit être un proxy réel et joignable.",
       "invalidUrl": "Saisissez une URL de proxy http, https, socks4 ou socks5 valide.",
       "saveSuccessTitle": "Proxy enregistré",
@@ -451,11 +452,13 @@
     "selectSession": "Sélectionner une session...",
     "session": "Session",
     "events": "Événements",
+    "noEvents": "Sélectionnez au moins un événement.",
     "available": "Événements disponibles",
     "saveChanges": "Enregistrer les modifications",
     "filters": {
       "title": "Filtres (facultatif)",
       "hint": "Déclencher uniquement lorsque toutes les conditions sont remplies. S'applique aux événements de message.",
+      "incomplete": "Attribuez une valeur à chaque condition de filtre et utilisez au plus 20 conditions, 100 valeurs par condition et 1000 caractères de texte.",
       "badge": "{{count}} filtre",
       "badge_other": "{{count}} filtres",
       "badge_many": "{{count}} filtres",
@@ -490,11 +493,9 @@
       "valueLabel": "Valeur de filtre"
     },
     "columns": {
-      "url": "URL",
       "events": "Événements",
       "session": "Session",
-      "status": "Statut",
-      "actions": "Actions"
+      "status": "Statut"
     },
     "empty": {
       "title": "Aucun webhook configuré",
@@ -544,6 +545,33 @@
       "call.missed": "Lorsqu'un appel reste sans réponse",
       "status.received": "Lorsqu'un contact publie un statut",
       "all": "Tous les événements"
+    },
+    "auth": {
+      "title": "Authentification des livraisons",
+      "hint": "Facultatif. Les valeurs enregistrées ne sont plus jamais affichées.",
+      "editHint": "Le secret et les en-têtes enregistrés ne sont jamais affichés. Laissez cette section intacte pour les conserver.",
+      "secret": "Secret de signature",
+      "secretHint": "De 16 à 255 caractères. Chaque livraison porte une signature HMAC-SHA256 dans l'en-tête X-OpenWA-Signature.",
+      "secretKeepPlaceholder": "Laissez vide pour conserver le secret actuel",
+      "generateSecret": "Générer",
+      "copySecret": "Copier",
+      "secretCopied": "Secret de signature copié",
+      "removeSecret": "Ne plus signer les livraisons (supprimer le secret)",
+      "headers": "En-têtes personnalisés",
+      "headerName": "Nom de l'en-tête",
+      "headerValue": "Valeur de l'en-tête",
+      "addHeader": "Ajouter un en-tête",
+      "removeHeader": "Retirer l'en-tête",
+      "replaceHeaders": "Remplacer les en-têtes personnalisés",
+      "replaceHint": "Ces lignes remplacent tous les en-têtes enregistrés. Sans ligne, les en-têtes enregistrés sont supprimés.",
+      "errors": {
+        "headerName": "Les noms d'en-tête ne peuvent contenir que des lettres, des chiffres et des tirets.",
+        "headerValue": "Les valeurs d'en-tête sont limitées à 1024 caractères, sans caractères de contrôle ni caractères hors Latin-1.",
+        "headerReserved": "Content-Type, User-Agent, X-OpenWA-* et les en-têtes de connexion sont définis par la passerelle et ne peuvent pas être utilisés.",
+        "headerDuplicate": "Chaque nom d'en-tête ne peut être utilisé qu'une seule fois.",
+        "tooMany": "50 en-têtes personnalisés au maximum sont autorisés.",
+        "secretLength": "Le secret de signature doit comporter entre 16 et 255 caractères."
+      }
     }
   },
   "templates": {
@@ -577,6 +605,7 @@
     },
     "empty": {
       "title": "Aucun template enregistré",
+      "noMatch": "Aucun template ne correspond à votre recherche.",
       "description": "Créez un template réutilisable pour accélérer vos réponses et notifications courantes.",
       "noSessionsTitle": "Aucune session disponible",
       "noSessionsDesc": "Créez une session WhatsApp avant d'ajouter des templates.",
@@ -603,6 +632,7 @@
     "createdTitle": "Clé API créée",
     "createdHint": "Copiez cette clé maintenant. Vous ne pourrez plus la revoir.",
     "namePlaceholder": "ex : Clé de Production",
+    "nameTooShort": "Utilisez au moins 3 caractères.",
     "rolesTitle": "Référence des rôles",
     "roles": {
       "admin": "Administrateur",
@@ -621,11 +651,13 @@
       "status": "Statut",
       "lastUsed": "Dernière utilisation",
       "actions": "Actions",
-      "sessions": "Sessions"
+      "sessions": "Sessions",
+      "restrictions": "Restrictions"
     },
     "statuses": {
       "active": "Active",
-      "revoked": "Révoquée"
+      "revoked": "Révoquée",
+      "expired": "Expirée"
     },
     "empty": {
       "title": "Aucune clé API créée",
@@ -643,10 +675,9 @@
       "revoke": "Révoquer"
     },
     "actions": {
-      "copy": "Copier",
       "revoke": "Révoquer",
       "delete": "Supprimer",
-      "editSessions": "Modifier les sessions"
+      "edit": "Modifier l'accès"
     },
     "sessions": {
       "label": "Accès aux sessions",
@@ -654,10 +685,36 @@
       "all": "Toutes les sessions",
       "empty": "Aucune session pour le moment. Cette clé pourra accéder à toutes dès qu’il y en aura.",
       "restricted": "{{count}} sélectionnées",
-      "editTitle": "Modifier l’accès aux sessions",
       "save": "Enregistrer",
       "choose": "Choisir des sessions",
       "leaveAll": "Laisser pour toutes les sessions"
+    },
+    "edit": {
+      "title": "Modifier l'accès de la clé",
+      "signedIn": "Ce tableau de bord est connecté avec cette clé. Modifier son rôle, ses adresses IP, ses discussions ou son expiration peut vous déconnecter."
+    },
+    "restrictions": {
+      "none": "Aucune",
+      "ips": "IP : {{count}}",
+      "chats": "Discussions : {{count}}",
+      "expires": "Expire le {{date}}",
+      "expired": "Expirée le {{date}}"
+    },
+    "ips": {
+      "label": "Adresses IP autorisées (facultatif)",
+      "hint": "Une adresse IP ou une plage CIDR par ligne. Laissez vide pour accepter toute adresse.",
+      "invalid": "Ni une adresse IPv4 ni une plage CIDR : {{value}}"
+    },
+    "chats": {
+      "label": "Accès aux discussions (facultatif)",
+      "hint": "Une discussion par ligne : un ID de groupe se terminant par @g.us, un ID de contact se terminant par @c.us ou @lid, ou un numéro de téléphone. Laissez vide pour toutes les discussions. Une clé limitée à des discussions ne peut utiliser que les routes ouvertes à ce type de clé ; le WebSocket des événements et MCP la refusent.",
+      "invalid": "Ni un ID de discussion ni un numéro de téléphone : {{value}}"
+    },
+    "expiry": {
+      "label": "Expire le (facultatif)",
+      "hint": "Dans le fuseau horaire de ce navigateur. Laissez vide pour une clé qui n'expire jamais.",
+      "clear": "Retirer l'expiration",
+      "invalid": "Saisissez une date et une heure complètes, au plus tard en l'an 9999, ou videz le champ pour une clé qui n'expire jamais."
     }
   },
   "logs": {
@@ -832,7 +889,7 @@
       "sslRejectUnauthorized": "Vérifier le certificat SSL",
       "sslRejectUnauthorizedDesc": "Rejeter les certificats auto-signés ou non valides. Désactivez cette option pour les bases Postgres gérées avec des certificats auto-signés (Supabase, Heroku, Render, Railway).",
       "migrationsTitle": "Migrations de base de données",
-      "migrationsStatus": "Le schéma est auto-synchronisé avec TypeORM",
+      "migrationsStatus": "Les migrations en attente sont appliquées automatiquement au démarrage",
       "migrationsHint": "Les migrations sont gérées automatiquement. Utilisez la CLI pour les migrations manuelles."
     },
     "engine": {
@@ -855,7 +912,7 @@
     "redis": {
       "title": "Redis",
       "enable": "Activer Redis",
-      "enableDesc": "Requis pour le cache, le stockage des sessions et les files d'attente BullMQ",
+      "enableDesc": "Utilisé pour le cache, les files d'attente BullMQ, les compteurs de limitation de débit et la diffusion WebSocket multi-nœuds",
       "useBuiltIn": "Utiliser le conteneur Redis intégré",
       "builtInDesc": "OpenWA gérera un conteneur Redis pour vous",
       "queueTitle": "Activer le système de file d'attente BullMQ",
@@ -867,7 +924,7 @@
       "failed": "Échoué",
       "viewBullMq": "Voir le tableau de bord Bull MQ",
       "disabledTitle": "Redis est désactivé",
-      "disabledDesc": "Activez Redis pour le cache, le stockage des sessions et les files d'attente de messages BullMQ.",
+      "disabledDesc": "Activez Redis pour le cache, les files d'attente de messages BullMQ, les compteurs de limitation de débit et la diffusion WebSocket multi-nœuds.",
       "passwordOptional": "(optionnel)",
       "bullMqUrlCopied": "URL du tableau de bord Bull MQ copiée",
       "bullMqUrlHint": "Ouvrez-le avec une clé d'API ADMIN — un onglet de navigateur ne peut pas s'authentifier."
@@ -907,8 +964,8 @@
       "checking": "Vérification du statut du serveur...",
       "dontClose": "Veuillez ne pas fermer cette fenêtre",
       "successMsg": "Le serveur est de nouveau en ligne ! La page va se recharger automatiquement.",
-      "errorMsg": "Le serveur n'a pas répondu après 30 secondes. Veuillez vérifier les journaux Docker et redémarrer manuellement.",
-      "outcomeUnknown": "Le proxy a expiré avant que le serveur ne réponde. Le redémarrage est peut-être encore en cours ; rechargez la page dans une minute pour vérifier.",
+      "errorMsg": "Le serveur n'a pas répondu. Veuillez vérifier les journaux Docker et redémarrer manuellement.",
+      "outcomeUnknown": "Le proxy a renvoyé une erreur avant que le serveur ne réponde ; on ne sait donc pas si le redémarrage est en cours. Rechargez la page dans une minute pour vérifier.",
       "reload": "Recharger la page"
     },
     "toasts": {
@@ -922,7 +979,7 @@
       "storageWarning": "Les fichiers multimédias existants ne sont pas déplacés automatiquement vers le nouveau backend de stockage ; ils resteront à leur ancien emplacement.",
       "downloadBackup": "Télécharger d'abord la sauvegarde",
       "backupTitle": "Sauvegarde et restauration des données",
-      "backupHint": "Exportez toutes les données au format JSON avant de changer de base de données, puis importez-les après le changement. La sauvegarde contient les secrets de webhook et les identifiants de proxy en clair — conservez-la de manière sécurisée et supprimez-la après la restauration.",
+      "backupHint": "Exportez toutes les données au format JSON avant de changer de base de données, puis importez-les après le changement. Les secrets de signature des webhooks, les en-têtes personnalisés des webhooks et les identifiants de proxy ne sont pas inclus ; saisissez-les à nouveau après la restauration. Les secrets et paramètres des instances d'intégration sont inclus en clair : conservez le fichier de manière sécurisée et supprimez-le après la restauration.",
       "export": "Exporter les données",
       "import": "Importer les données",
       "exportFailed": "Impossible d'exporter les données",
@@ -970,7 +1027,7 @@
     "config": {
       "title": "Configurer {{name}}",
       "noOptions": "Aucune option de configuration disponible pour ce plugin",
-      "uiHandshakeError": "L’interface de configuration du plugin ne s’est pas initialisée. Utilisez le formulaire ci-dessous s’il est disponible.",
+      "uiHandshakeError": "L’interface de configuration du plugin ne s’est pas initialisée.",
       "save": "Enregistrer la configuration",
       "addItem": "Ajouter",
       "tabConfig": "Configuration",
@@ -1001,7 +1058,7 @@
       "healthFail": "Bilan de santé échoué",
       "healthError": "Erreur lors du bilan de santé",
       "savedTitle": "Configuration enregistrée",
-      "savedDesc": "Redémarrage du serveur requis pour appliquer les modifications.",
+      "savedDesc": "Les modifications prennent effet sans redémarrage du serveur.",
       "saveFailed": "Échec de l'enregistrement",
       "installed": "Plugin installé",
       "installFailed": "Échec de l'installation",
@@ -1106,7 +1163,7 @@
   },
   "search": {
     "placeholder": "Rechercher des messages…",
-    "results": "{{count}} résultats",
+    "loadMore": "Afficher plus ({{shown}} sur {{total}})",
     "empty": "Aucun message trouvé.",
     "error": "Échec de la recherche. Réessayez.",
     "unavailable": "La recherche n'est pas configurée.",

@@ -10,6 +10,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   comparePair,
   handToken,
@@ -97,6 +102,19 @@ test('comparePair flags a widened union and an enum mismatch at token level', ()
   const diffs = comparePair('Sample', hand, 'SampleDto', schemas.SampleDto, schemas);
   assert.ok(diffs.some(d => d.includes('"direction": hand string, contract enum(incoming,outgoing)')));
   assert.ok(diffs.some(d => d.includes('"count": hand number|null, contract number')));
+});
+
+test('comparePair flags a primitive widened to a union of primitives', () => {
+  // A two-member union reduces to union(...), which is not a simple token; dropping the diff on that
+  // ground let `string | number` (or Python's `str | int`) stand in for a plain `string` unseen.
+  const hand = {
+    id: { optional: false, token: 'string | number' },
+    direction: { optional: false, token: "'incoming' | 'outgoing'" },
+    count: { optional: false, token: 'str | int' },
+  };
+  const diffs = comparePair('Sample', hand, 'SampleDto', schemas.SampleDto, schemas);
+  assert.ok(diffs.some(d => d.includes('"id": hand union(number,string), contract string')));
+  assert.ok(diffs.some(d => d.includes('"count": hand union(int,str), contract number')));
 });
 
 test('parseObjectToken splits nested object tokens without losing members', () => {
@@ -242,6 +260,24 @@ test('parseJavaTypes: enum constants resolve to their wire values, annotated or 
   assert.equal(s.shades.token, 'array<enum(BLUE,RED)>');
 });
 
+test('parseJavaTypes: a bare UNKNOWN sentinel is not a wire member, an annotated "unknown" is', () => {
+  const src = [
+    'public enum Status {',
+    '    @SerializedName("ready") READY,',
+    '    /** Decoded when the gateway sends a newer value. */',
+    '    UNKNOWN',
+    '}',
+    'public enum Kind {',
+    '    @SerializedName("chat") CHAT,',
+    '    @SerializedName("unknown") UNKNOWN',
+    '}',
+    'public record Sample(Status status, Kind kind) {}',
+  ].join('\n');
+  const s = parseJavaTypes([src]).Sample;
+  assert.equal(s.status.token, 'enum(ready)');
+  assert.equal(s.kind.token, 'enum(chat,unknown)');
+});
+
 test('isSimpleToken-gated diffing reaches inside an array of enum members', () => {
   const hand = { events: { optional: false, token: 'array<enum(a,b)>' } };
   const schema = { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { enum: ['a', 'c'] } } } };
@@ -280,4 +316,19 @@ test('parseJavaTypes: boxed numerics reduce to number rather than their class na
   );
   const schema = { type: 'object', required: ['a'], properties: { a: { type: 'string' } } };
   assert.equal(comparePair('Sample', { a: s.a }, 'Dto', schema, {}, false).length, 1);
+});
+
+test('a run through a symlinked path still reports', () => {
+  // Node realpaths the main module's URL but not argv[1], so a guard comparing the unresolved path
+  // skipped every check and exited 0 whenever the invocation crossed a symlink (/tmp on macOS).
+  const dir = mkdtempSync(join(tmpdir(), 'contract-shapes-'));
+  try {
+    symlinkSync(fileURLToPath(new URL('..', import.meta.url)), join(dir, 'repo'));
+    const run = spawnSync(process.execPath, [join(dir, 'repo', 'scripts', 'check-contract-shapes.mjs')], {
+      encoding: 'utf8',
+    });
+    assert.match(run.stdout + run.stderr, /pairs compared/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

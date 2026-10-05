@@ -73,11 +73,7 @@
 }
 
 .login-container .login-form {
-  text-align: left;
-}
-
-.login-container [dir='rtl'] .login-form {
-  text-align: right;
+  text-align: start;
 }
 
 .login-container .input-group {

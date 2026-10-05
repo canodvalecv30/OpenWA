@@ -799,6 +799,26 @@ describe('IntegrationInstanceController update audit', () => {
     expect(audit.logInfo).not.toHaveBeenCalledWith(AuditAction.INTEGRATION_INSTANCE_UPDATED, expect.anything());
   });
 
+  it('answers 404, not 500, when the instance is deleted while the patch is in flight', async () => {
+    const { controller, audit, update, setPluginSessions } = build();
+    update.mockResolvedValue(null);
+
+    await expect(controller.patch('chatwoot-adapter', 'acct1', { enabled: false })).rejects.toThrow(NotFoundException);
+    expect(setPluginSessions).not.toHaveBeenCalled();
+    expect(audit.logInfo).not.toHaveBeenCalledWith(AuditAction.INTEGRATION_INSTANCE_UPDATED, expect.anything());
+  });
+
+  it('answers 404, not 500, when the instance is deleted while regenerate-secret is in flight', async () => {
+    const { controller, audit, instances } = build();
+    Object.assign(instances, { regenerateSecret: jest.fn().mockResolvedValue(null) });
+
+    await expect(controller.regenerate('chatwoot-adapter', 'acct1')).rejects.toThrow(NotFoundException);
+    expect(audit.logInfo).not.toHaveBeenCalledWith(
+      AuditAction.INTEGRATION_INSTANCE_SECRET_REGENERATED,
+      expect.anything(),
+    );
+  });
+
   // `enabled` rides in the same update() as scope and config, so the row is written by ONE save. A
   // second write could fail after the first landed, leaving the row half-patched with the scope
   // binding and the audit entry skipped.

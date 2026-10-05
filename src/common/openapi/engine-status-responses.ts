@@ -23,6 +23,15 @@ export const ENGINE_NOT_READY_409 =
   'into it, and for those few seconds the answer is a `409` naming the reload; retry shortly.';
 
 /**
+ * `EngineRegistry.require()`'s default `BadRequestException` (400): the session has no engine at all,
+ * the case ENGINE_NOT_READY_409 leaves out. The catalog and status routes answer this with a 404
+ * instead; see SESSION_NOT_STARTED_404.
+ */
+export const SESSION_NOT_STARTED_400 =
+  'The session is not started: no engine is running for it (never started, stopped, or logged out). ' +
+  'Start the session and retry.';
+
+/**
  * `EngineNotReadyError` (409) on `POST /sessions/:sessionId/pairing-code`, where the generic wording
  * above points the caller at the wrong state: both engines accept a pairing request only while the
  * session is `qr_ready`, and a session that reads `ready` is already linked and answers `400`.

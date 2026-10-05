@@ -23,10 +23,14 @@ describe('Storage export streams one file at a time (e2e, real archiver)', () =>
   };
 
   /** An openFile that tracks how many file streams are open at once and how many were ever opened. */
-  function trackingOpener(failing: Record<string, 'open' | 'read'> = {}) {
+  function trackingOpener(failing: Record<string, 'gone' | 'broken' | 'read'> = {}) {
     const stats = { opened: 0, open: 0, maxOpen: 0 };
     const openFile = (name: string): Promise<ExportFileSource> => {
-      if (failing[name] === 'open') return Promise.reject(new Error(`ENOENT: ${name}`));
+      // 'gone' is a file deleted since the listing (what local storage and S3 report as missing);
+      // 'broken' is any other open failure, such as a throttle or a reset connection.
+      if (failing[name] === 'gone')
+        return Promise.reject(Object.assign(new Error(`ENOENT: ${name}`), { code: 'ENOENT' }));
+      if (failing[name] === 'broken') return Promise.reject(new Error(`EACCES: ${name}`));
       const data = contentFor(name);
       stats.opened++;
       stats.open++;
@@ -64,7 +68,7 @@ describe('Storage export streams one file at a time (e2e, real archiver)', () =>
   });
 
   it('never holds more than one file stream open, and the archive round-trips through the importer', async () => {
-    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'open' });
+    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'gone' });
     const logger = makeLogger();
     const output = await createExportStream(() => Promise.resolve(files), openFile, logger as never);
 
@@ -80,12 +84,27 @@ describe('Storage export streams one file at a time (e2e, real archiver)', () =>
 
     expect(stats.maxOpen).toBe(1);
     expect(stats.open).toBe(0);
-    // The unopenable file is skipped with a warning, as before; every other file arrives intact.
+    // A file deleted since the listing is skipped with a warning; every other file arrives intact.
     expect(logger.warn).toHaveBeenCalledWith('Failed to export file: media/file-c.bin', expect.anything());
     expect(count).toBe(files.length - 1);
     for (const name of files.filter(f => f !== 'media/file-c.bin')) {
       expect(imported.get(name)?.equals(contentFor(name))).toBe(true);
     }
+  });
+
+  it('fails the output when a file cannot be opened for a reason other than being gone', async () => {
+    const { stats, openFile } = trackingOpener({ 'media/file-b.bin': 'broken' });
+    const output = await createExportStream(() => Promise.resolve(files), openFile, makeLogger() as never);
+
+    const error = await new Promise<Error>(resolve => {
+      output.on('error', resolve);
+      output.resume();
+    });
+
+    expect(error.message).toBe('EACCES: media/file-b.bin');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(stats.opened).toBe(1);
+    expect(stats.open).toBe(0);
   });
 
   it('fails the output with the read error when a file fails part-way, and stops opening files', async () => {

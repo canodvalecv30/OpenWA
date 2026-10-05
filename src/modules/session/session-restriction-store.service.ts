@@ -48,10 +48,14 @@ export class SessionRestrictionStore {
    * connect, so an un-deduped webhook would fire on a loop for one unchanged fact.
    *
    * The stored entry is refreshed either way, so a re-report with a later `expiresAt` updates what
-   * the API serves without being announced as a new restriction.
+   * the API serves without being announced as a new restriction. Compared against what is in force:
+   * a same-cause restriction imposed after the last one lapsed is a new onset, not a re-report. A
+   * report that is itself already over is compared against the stored entry, so a clock running
+   * ahead of WhatsApp's does not announce the same lapsed timelock on every connect.
    */
   set(sessionId: string, restriction: AccountRestriction): boolean {
-    const previous = this.restrictions.get(sessionId);
+    const lapsed = restriction.expiresAt != null && restriction.expiresAt <= Date.now();
+    const previous = lapsed ? this.restrictions.get(sessionId) : this.inForce(sessionId);
     this.restrictions.set(sessionId, restriction);
     this.publishCount();
     return previous?.kind !== restriction.kind || previous?.code !== restriction.code;

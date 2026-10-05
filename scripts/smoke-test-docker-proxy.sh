@@ -1,19 +1,20 @@
 #!/bin/sh
 # Smoke test: verify openwa-api can list containers via docker-socket-proxy.
 # Run this after `docker compose up -d` with the stack fully started.
-# Usage: ./scripts/smoke-test-docker-proxy.sh [API_KEY]
+# Usage: ./scripts/smoke-test-docker-proxy.sh <unscoped-admin-api-key>
 set -e
 
 API_KEY="${1:-}"
 BASE_URL="${BASE_URL:-http://localhost:2785}"
 
 if [ -z "$API_KEY" ]; then
-  echo "Usage: $0 <admin-api-key>" >&2
+  echo "Usage: $0 <unscoped-admin-api-key>" >&2
   exit 1
 fi
 
 echo "==> Checking openwa-api health..."
-STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE_URL/api/health")
+# No -f on these calls: under set -e a failing status would end the script before the check says why.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/health" || true)
 if [ "$STATUS" != "200" ]; then
   echo "FAIL: /api/health returned HTTP $STATUS (expected 200)" >&2
   exit 1
@@ -21,16 +22,25 @@ fi
 echo "PASS: API health OK"
 
 echo ""
-echo "==> Verifying Docker proxy connectivity via infrastructure status..."
-RESPONSE=$(curl -sf \
+echo "==> Checking the admin API answers (infrastructure status)..."
+RESPONSE=$(curl -s -w '\n%{http_code}' \
   -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/api/infra/status")
+  "$BASE_URL/api/infra/status" || true)
+CODE=$(printf '%s\n' "$RESPONSE" | tail -n 1)
+if [ "$CODE" != "200" ]; then
+  # Only an auth failure is about the key. The route also refuses a session-scoped ADMIN key and one
+  # used from outside its IP allow-list.
+  HINT=''
+  case "$CODE" in
+    401 | 403) HINT='; the key must be an unscoped ADMIN key allowed from this IP' ;;
+  esac
+  echo "FAIL: /api/infra/status returned HTTP $CODE (expected 200$HINT)" >&2
+  exit 1
+fi
+echo "Response: $(printf '%s\n' "$RESPONSE" | sed '$d')"
 
-echo "Response: $RESPONSE"
-
-# The key check: docker availability flag from DockerService.isDockerAvailable()
-# If the proxy is unreachable, the service logs a warning and sets isAvailable=false.
-# We indirectly validate this by confirming the API responds without error.
+# This proves only that the admin API answers: the status payload carries no Docker flag. Whether
+# the proxy admits what orchestration needs is checked from inside openwa-api below.
 echo ""
 echo "==> Verifying docker-proxy container is running..."
 PROXY_STATE=$(docker inspect --format='{{.State.Status}}' openwa-docker-proxy 2>/dev/null || echo "not_found")
@@ -44,7 +54,7 @@ echo ""
 echo "==> Verifying the proxy permits the read operations orchestration needs (from openwa-api)..."
 # openwa-api is the only container that can reach docker-proxy:2375 (internal network), so
 # the ACL is exercised from inside it. Node's global fetch (Node 18+) avoids a curl dependency.
-for endpoint in _ping containers/json; do
+for endpoint in _ping containers/json info images/json volumes; do
   CODE=$(docker exec openwa-api node -e "fetch('http://docker-proxy:2375/$endpoint').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
   if [ "$CODE" != "200" ]; then
     echo "FAIL: GET /$endpoint via proxy returned HTTP $CODE (expected 200)" >&2

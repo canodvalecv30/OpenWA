@@ -59,8 +59,8 @@ func (s *MediaService) ConvertVoice(ctx context.Context, sessionID string, in Co
 }
 
 // ConvertVideo converts video into an MP4 every WhatsApp client accepts: baseline
-// H.264 with AAC audio, long edge bounded at 1280, index moved to the front for
-// immediate playback. Requires an OPERATOR-level key.
+// H.264 with AAC audio, fitted inside 1280x720 (720x1280 portrait), index moved to
+// the front for immediate playback. Requires an OPERATOR-level key.
 func (s *MediaService) ConvertVideo(ctx context.Context, sessionID string, in ConvertMediaInput) (*ConvertedMedia, error) {
 	var out ConvertedMedia
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/convert/video", nil, in, &out)

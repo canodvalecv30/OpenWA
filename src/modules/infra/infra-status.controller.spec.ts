@@ -55,7 +55,9 @@ describe('InfraStatusController.getStatus DB health (active SELECT 1 probe, not 
 describe('InfraStatusController.getStatus queue job counts', () => {
   function buildStatusController(opts: { queueEnabled: boolean; queue?: { getJobCounts: jest.Mock } }) {
     const configService = {
-      get: (key: string, def?: unknown) => (key === 'queue.enabled' ? opts.queueEnabled : def),
+      // engine.type=baileys skips the wa-web-version registry fetch (no network in unit tests).
+      get: (key: string, def?: unknown) =>
+        key === 'queue.enabled' ? opts.queueEnabled : key === 'engine.type' ? 'baileys' : def,
     };
     const dataSource = { isInitialized: true, query: jest.fn().mockResolvedValue([{ '1': 1 }]) } as unknown;
     const engineFactory = { create: jest.fn() };
@@ -128,6 +130,25 @@ describe('InfraStatusController.getStatus engine (reads the real engine.puppetee
     expect(status.engine.headless).toBe(false);
     expect(status.engine.browserArgs).toBe('--foo --bar');
     expect(status.engine.sessionDataPath).toBe('./sess');
+  });
+
+  it('reports the default Chromium flags when no args are configured', async () => {
+    const config = { get: (key: string, def?: unknown) => (key === 'engine.type' ? 'whatsapp-web.js' : def) };
+    const ds = { isInitialized: true, query: jest.fn().mockResolvedValue([{ '1': 1 }]) };
+    const controller = new InfraStatusController(
+      config as never,
+      ds as never,
+      ds as never,
+      {} as never,
+      { isDockerAvailable: () => false } as never,
+      { isAvailable: () => Promise.resolve(false) } as never,
+      { isS3Available: () => false, refreshS3Availability: () => Promise.resolve(false) } as never,
+    );
+
+    const status = await controller.getStatus();
+    expect(status.engine.browserArgs).toBe(
+      '--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu',
+    );
   });
 });
 
@@ -215,6 +236,26 @@ describe('InfraStatusController.getStatus envPinned', () => {
     expect(status.envPinned).toEqual(['ENGINE_TYPE']);
     // PATH is shadowing too but has no control on the page — naming it would be noise.
     expect(status.envPinned).not.toContain('PATH');
+  });
+
+  it('reports the storage path and engine launch options the Quick Start stack pins', async () => {
+    // docker-compose.dev.yml forwards these four with non-empty defaults, so a dashboard edit reverts.
+    recordPinnedEnvKeys({
+      SESSION_DATA_PATH: '/app/data/sessions',
+      PUPPETEER_HEADLESS: 'true',
+      PUPPETEER_ARGS: '--no-sandbox',
+      STORAGE_LOCAL_PATH: '/app/data/media',
+      PATH: '/usr/bin',
+    });
+
+    const status = await buildController().getStatus();
+
+    expect(status.envPinned).toEqual([
+      'STORAGE_LOCAL_PATH',
+      'PUPPETEER_HEADLESS',
+      'SESSION_DATA_PATH',
+      'PUPPETEER_ARGS',
+    ]);
   });
 
   it('reports an empty list when nothing above data/.env.generated supplies a selection key', async () => {

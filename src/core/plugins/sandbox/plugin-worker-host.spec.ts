@@ -1,3 +1,4 @@
+import { MessageChannel } from 'worker_threads';
 import { PluginWorkerHost } from './plugin-worker-host';
 import { PluginWorkerChannel, HostToWorkerMessage, WorkerToHostMessage } from './protocol';
 import { HookManager } from '../../hooks/hook-manager.service';
@@ -39,6 +40,24 @@ class FakeChannel implements PluginWorkerChannel {
 const lastLifecycle = (ch: FakeChannel) => ch.last() as Extract<HostToWorkerMessage, { kind: 'lifecycle' }>;
 
 describe('PluginWorkerHost', () => {
+  it('drops a malformed worker message instead of throwing out of the channel listener', async () => {
+    // Plugin code can post to parentPort directly; a throw here would be an uncaught exception in the host.
+    const ch = new FakeChannel();
+    const onLog = jest.fn(() => {
+      throw new TypeError('logger[level] is not a function');
+    });
+    const host = new PluginWorkerHost(ch, undefined, undefined, undefined, onLog);
+    const p = host.load('/p/index.js');
+
+    expect(() => ch.reply(null as unknown as WorkerToHostMessage)).not.toThrow();
+    expect(() => ch.reply({ kind: 'log', level: 'log', message: 'x' })).not.toThrow();
+    expect(onLog).toHaveBeenCalledTimes(1);
+
+    // The host keeps serving the worker afterwards.
+    ch.reply({ kind: 'ready' });
+    await expect(p).resolves.toBeUndefined();
+  });
+
   it('posts a load message and resolves load() when the worker reports ready', async () => {
     const ch = new FakeChannel();
     const host = new PluginWorkerHost(ch);
@@ -861,6 +880,213 @@ describe('PluginWorkerHost', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+  });
+
+  describe('liveness probe after a dispatch timeout', () => {
+    const PROBE_MS = 1000;
+    const pings = (ch: FakeChannel) =>
+      ch.sent.filter((m): m is Extract<HostToWorkerMessage, { kind: 'ping' }> => m.kind === 'ping');
+    const probingHost = (ch: FakeChannel, onUnresponsive: () => void) =>
+      new PluginWorkerHost(
+        ch,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        PROBE_MS,
+        onUnresponsive,
+      );
+    const hook = (host: PluginWorkerHost) =>
+      host.dispatchHook({ event: 'message:received', data: {}, source: 'Engine', timeoutMs: 500 });
+    const webhook = (host: PluginWorkerHost) =>
+      host.dispatchWebhook({
+        instanceId: 'i',
+        route: 'r',
+        method: 'POST',
+        headers: {},
+        query: {},
+        body: '',
+        rawBody: '',
+        verified: true,
+        deliveryId: 'd',
+        timeoutMs: 500,
+      });
+
+    // The verdict is given one loop turn after the window closes (see armProbe); a fake setImmediate
+    // queued while timers are advancing runs on the next timer step.
+    const verdict = () => jest.advanceTimersToNextTimer();
+
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('posts one ping on a hook timeout, and none while that probe is still in flight', async () => {
+      const ch = new FakeChannel();
+      const host = probingHost(ch, jest.fn());
+      const first = hook(host);
+      const second = hook(host);
+      jest.advanceTimersByTime(500);
+      await Promise.all([first, second]);
+      expect(pings(ch)).toHaveLength(1);
+    });
+
+    it('a pong clears the probe: a slow async handler is not reported', async () => {
+      const ch = new FakeChannel();
+      const onUnresponsive = jest.fn();
+      const host = probingHost(ch, onUnresponsive);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      ch.reply({ kind: 'pong', id: pings(ch)[0].id });
+      jest.advanceTimersByTime(PROBE_MS * 3);
+      expect(onUnresponsive).not.toHaveBeenCalled();
+
+      // The next timeout probes again rather than being suppressed by the answered one.
+      const next = hook(host);
+      jest.advanceTimersByTime(500);
+      await next;
+      expect(pings(ch)).toHaveLength(2);
+    });
+
+    it('reports a worker that never answers the probe, exactly once', async () => {
+      const ch = new FakeChannel();
+      const onUnresponsive = jest.fn();
+      const host = probingHost(ch, onUnresponsive);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      jest.advanceTimersByTime(PROBE_MS);
+      verdict();
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+
+      const again = hook(host);
+      jest.advanceTimersByTime(500 + PROBE_MS * 2);
+      await again;
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    });
+
+    it('a worker still answering a backlog is not reported while its pong waits behind it', async () => {
+      const ch = new FakeChannel();
+      const onUnresponsive = jest.fn();
+      const host = probingHost(ch, onUnresponsive);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      const hookId = (ch.sent.find(m => m.kind === 'hook') as { id: number }).id;
+
+      // Late results keep arriving, each inside the window: the event loop is turning.
+      for (let i = 0; i < 3; i++) {
+        jest.advanceTimersByTime(PROBE_MS - 100);
+        ch.reply({ kind: 'hook-result', id: hookId, continue: true });
+      }
+      expect(onUnresponsive).not.toHaveBeenCalled();
+
+      // A full window with no answer at all is still reported.
+      jest.advanceTimersByTime(PROBE_MS);
+      verdict();
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    });
+
+    it('log lines do not count as progress: a synchronous loop can emit them', async () => {
+      const ch = new FakeChannel();
+      const onUnresponsive = jest.fn();
+      const host = probingHost(ch, onUnresponsive);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      jest.advanceTimersByTime(PROBE_MS - 100);
+      ch.reply({ kind: 'log', level: 'log', message: 'still spinning' });
+      jest.advanceTimersByTime(100);
+      verdict();
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    });
+
+    it('webhook and search timeouts probe too', async () => {
+      for (const dispatch of [
+        webhook,
+        (host: PluginWorkerHost) => host.dispatchSearch({ query: { q: 'x' }, timeoutMs: 500 }),
+      ]) {
+        const ch = new FakeChannel();
+        const onUnresponsive = jest.fn();
+        const host = probingHost(ch, onUnresponsive);
+        const pending = dispatch(host);
+        jest.advanceTimersByTime(500);
+        await pending;
+        expect(pings(ch)).toHaveLength(1);
+        jest.advanceTimersByTime(PROBE_MS);
+        verdict();
+        expect(onUnresponsive).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('does not probe when no liveness budget is configured', async () => {
+      const ch = new FakeChannel();
+      const host = new PluginWorkerHost(ch);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      expect(pings(ch)).toHaveLength(0);
+    });
+
+    // Real timers and a real MessagePort: the race lives in the event loop's phase order. After a host
+    // stall the timers phase runs before the poll phase that delivers the port message, so a pong the
+    // worker sent in time was read only after the probe timer had already fired.
+    it('reads a pong that was queued while the host was stalled before giving its verdict', async () => {
+      jest.useRealTimers();
+      const SHORT_PROBE_MS = 50;
+      const { port1, port2 } = new MessageChannel();
+      const ch = new FakeChannel();
+      ch.postMessage = (message: HostToWorkerMessage): void => {
+        ch.sent.push(message);
+        if (message.kind !== 'ping') return;
+        setImmediate(() => {
+          port2.postMessage({ kind: 'pong', id: message.id });
+          const until = Date.now() + SHORT_PROBE_MS * 2;
+          while (Date.now() < until); // the host's own loop is blocked past the probe window
+        });
+      };
+      port1.on('message', (message: WorkerToHostMessage) => ch.reply(message));
+      const onUnresponsive = jest.fn();
+      const host = new PluginWorkerHost(
+        ch,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        SHORT_PROBE_MS,
+        onUnresponsive,
+      );
+      try {
+        await host.dispatchHook({ event: 'message:received', data: {}, source: 'Engine', timeoutMs: 10 });
+        await new Promise(resolve => setTimeout(resolve, SHORT_PROBE_MS * 4));
+
+        expect(pings(ch)).toHaveLength(1);
+        expect(onUnresponsive).not.toHaveBeenCalled();
+      } finally {
+        port1.close();
+      }
+    });
+
+    it('a worker exit cancels a probe in flight', async () => {
+      const ch = new FakeChannel();
+      const onUnresponsive = jest.fn();
+      const host = probingHost(ch, onUnresponsive);
+      const pending = hook(host);
+      jest.advanceTimersByTime(500);
+      await pending;
+      ch.crash(1);
+      jest.advanceTimersByTime(PROBE_MS * 2);
+      expect(onUnresponsive).not.toHaveBeenCalled();
     });
   });
 });

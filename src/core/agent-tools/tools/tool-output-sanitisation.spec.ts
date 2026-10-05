@@ -2,7 +2,7 @@
  * Tests for tool output sanitisation.
  * Each test documents a data-leak or schema bug that was present before the fix.
  */
-import { BadRequestException, HttpException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, HttpException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { invokeTool } from '../tool-invoker';
 import { webhookTools } from './webhook.tools';
 import { sessionTools } from './session.tools';
@@ -245,10 +245,11 @@ describe('FIX 7: handleToolError exposes structured BadRequestException detail',
   });
 
   it('NotFoundException with a plain string stays as that string', () => {
-    const err = new BadRequestException('Session x not found');
+    const err = new NotFoundException('Session x not found');
     const result = handleToolError(err);
     const content = (result.content[0] as { type: string; text: string }).text;
-    const payload = JSON.parse(content) as { message: unknown };
+    const payload = JSON.parse(content) as { name: unknown; message: unknown };
+    expect(payload.name).toBe('NotFoundException');
     expect(payload.message).toBe('Session x not found');
   });
 

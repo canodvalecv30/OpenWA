@@ -340,7 +340,7 @@ export class PluginCapabilityContext {
     return {
       fetch: async (url, init) => {
         // Two gates: the declared permission, then the effective host allowlist = manifest net.allow
-        // UNION the hosts of net.allowConfigHosts keys across the base config AND every per-session
+        // UNION the https origins of net.allowConfigHosts keys across the base config AND every per-session
         // override. The host gate has no firing-session context for a sandboxed plugin's cap round-trip,
         // so admit every operator-configured tenant host (all public + still SSRF-guarded at connect)
         // rather than resolving a single, possibly wrong (base-only), one. The SSRF guard inside
@@ -442,6 +442,13 @@ export class PluginCapabilityContext {
         // it reuses CONVERSATION_SEND rather than adding a new permission.
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.CONVERSATION_SEND);
         this.assertSessionActive(plugin, key.sessionId);
+        // The sandbox router checks this too; an in-process plain-JS plugin reaches here unchecked,
+        // and any other value would be stored and silently never hold the chat.
+        if (state !== 'bot' && state !== 'human' && state !== 'closed') {
+          throw new PluginCapabilityError(
+            `Plugin ${plugin.manifest.id}: handover state must be 'bot', 'human' or 'closed'`,
+          );
+        }
         const mapping = await this.hostServices.getConversationMappingPort().get({
           sessionId: key.sessionId,
           chatId: key.chatId,

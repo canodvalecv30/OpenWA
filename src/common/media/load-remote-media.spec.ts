@@ -2,7 +2,7 @@ import { fetch as undiciFetch } from 'undici';
 import { loadRemoteMediaBuffer } from './load-remote-media';
 import { BadRequestException, PayloadTooLargeException, ServiceUnavailableException } from '@nestjs/common';
 import { SsrfBlockedError } from '../security/ssrf-guard';
-import { countsTowardSendBreaker } from '../../modules/message/send-pacing.service';
+import { countsTowardSendBreaker, sentNothing } from '../../modules/message/send-pacing.service';
 
 // Media download goes through undici's fetch (via the SSRF-pinning helper); mock it, not global fetch.
 jest.mock('undici', () => {
@@ -157,6 +157,8 @@ describe('loadRemoteMediaBuffer', () => {
       const body = JSON.stringify((error as ServiceUnavailableException).getResponse());
       expect(body).not.toMatch(/10\.0\.0\.5|proxy\.example|secret/);
       expect(countsTowardSendBreaker(error)).toBe(false);
+      // Nothing reached WhatsApp, so a paced send hands its admission back.
+      expect(sentNothing(error)).toBe(true);
     });
 
     it('answers 503 for a timeout before any response', async () => {
@@ -164,6 +166,7 @@ describe('loadRemoteMediaBuffer', () => {
       const error = await failureOf();
       expect(error).toBeInstanceOf(ServiceUnavailableException);
       expect(countsTowardSendBreaker(error)).toBe(false);
+      expect(sentNothing(error)).toBe(true);
     });
 
     it('keeps 400 once the target has answered', async () => {

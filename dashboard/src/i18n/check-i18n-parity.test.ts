@@ -73,3 +73,13 @@ test('a value that starts with a URL and continues in prose is still reported as
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /\? messageTester\.bulkMediaUrlInvalid$/m);
 });
+
+test('a Hebrew plural key without the _many form older Safari selects fails the check', () => {
+  const result = runWith({
+    'he.json': c => {
+      delete c.chats.channels.subscribers_many;
+    },
+  });
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /- chats\.channels\.subscribers_many$/m);
+});

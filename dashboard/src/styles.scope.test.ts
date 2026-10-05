@@ -55,6 +55,20 @@ function selectors(css: string): string[] {
   return out;
 }
 
+// The root must appear as a whole class token: `.dashboard-stats` is a different, unscoped class.
+function scopedUnder(selector: string, root: string): boolean {
+  return new RegExp(root.replace(/[.-]/g, '\\$&') + '(?![\\w-])').test(selector);
+}
+
+test('a selector counts as scoped only when it carries the root as a whole class', () => {
+  for (const sel of ['.dashboard', '.dashboard .x', '.dashboard.dark .x', '.dashboard:hover', '.dashboard>.x']) {
+    assert.ok(scopedUnder(sel, '.dashboard'), sel);
+  }
+  for (const sel of ['.dashboard-stats', '.dashboard_x', '.x .dashboard-stats']) {
+    assert.ok(!scopedUnder(sel, '.dashboard'), sel);
+  }
+});
+
 const files = readdirSync(PAGES_DIR).filter(f => f.endsWith('.css'));
 
 for (const file of files) {
@@ -65,7 +79,7 @@ for (const file of files) {
     // The page root is the first bare single-class selector (each page CSS opens with `.x-page { … }`).
     const root = sels.find(s => /^\.[a-zA-Z][\w-]*$/.test(s));
     assert.ok(root, `${file}: could not find a root class rule`);
-    const unscoped = sels.filter(s => !s.includes(root!));
+    const unscoped = sels.filter(s => !scopedUnder(s, root!));
     assert.deepEqual(
       unscoped,
       [],

@@ -20,6 +20,7 @@ const ALLOWLIST = new Map<string, string>([
   ['audit.controller.ts :: findAll', 'scope-filters rows via resolveSessionScope'],
   ['webhooks-list.controller.ts :: findAll', 'scope-filters rows via the calling key'],
   ['webhooks-list.controller.ts :: deliveryFailures', 'scope-filters rows via the calling key'],
+  ['webhooks-list.controller.ts :: redriveDeliveryFailures', 'replays only rows inside the calling key scope'],
   ['search.controller.ts :: search', 'scope-filters results via the calling key'],
   ['session.controller.ts :: findAll', 'scope-filters sessions to the key allowlist'],
   ['session.controller.ts :: getStats', 'scope-filters the aggregate to apiKey.allowedSessions in the service'],

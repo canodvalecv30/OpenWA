@@ -258,16 +258,16 @@ flowchart LR
     TRACK --> CANCEL
 ```
 
-| ID        | Requirement                                                          | Priority | Phase |
-| --------- | -------------------------------------------------------------------- | -------- | ----- |
-| FR-BK-001 | The system must accept batches up to 100 messages                    | Medium   | 2     |
-| FR-BK-002 | The system must apply delays between messages (configurable, min 1s) | High     | 2     |
-| FR-BK-003 | The system must randomize delays for natural behavior                | Medium   | 2     |
-| FR-BK-004 | The system must track batch progress (sent/failed/pending)           | Medium   | 2     |
-| FR-BK-005 | The system must cancel a running batch                               | Medium   | 2     |
-| FR-BK-006 | The system must support template variables in batches                | Low      | 3     |
-| FR-BK-007 | The system must return a batch ID for status tracking                | High     | 2     |
-| FR-BK-008 | The system must clean up completed batches after 24 hours            | Low      | 3     |
+| ID        | Requirement                                                                                                                                 | Priority | Phase |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----- |
+| FR-BK-001 | The system must accept batches up to 100 messages                                                                                           | Medium   | 2     |
+| FR-BK-002 | The system must apply delays between messages (configurable, min 1s)                                                                        | High     | 2     |
+| FR-BK-003 | The system must randomize delays for natural behavior                                                                                       | Medium   | 2     |
+| FR-BK-004 | The system must track batch progress (sent/failed/pending)                                                                                  | Medium   | 2     |
+| FR-BK-005 | The system must cancel a running batch                                                                                                      | Medium   | 2     |
+| FR-BK-006 | The system must support template variables in batches                                                                                       | Low      | 3     |
+| FR-BK-007 | The system must return a batch ID for status tracking                                                                                       | High     | 2     |
+| FR-BK-008 | The system must prune finished batches (completed, cancelled, failed) older than the opt-in `MESSAGE_RETENTION_DAYS` (default 0 keeps them) | Low      | 3     |
 
 ## 2.3 Non-Functional Requirements
 
@@ -441,15 +441,15 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Creating: POST /sessions
-    Creating --> WaitingQR: Generate QR
-    WaitingQR --> Scanning: User scans QR
-    WaitingQR --> Timeout: 60s timeout
-    Scanning --> Authenticating: QR scanned
+    [*] --> Created: POST /api/sessions
+    Created --> Initializing: POST /api/sessions/:sessionId/start
+    Initializing --> QrReady: QR issued (refreshes until scanned or stopped)
+    QrReady --> Authenticating: QR scanned or pairing code entered
+    QrReady --> Disconnected: POST /api/sessions/:sessionId/stop
     Authenticating --> Ready: Auth success
     Authenticating --> Failed: Auth failed
     Ready --> [*]
-    Timeout --> [*]
+    Disconnected --> [*]
     Failed --> [*]
 ```
 

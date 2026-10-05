@@ -10,6 +10,8 @@ import com.rmyndharis.openwa.http.HttpTransport;
 import com.rmyndharis.openwa.model.SuccessResult;
 import com.rmyndharis.openwa.support.MockTransport;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ConfigTest {
@@ -44,6 +46,23 @@ class ConfigTest {
         c.auth();
         assertEquals("owa_k1_x", tx.lastRequest().headers().get("X-API-Key"));
         assertTrue(tx.lastRequest().url().startsWith("http://h/"));
+    }
+
+    @Test
+    void defaultHeadersAreCopiedAtBuildTime() {
+        Map<String, String> h = new HashMap<>(Map.of("X-Tenant", "a"));
+        MockTransport tx = new MockTransport().respond(200, "{\"valid\":true}");
+        OpenWAClient c = new OpenWAClient(base().defaultHeaders(h).transport(tx).build());
+        h.put("X-Tenant", "b");
+        c.auth();
+        assertEquals("a", tx.lastRequest().headers().get("X-Tenant"));
+    }
+
+    @Test
+    void rejectsNullDefaultHeaderValue() {
+        Map<String, String> h = new HashMap<>();
+        h.put("X-Trace", null);
+        assertThrows(IllegalArgumentException.class, () -> base().defaultHeaders(h).build());
     }
 
     @Test

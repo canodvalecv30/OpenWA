@@ -1,5 +1,7 @@
 import { Injectable, BadRequestException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { markEngineSendFailure } from '../../common/errors/engine-send-failure';
+import { mergeSentMetadata, updateMessageMetadata } from './message-metadata';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, QueryDeepPartialEntity } from 'typeorm';
 import { SessionService } from '../session/session.service';
@@ -70,7 +72,7 @@ export interface SaveOutgoingMessageData {
  *
  * Backpressure is applied at the edges instead: bulk sends self-throttle via
  * `delayBetweenMessages` (default 3s) and a per-process concurrent-batch cap (see
- * `BulkMessageService`), and the global throttler enforces per-key rate limits.
+ * `BulkMessageService`), and the global throttler enforces per-route, per-client-IP rate limits.
  */
 @Injectable()
 export class MessageSendService {
@@ -108,9 +110,7 @@ export class MessageSendService {
     if (dto.linkPreview === false && dto.customLinkPreview) {
       throw new BadRequestException('linkPreview: false cannot be combined with customLinkPreview');
     }
-    const finalDto = await this.applySendingGate(sessionId, 'text', dto);
-
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'text', dto);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -120,7 +120,8 @@ export class MessageSendService {
       quotedMessageId: finalDto.quotedMessageId,
     });
 
-    // Opt-in humanising "typing…" pause before the actual send (anti-automation signal).
+    // Humanising "typing…" pause before the actual send (anti-automation signal). On by default;
+    // SIMULATE_TYPING=false disables it.
     await this.simulateTypingIfEnabled(engine, finalDto.chatId, finalDto.text);
 
     let result: MessageResult;
@@ -156,14 +157,20 @@ export class MessageSendService {
 
   /**
    * Run the pre-send `message:sending` plugin gate for one outbound message and return the
-   * (possibly plugin-modified) input, or throw BadRequestException if a plugin blocked the send.
+   * (possibly plugin-modified) input with the session's engine and what `prepare` built from that
+   * input, or throw BadRequestException if a plugin blocked the send.
    * Centralised so EVERY public sender in this class — text, media, extended (location/contact/
    * poll/sticker/reply/forward) — passes through the same moderation chokepoint, instead of only
    * `sendText`. The edit path is gated by the twin method in MessageService (the query side of
    * the send/query split), on the same core/hooks/sending-gate implementation shared with
    * StatusService.
    */
-  private async applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+  private async applySendingGate<T extends object, P = undefined>(
+    sessionId: string,
+    type: string,
+    input: T,
+    prepare?: (finalDto: T) => P,
+  ): Promise<{ finalDto: T; engine: IWhatsAppEngine; prepared: P }> {
     // Pacing runs BEFORE the plugin gate, so a send that policy forbids never reaches a plugin at
     // all — plugins should not be asked to moderate, or given the chance to rewrite, traffic that is
     // not going to be sent. The consequence is deliberate and documented in the hook contract: a
@@ -174,8 +181,18 @@ export class MessageSendService {
     // its persisted row still drained the cold budget. Edit carries a chatId too; the edited
     // message's own row already makes that chat warm, so the gate is a no-op there.
     const target = input as { chatId?: string; toChatId?: string };
-    await this.pacing.assertSendAllowed(sessionId, target.chatId ?? target.toChatId);
-    return applySendingGate(this.hookManager, sessionId, type, input, 'MessageService');
+    const release = await this.pacing.assertSendAllowed(sessionId, target.chatId ?? target.toChatId);
+    // Everything a sender does before its PENDING row is written runs in here (the plugin gate, the
+    // engine lookup, `prepare`), so a send that fails on the way hands its pacing admission back: with no
+    // row it never counts, and holding it would refuse the caller's next send near the cap.
+    try {
+      const finalDto = await applySendingGate(this.hookManager, sessionId, type, input, 'MessageService');
+      const engine = this.getEngine(sessionId);
+      return { finalDto, engine, prepared: prepare?.(finalDto) as P };
+    } catch (error) {
+      release?.();
+      throw error;
+    }
   }
 
   /**
@@ -192,40 +209,47 @@ export class MessageSendService {
     input: unknown,
     error: unknown,
   ): Promise<never> {
-    // Only failures that say something about the account's standing feed the breaker: adapters also
-    // raise client-fault and engine-state errors from inside this call (a blocked media URL, an
-    // unsupported capability, a disconnected socket), and counting those let a client sending bad
-    // requests trip the breaker on a healthy session.
-    if (countsTowardSendBreaker(error)) {
-      this.pacing.recordSendFailure(sessionId);
-      // The same classification picks the failures worth a log line. Otherwise an engine-side failure
-      // leaves only Nest's generic `[ExceptionsHandler]` line, with no session, chat or message type to
-      // correlate it with.
-      this.logger.warn(`Send failed in the engine (${type})`, {
-        sessionId,
-        chatId: message.chatId,
-        messageId: message.id,
-        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
+    try {
+      // Only failures that say something about the account's standing feed the breaker: adapters also
+      // raise client-fault and engine-state errors from inside this call (a blocked media URL, an
+      // unsupported capability, a disconnected socket), and counting those let a client sending bad
+      // requests trip the breaker on a healthy session.
+      if (countsTowardSendBreaker(error)) {
+        this.pacing.recordSendFailure(sessionId);
+        // The same classification picks the failures worth a log line. Otherwise an engine-side failure
+        // leaves only Nest's generic `[ExceptionsHandler]` line, with no session, chat or message type to
+        // correlate it with.
+        this.logger.warn(`Send failed in the engine (${type})`, {
+          sessionId,
+          chatId: message.chatId,
+          messageId: message.id,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          // An EnginePageError keeps the full in-page summary (stack, own properties) here only.
+          ...(error instanceof Error && error.cause instanceof Error ? { cause: error.cause.message } : {}),
+        });
+      }
+      await this.saveFailedMessage(message);
+      // Sanitize the hook payload: an SSRF block's raw .message names the resolved internal address
+      // (a recon/DNS-rebind oracle); the client-facing throw below already maps it to a generic
+      // message via toClientFacingError, and the message:failed hook must not expose more than the
+      // client sees. Now that every media/extended sender routes here, this is the chokepoint that
+      // keeps SSRF detail out of plugin hands (bulk does the same via sanitizeBatchError).
+      const hookError =
+        error instanceof SsrfBlockedError
+          ? SSRF_BLOCKED_CLIENT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      await this.hookManager.execute(
+        'message:failed',
+        { sessionId, error: hookError, input, type },
+        { sessionId, source: 'MessageService' },
+      );
+      throw this.toClientFacingError(error);
+    } catch (failure) {
+      // HTTP status alone cannot prove whether an engine accepted the message before failing.
+      throw markEngineSendFailure(failure);
     }
-    await this.saveFailedMessage(message);
-    // Sanitize the hook payload: an SSRF block's raw .message names the resolved internal address
-    // (a recon/DNS-rebind oracle) — the client-facing throw below already maps it to a generic
-    // message via toClientFacingError, and the message:failed hook must not expose more than the
-    // client sees. Now that every media/extended sender routes here, this is the chokepoint that
-    // keeps SSRF detail out of plugin hands (bulk does the same via sanitizeBatchError).
-    const hookError =
-      error instanceof SsrfBlockedError
-        ? SSRF_BLOCKED_CLIENT_MESSAGE
-        : error instanceof Error
-          ? error.message
-          : String(error);
-    await this.hookManager.execute(
-      'message:failed',
-      { sessionId, error: hookError, input, type },
-      { sessionId, source: 'MessageService' },
-    );
-    throw this.toClientFacingError(error);
   }
 
   /**
@@ -270,9 +294,11 @@ export class MessageSendService {
   }
 
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'image', dto);
-    const engine = this.getEngine(sessionId);
-    const media = this.buildMediaInput(finalDto);
+    const {
+      finalDto,
+      engine,
+      prepared: media,
+    } = await this.applySendingGate(sessionId, 'image', dto, d => this.buildMediaInput(d));
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -295,9 +321,11 @@ export class MessageSendService {
   }
 
   async sendVideo(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'video', dto);
-    const engine = this.getEngine(sessionId);
-    const media = this.buildMediaInput(finalDto);
+    const {
+      finalDto,
+      engine,
+      prepared: media,
+    } = await this.applySendingGate(sessionId, 'video', dto, d => this.buildMediaInput(d));
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -323,15 +351,19 @@ export class MessageSendService {
     // Label a PTT send 'voice' in the gate (not 'audio') so message:sending, message:failed, and the
     // persisted row all carry the same type for one outbound voice note — failSend and the saved row
     // already use `finalDto.ptt ? 'voice' : 'audio'`.
-    const finalDto = await this.applySendingGate(sessionId, dto.ptt ? 'voice' : 'audio', dto);
-    const engine = this.getEngine(sessionId);
-    // Voice notes need a real audio codec; default to ogg/opus when the caller omits a mimetype so the
-    // wire message and the persisted record agree. Resolved BEFORE buildMediaInput so its base64
-    // mimetype guard sees the effective type. buildMediaInput itself stays generic (shared by all media).
-    const audioDto =
-      finalDto.ptt && !finalDto.mimetype ? { ...finalDto, mimetype: 'audio/ogg; codecs=opus' } : finalDto;
-    const media = this.buildMediaInput(audioDto);
-    media.ptt = finalDto.ptt;
+    const {
+      finalDto,
+      engine,
+      prepared: { audioDto, media },
+    } = await this.applySendingGate(sessionId, dto.ptt ? 'voice' : 'audio', dto, gated => {
+      // Voice notes need a real audio codec; default to ogg/opus when the caller omits a mimetype so the
+      // wire message and the persisted record agree. Resolved BEFORE buildMediaInput so its base64
+      // mimetype guard sees the effective type. buildMediaInput itself stays generic (shared by all media).
+      const audioDto = gated.ptt && !gated.mimetype ? { ...gated, mimetype: 'audio/ogg; codecs=opus' } : gated;
+      const media = this.buildMediaInput(audioDto);
+      media.ptt = gated.ptt;
+      return { audioDto, media };
+    });
 
     // Save message as pending BEFORE sending. A PTT send is a 'voice' note (matches inbound
     // classification, the outbound webhook echo, stats, and the dashboard), not a plain 'audio' file.
@@ -354,9 +386,11 @@ export class MessageSendService {
   }
 
   async sendDocument(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'document', dto);
-    const engine = this.getEngine(sessionId);
-    const media = this.buildMediaInput(finalDto);
+    const {
+      finalDto,
+      engine,
+      prepared: media,
+    } = await this.applySendingGate(sessionId, 'document', dto, d => this.buildMediaInput(d));
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -389,8 +423,7 @@ export class MessageSendService {
       quotedMessageId?: string;
     },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'location', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'location', dto);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -419,8 +452,7 @@ export class MessageSendService {
     sessionId: string,
     dto: { chatId: string; contactName: string; contactNumber: string; quotedMessageId?: string },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'contact', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'contact', dto);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -447,8 +479,7 @@ export class MessageSendService {
     sessionId: string,
     dto: { chatId: string; name: string; options: string[]; allowMultipleAnswers?: boolean; quotedMessageId?: string },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'poll', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'poll', dto);
 
     // Save message as pending BEFORE sending. A poll has no plain-text body, so store the
     // question — that keeps the message history readable.
@@ -474,9 +505,11 @@ export class MessageSendService {
   }
 
   async sendSticker(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'sticker', dto);
-    const engine = this.getEngine(sessionId);
-    const media = this.buildMediaInput(finalDto);
+    const {
+      finalDto,
+      engine,
+      prepared: media,
+    } = await this.applySendingGate(sessionId, 'sticker', dto, d => this.buildMediaInput(d));
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -501,8 +534,7 @@ export class MessageSendService {
     sessionId: string,
     dto: { chatId: string; quotedMessageId: string; text: string; mentions?: string[] },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'reply', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'reply', dto);
 
     // Resolve the quoted message body (best-effort) so the dashboard can render the reply preview.
     const quotedBody = await this.resolveQuotedBody(sessionId, finalDto.quotedMessageId, finalDto.chatId);
@@ -534,8 +566,7 @@ export class MessageSendService {
     sessionId: string,
     dto: { chatId: string; messageId: string; buttonId: string; text?: string },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'click-button', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'click-button', dto);
 
     // A click IS a reply to the prompt, so resolve the prompt's body the way reply() does: the
     // dashboard renders the quote box from this field, and a hardcoded empty string left every
@@ -574,8 +605,7 @@ export class MessageSendService {
     sessionId: string,
     dto: { fromChatId: string; toChatId: string; messageId: string },
   ): Promise<MessageResponseDto> {
-    const finalDto = await this.applySendingGate(sessionId, 'forward', dto);
-    const engine = this.getEngine(sessionId);
+    const { finalDto, engine } = await this.applySendingGate(sessionId, 'forward', dto);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -690,10 +720,23 @@ export class MessageSendService {
       };
       // Only when this write actually carries metadata worth merging: a text item must not blank
       // the echo's, and a URL pointer must not replace bytes the engine already downloaded.
-      if (message.metadata && !isUrlPointerMetadata(message.metadata)) {
-        patch.metadata = message.metadata as QueryDeepPartialEntity<Record<string, unknown>>;
+      const metadata = message.metadata;
+      if (metadata && !isUrlPointerMetadata(metadata)) {
+        try {
+          await updateMessageMetadata(this.messageRepository, { sessionId, waMessageId }, current =>
+            mergeSentMetadata(current, metadata),
+          );
+        } catch (error) {
+          if (message.status !== MessageStatus.SENT) throw error;
+          this.logger.warn(`Merging sent metadata onto the echo row failed (id=${waMessageId})`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // The bulk engine has already sent this item. Keep its media in an id-less SENT row
+          // when the echo cannot accept it, instead of losing the only payload-bearing copy.
+          return this.messageRepository.save(this.messageRepository.create({ ...message, waMessageId: undefined }));
+        }
       }
-      await this.messageRepository.update({ sessionId, waMessageId }, patch);
+      if (message.timestamp !== undefined) await this.messageRepository.update({ sessionId, waMessageId }, patch);
       const surviving = await this.messageRepository.findOne({ where: { sessionId, waMessageId } });
       if (!surviving) throw err;
       return surviving;
@@ -784,8 +827,36 @@ export class MessageSendService {
         // first has advanced it further. Writing SENT here would undo that. See the sibling merge
         // in saveOutgoingMessage.
         const patch: QueryDeepPartialEntity<Message> = { timestamp: result.timestamp };
-        if (message.metadata && !isUrlPointerMetadata(message.metadata)) {
-          patch.metadata = message.metadata as QueryDeepPartialEntity<Record<string, unknown>>;
+        const metadata = message.metadata;
+        let metadataMerged = true;
+        if (metadata && !isUrlPointerMetadata(metadata)) {
+          await updateMessageMetadata(
+            this.messageRepository,
+            { sessionId: message.sessionId, waMessageId: result.id },
+            current => mergeSentMetadata(current, metadata),
+          ).catch(err => {
+            metadataMerged = false;
+            this.logger.warn(`Merging media onto the echo-persisted row failed (id=${result.id})`, {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+        if (!metadataMerged) {
+          // Keep the payload-bearing row when the echo merge fails. Mark it SENT without the
+          // conflicting engine id so the pending reaper cannot strip successfully sent media.
+          await this.messageRepository
+            .update(
+              { id: message.id, status: MessageStatus.PENDING },
+              { status: MessageStatus.SENT, timestamp: result.timestamp },
+            )
+            .catch(err =>
+              this.logger.warn(`Preserving the sent media row failed (id=${message.id})`, {
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          const retained = await this.messageRepository.findOne({ where: { id: message.id } }).catch(() => null);
+          if (retained) this.emitPersisted(message.sessionId, retained);
+          return { messageId: result.id, timestamp: result.timestamp };
         }
         await this.messageRepository
           .update({ sessionId: message.sessionId, waMessageId: result.id }, patch)

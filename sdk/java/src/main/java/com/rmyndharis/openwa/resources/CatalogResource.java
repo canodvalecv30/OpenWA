@@ -26,7 +26,7 @@ public final class CatalogResource {
         this.client = client;
     }
 
-    /** Get the business catalog info. */
+    /** Get the business catalog info, or {@code null} when the account has no catalog. */
     public CatalogInfo info(String sessionId) {
         return client.request(
             HttpMethod.GET, "/api/sessions/" + encodeSegment(sessionId) + "/catalog", null, null, CatalogInfo.class);
@@ -42,7 +42,7 @@ public final class CatalogResource {
             PaginatedProducts.class);
     }
 
-    /** Get a single product by id. */
+    /** Get a single product by id, or {@code null} when no product in the catalog carries that id. */
     public CatalogProduct product(String sessionId, String productId) {
         return client.request(
             HttpMethod.GET,

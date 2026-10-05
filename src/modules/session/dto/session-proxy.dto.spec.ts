@@ -81,3 +81,12 @@ describe('projectSessionProxy', () => {
     expect(result.hasCredentials).toBe(false);
   });
 });
+
+describe('UpdateSessionProxyDto OpenAPI schema', () => {
+  it('publishes the 255-character proxyUrl limit the validator enforces', () => {
+    const meta = Reflect.getMetadata('swagger/apiModelProperties', UpdateSessionProxyDto.prototype, 'proxyUrl') as {
+      maxLength?: number;
+    };
+    expect(meta.maxLength).toBe(255);
+  });
+});

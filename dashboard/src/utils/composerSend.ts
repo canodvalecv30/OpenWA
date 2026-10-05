@@ -29,13 +29,11 @@ export interface OptimisticMetadata {
 }
 
 /**
- * The id to quote. The WhatsApp id wins, but a message that has only just been sent optimistically
- * has no WA id yet, so the local id is the fallback — replying to your own just-sent message is an
- * ordinary thing to do and must not silently lose its quote.
+ * The id to quote. Only a message that carries a WhatsApp id can be quoted: a local temp_/sent_ id is
+ * one the gateway can never resolve, so the thread hides Reply on a bubble that has no WA id yet.
  */
 export function quotedIdOf(replyingTo: QuotableMessage | null | undefined): string | undefined {
-  if (!replyingTo) return undefined;
-  return replyingTo.waMessageId || replyingTo.id;
+  return replyingTo?.waMessageId || undefined;
 }
 
 /**

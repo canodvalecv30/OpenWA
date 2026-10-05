@@ -12,7 +12,12 @@ import { ENGINE_NOT_READY_409, SESSION_NOT_STARTED_404 } from '../../common/open
  * unanswered for an account without a catalog. The adapter bounds that walk with its own budget
  * rather than reporting an unanswered query as an empty catalog.
  */
-const CATALOG_TIMEOUT_503 = 'WhatsApp did not answer the catalog query within the request budget — retry shortly.';
+const CATALOG_TIMEOUT_503 =
+  'WhatsApp did not answer the catalog query within the request budget, or rate-limited it. For some ' +
+  'business accounts WhatsApp never answers it, so a retry may not help.';
+
+/** WhatsApp answered the catalog query with an error (other than item-not-found on the first page). */
+const CATALOG_REFUSED_403 = 'WhatsApp refused the catalog query.';
 
 @ApiTags('catalog')
 @Controller('sessions/:sessionId')
@@ -31,6 +36,7 @@ export class CatalogController {
     description: 'Not supported by the active engine: whatsapp-web.js has no catalog API.',
   })
   @ApiResponse({ status: 503, description: CATALOG_TIMEOUT_503 })
+  @ApiResponse({ status: 403, description: CATALOG_REFUSED_403 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async getCatalog(@Param('sessionId') sessionId: string) {
@@ -41,10 +47,15 @@ export class CatalogController {
   @ApiOperation({ summary: 'List catalog products (Baileys engine only)' })
   @ApiResponse({ status: 200, description: 'One page of catalog products', type: PaginatedProductsDto })
   @ApiResponse({
+    status: 400,
+    description: 'A query value is invalid, or the query carries a field the DTO does not declare.',
+  })
+  @ApiResponse({
     status: 501,
     description: 'Not supported by the active engine: whatsapp-web.js has no catalog API.',
   })
   @ApiResponse({ status: 503, description: CATALOG_TIMEOUT_503 })
+  @ApiResponse({ status: 403, description: CATALOG_REFUSED_403 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async getProducts(@Param('sessionId') sessionId: string, @Query() query: ProductQueryDto) {
@@ -63,6 +74,7 @@ export class CatalogController {
     description: 'Not supported by the active engine: whatsapp-web.js has no catalog API.',
   })
   @ApiResponse({ status: 503, description: CATALOG_TIMEOUT_503 })
+  @ApiResponse({ status: 403, description: CATALOG_REFUSED_403 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async getProduct(@Param('sessionId') sessionId: string, @Param('productId') productId: string) {
@@ -74,7 +86,7 @@ export class CatalogController {
   @RequireRole(ApiKeyRole.OPERATOR)
   @ApiOperation({ summary: 'Send a product message (Baileys engine only)' })
   @ApiResponse({ status: 201, description: 'Product message accepted for sending', type: ProductMessageResponseDto })
-  @ApiResponse({ status: 404, description: 'Product id not found in the session catalog.' })
+  @ApiResponse({ status: 404, description: 'Product id not found in the session catalog. ' + SESSION_NOT_STARTED_404 })
   @ApiResponse({
     status: 400,
     description:
@@ -85,6 +97,7 @@ export class CatalogController {
     description: 'Not supported by the active engine: whatsapp-web.js cannot send product messages.',
   })
   @ApiResponse({ status: 503, description: CATALOG_TIMEOUT_503 })
+  @ApiResponse({ status: 403, description: CATALOG_REFUSED_403 })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async sendProduct(@Param('sessionId') sessionId: string, @Body() dto: SendProductDto) {
     return this.catalogService.sendProduct(sessionId, dto.chatId, dto.productId, dto.body);

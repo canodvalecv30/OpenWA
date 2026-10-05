@@ -154,6 +154,7 @@ describe('docs/29 counts match the capability matrix', () => {
       nine: 9,
       ten: 10,
       eleven: 11,
+      twelve: 12,
     };
     const spelled = doc.match(/OpenWA ships (\w+) exact, self-disabling source transforms/);
     const wrongProse: string[] = [];

@@ -1,7 +1,9 @@
 package com.rmyndharis.openwa.model;
 
 /**
- * Partial update of a RUNNING session's configuration — no re-link and no QR scan.
+ * Partial update of a session's configuration — no re-link and no QR scan. {@code autoRejectCalls}
+ * applies immediately; {@code maxReconnectAttempts} and {@code reconnectBaseDelay} apply on the
+ * next start.
  *
  * <p>The route needs THREE states per field, not two: an absent key leaves the value unchanged, a key
  * sent as explicit null clears it back to the default, and a value sets it. A record of nullable

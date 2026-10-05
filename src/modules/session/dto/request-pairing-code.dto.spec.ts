@@ -17,3 +17,12 @@ describe('RequestPairingCodeDto (#252)', () => {
     },
   );
 });
+
+describe('RequestPairingCodeDto OpenAPI schema', () => {
+  it('publishes the same digits-only pattern the validator enforces', () => {
+    const meta = Reflect.getMetadata('swagger/apiModelProperties', RequestPairingCodeDto.prototype, 'phoneNumber') as {
+      pattern?: string;
+    };
+    expect(meta.pattern).toBe('^[0-9]{6,15}$');
+  });
+});

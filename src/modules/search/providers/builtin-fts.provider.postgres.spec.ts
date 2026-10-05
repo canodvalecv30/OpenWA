@@ -1,5 +1,6 @@
 import 'reflect-metadata';
-import { Logger, NotImplementedException } from '@nestjs/common';
+import { NotImplementedException } from '@nestjs/common';
+import { LoggerService } from '../../../common/services/logger.service';
 import { DataSource } from 'typeorm';
 import { BuiltInFtsProvider } from './builtin-fts.provider';
 
@@ -49,12 +50,12 @@ function makePostgresDataSource(script: ProbeScript) {
 const sqlOf = (query: jest.Mock): string[] => query.mock.calls.map(call => String((call as unknown[])[0]));
 
 describe('BuiltInFtsProvider (postgres probe)', () => {
-  // The provider logs through Nest's Logger on the warn/error paths exercised here; keep the test
+  // The provider logs through LoggerService on the warn/error paths exercised here; keep the test
   // output quiet without touching the assertions.
   beforeEach(() => {
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(LoggerService.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(LoggerService.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(LoggerService.prototype, 'error').mockImplementation(() => undefined);
   });
   afterEach(() => jest.restoreAllMocks());
 

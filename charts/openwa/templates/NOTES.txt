@@ -16,4 +16,16 @@ OpenWA has been installed as release "{{ .Release.Name }}".
      then open http://localhost:2785 (dashboard) or call http://localhost:2785/api.
 {{- if .Values.ingress.enabled }}
    Or via the ingress host: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- $env := .Values.env | default dict }}
+{{- $csp := toString (get $env "CSP_UPGRADE_INSECURE_REQUESTS") }}
+{{- /* An absent NODE_ENV leaves the image's NODE_ENV=production in effect; an empty one overrides it. */}}
+{{- $nodeEnv := ternary (toString (get $env "NODE_ENV")) "production" (hasKey $env "NODE_ENV") }}
+{{- $upgrade := or (eq $csp "true") (and (ne $csp "false") (eq $nodeEnv "production")) }}
+{{- if and (not .Values.ingress.tls) $upgrade }}
+
+   WARNING: this ingress has no TLS, but the app tells browsers to upgrade insecure requests, so
+   over plain http the dashboard fetches its scripts over https and renders blank. Terminate TLS
+   (ingress.tls, or in front of the ingress) or set env.CSP_UPGRADE_INSECURE_REQUESTS="false".
+   See docs/12-troubleshooting-faq.md.
+{{- end }}
 {{- end }}

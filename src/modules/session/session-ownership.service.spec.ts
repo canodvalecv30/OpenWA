@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { DataSource, Repository } from 'typeorm';
 import { SessionOwnershipService } from './session-ownership.service';
 import { Session } from './entities/session.entity';
@@ -101,6 +102,90 @@ describe('SessionOwnershipService', () => {
     });
   });
 
+  // What a node whose lease lapsed left unfinished (its bulk batches) is failed once this process takes
+  // the session over, by claiming it or by releasing that node's claim.
+  describe('taking a session over from a lapsed node', () => {
+    const settle = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+    const lapsedBy = (nodeId: string): Partial<Session> => ({
+      nodeId,
+      claimedAt: new Date(Date.now() - 120_000),
+      leaseExpiresAt: new Date(Date.now() - 60_000),
+    });
+    const liveBy = (nodeId: string): Partial<Session> => ({
+      nodeId,
+      claimedAt: new Date(),
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    });
+
+    // A released row is not taken over: the node that released it may still be finishing its own
+    // batches, and failing them under it would leave two writers on one batch row.
+    it('runs the adoption handler for a claim of a lapsed foreign lease only', async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+      const node = service('node-b');
+      node.onAdoption(handler);
+      const own = await seed(lapsedBy('node-b'));
+      const live = await seed(liveBy('node-c'));
+      const released = await seed();
+      const orphaned = await seed(lapsedBy('node-a'));
+
+      await expect(node.claim(own.id)).resolves.toBe(true);
+      await expect(node.claim(live.id)).resolves.toBe(false);
+      await expect(node.claim(released.id)).resolves.toBe(true);
+      await settle();
+      expect(handler).not.toHaveBeenCalled();
+
+      await expect(node.claim(orphaned.id)).resolves.toBe(true);
+      await settle();
+      expect(handler.mock.calls).toEqual([[orphaned.id]]);
+    });
+
+    // A stop of a session whose holder died clears that holder's claim, and a later start then finds a
+    // released row; the release is where the takeover happens.
+    it('runs the adoption handler when a release clears a lapsed foreign claim, and only then', async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+      const node = service('node-b');
+      node.onAdoption(handler);
+      const own = await seed(liveBy('node-b'));
+      const live = await seed(liveBy('node-c'));
+      const orphaned = await seed(lapsedBy('node-a'));
+
+      await node.release(own.id);
+      await node.release(live.id);
+      await settle();
+      expect(handler).not.toHaveBeenCalled();
+      expect((await sessions.findOneByOrFail({ id: own.id })).nodeId).toBeNull();
+      expect((await sessions.findOneByOrFail({ id: live.id })).nodeId).toBe('node-c');
+
+      await node.release(orphaned.id);
+      await settle();
+      expect(handler.mock.calls).toEqual([[orphaned.id]]);
+      expect((await sessions.findOneByOrFail({ id: orphaned.id })).nodeId).toBeNull();
+    });
+
+    // Awaiting the handler inside claim() held a start between its claim and the moment it counted as
+    // starting; a stop landing then released the claim and the engine launched on a row nobody held.
+    it('returns from the claim without waiting for the adoption handler', async () => {
+      const node = service('node-b');
+      const handler = jest.fn(() => new Promise<void>(() => undefined));
+      node.onAdoption(handler);
+      const session = await seed(lapsedBy('node-a'));
+
+      await expect(node.claim(session.id)).resolves.toBe(true);
+      await settle();
+      expect(handler).toHaveBeenCalledWith(session.id);
+    });
+
+    it('keeps the claim when the adoption handler fails', async () => {
+      const node = service('node-b');
+      node.onAdoption(() => Promise.reject(new Error('database unavailable')));
+      const session = await seed(lapsedBy('node-a'));
+
+      await expect(node.claim(session.id)).resolves.toBe(true);
+      await settle();
+      expect((await sessions.findOneByOrFail({ id: session.id })).nodeId).toBe('node-b');
+    });
+  });
+
   describe('releasing', () => {
     it('frees the session so a peer can take it without waiting for the lease', async () => {
       const session = await seed();
@@ -137,6 +222,24 @@ describe('SessionOwnershipService', () => {
       expect(nodeA.ownedIds()).toEqual([]);
       expect((await sessions.findOneByOrFail({ id: one.id })).nodeId).toBeNull();
       expect((await sessions.findOneByOrFail({ id: two.id })).nodeId).toBeNull();
+    });
+
+    // Per-session bookkeeping must end with the claim, or create/delete churn grows it forever.
+    it('keeps no per-session state once a claim ends by release, shutdown or loss', async () => {
+      const [one, two, three] = [await seed(), await seed(), await seed()];
+      const nodeA = service('node-a');
+      const claimGen = (nodeA as unknown as { claimGen: Map<string, number> }).claimGen;
+      await nodeA.claim(one.id);
+      await nodeA.claim(two.id);
+      await nodeA.claim(three.id);
+
+      await nodeA.release(one.id);
+      await sessions.update({ id: two.id }, { nodeId: 'node-b', leaseExpiresAt: new Date(Date.now() + 60_000) });
+      await nodeA.renew();
+      expect([...claimGen.keys()]).toEqual([three.id]);
+
+      await nodeA.releaseAll();
+      expect(claimGen.size).toBe(0);
     });
   });
 
@@ -428,35 +531,48 @@ describe('SessionOwnershipService', () => {
       await expect(nodeA.renew()).resolves.toBeUndefined();
       expect(nodeA.ownedIds()).toEqual([]);
     });
-  });
 
-  describe('what a booting process may reset', () => {
-    const now = new Date();
+    // A stop releases the claim while a tick is in flight: the row no longer names this node, but
+    // nothing was lost to a peer, and the lease-loss teardown would leave a stale stop mark.
+    it('does not report a session this process released during the tick', async () => {
+      const session = await seed();
+      const nodeA = service('node-a');
+      await nodeA.claim(session.id);
+      const lost: string[][] = [];
+      nodeA.onLeaseLoss(ids => void lost.push(ids));
+      const realFind = sessions.find.bind(sessions);
+      jest.spyOn(sessions, 'find').mockImplementation(async (...args: Parameters<typeof realFind>) => {
+        await nodeA.release(session.id);
+        return realFind(...args);
+      });
 
-    it('leaves alone a session another node holds on a live lease', () => {
-      expect(
-        service('node-b').ownedByOtherLiveNode(
-          { nodeId: 'node-a', leaseExpiresAt: new Date(now.getTime() + 60_000) },
-          now,
-        ),
-      ).toBe(true);
+      await nodeA.renew();
+      jest.restoreAllMocks();
+
+      expect(lost).toEqual([]);
     });
 
-    it('reclaims its own rows, which really are dead after a restart', () => {
-      expect(
-        service('node-a').ownedByOtherLiveNode(
-          { nodeId: 'node-a', leaseExpiresAt: new Date(now.getTime() + 60_000) },
-          now,
-        ),
-      ).toBe(false);
-    });
+    // A stop then a start: the tick read the row between the release and the re-claim. Reporting it
+    // lost would drop the fresh claim from `owned` and tear down the engine the start is launching.
+    it('does not report a session released and re-claimed during the tick', async () => {
+      const session = await seed();
+      const nodeA = service('node-a');
+      await nodeA.claim(session.id);
+      const lost: string[][] = [];
+      nodeA.onLeaseLoss(ids => void lost.push(ids));
+      const realFind = sessions.find.bind(sessions);
+      jest.spyOn(sessions, 'find').mockImplementation(async (...args: Parameters<typeof realFind>) => {
+        await nodeA.release(session.id);
+        const rows = await realFind(...args);
+        await nodeA.claim(session.id);
+        return rows;
+      });
 
-    it('reclaims an unowned row and one whose lease has lapsed', () => {
-      const node = service('node-b');
-      expect(node.ownedByOtherLiveNode({ nodeId: null, leaseExpiresAt: null }, now)).toBe(false);
-      expect(node.ownedByOtherLiveNode({ nodeId: 'node-a', leaseExpiresAt: new Date(now.getTime() - 1) }, now)).toBe(
-        false,
-      );
+      await nodeA.renew();
+      jest.restoreAllMocks();
+
+      expect(lost).toEqual([]);
+      expect(nodeA.ownedIds()).toEqual([session.id]);
     });
   });
 
@@ -529,11 +645,137 @@ describe('SessionOwnershipService', () => {
 
   describe('node identity', () => {
     it('falls back to the hostname when nothing is configured, and never to the pid', () => {
-      const bare = new SessionOwnershipService(sessions);
-      expect(bare.nodeId).toBeTruthy();
       // A pid-derived id would never match after a restart, so a process could not recognise — and
       // therefore could not reset — its own leftover rows.
-      expect(bare.nodeId).not.toContain(String(process.pid));
+      const saved = process.env.NODE_ID;
+      delete process.env.NODE_ID;
+      try {
+        expect(new SessionOwnershipService(sessions).nodeId).toBe(hostname());
+      } finally {
+        if (saved !== undefined) process.env.NODE_ID = saved;
+      }
+    });
+  });
+
+  /**
+   * Two processes sharing a nodeId (two instances on one host with no NODE_ID) each treat the other's
+   * rows as their own and both keep renewing them, so no loss is ever seen. Only the lease values
+   * changing under this process give it away.
+   */
+  describe('duplicate NODE_ID detection', () => {
+    const errorSpy = (svc: SessionOwnershipService): jest.SpyInstance =>
+      jest
+        .spyOn((svc as unknown as { logger: { error: (...a: unknown[]) => void } }).logger, 'error')
+        .mockImplementation(() => undefined);
+    const duplicateLogs = (spy: jest.SpyInstance): unknown[][] =>
+      (spy.mock.calls as unknown[][]).filter(
+        c => (c[2] as { action?: string } | undefined)?.action === 'duplicate_node_id',
+      );
+    // Each tick lands a second later, so every renewal writes a distinct expiry.
+    const tick = async (svc: SessionOwnershipService): Promise<void> => {
+      jest.setSystemTime(Date.now() + 1_000);
+      await svc.renew();
+    };
+
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+      jest.restoreAllMocks();
+    });
+
+    it('reports twins that both claimed and renew the same row, once each', async () => {
+      const session = await seed();
+      const twinA = service('node-a');
+      const twinB = service('node-a');
+      const [logA, logB] = [errorSpy(twinA), errorSpy(twinB)];
+      await expect(twinA.claim(session.id)).resolves.toBe(true);
+      await expect(twinB.claim(session.id)).resolves.toBe(true);
+
+      for (let k = 0; k < 4; k++) {
+        await tick(twinA);
+        await tick(twinB);
+      }
+
+      expect(duplicateLogs(logA)).toHaveLength(1);
+      expect(duplicateLogs(logB)).toHaveLength(1);
+      expect(duplicateLogs(logA)[0][2]).toEqual({
+        action: 'duplicate_node_id',
+        nodeId: 'node-a',
+        sessionIds: [session.id],
+      });
+    });
+
+    it('reports a twin that holds nothing but sees its nodeId renewed by someone else', async () => {
+      const session = await seed();
+      const owner = service('node-a');
+      const idle = service('node-a');
+      const log = errorSpy(idle);
+      await owner.claim(session.id);
+
+      for (let k = 0; k < 4; k++) {
+        await tick(owner);
+        await tick(idle);
+      }
+
+      expect(duplicateLogs(log)).toHaveLength(1);
+    });
+
+    it('stays quiet for a single process renewing its own rows', async () => {
+      const session = await seed();
+      const node = service('node-a');
+      const log = errorSpy(node);
+      await node.claim(session.id);
+
+      for (let k = 0; k < 5; k++) await tick(node);
+
+      expect(duplicateLogs(log)).toHaveLength(0);
+    });
+
+    it('stays quiet after a one-off rewrite, like a data import carrying a lease forward', async () => {
+      const session = await seed();
+      const node = service('node-a');
+      const log = errorSpy(node);
+      await node.claim(session.id);
+      await tick(node);
+      await sessions.update({ id: session.id }, { leaseExpiresAt: new Date(Date.now() + 45_000) });
+
+      for (let k = 0; k < 4; k++) await tick(node);
+
+      expect(duplicateLogs(log)).toHaveLength(0);
+    });
+
+    it("stays quiet for a previous incarnation's lease that nobody renews", async () => {
+      await seed({ nodeId: 'node-a', leaseExpiresAt: new Date(Date.now() + 60_000) });
+      const fresh = service('node-a');
+      const log = errorSpy(fresh);
+
+      for (let k = 0; k < 4; k++) await tick(fresh);
+
+      expect(duplicateLogs(log)).toHaveLength(0);
+    });
+
+    it('does not count renewals seen while an import holds the suspension token', async () => {
+      const session = await seed();
+      const owner = service('node-a');
+      const idle = service('node-a');
+      const log = errorSpy(idle);
+      await owner.claim(session.id);
+      const release = idle.suspendLossDetection();
+
+      for (let k = 0; k < 4; k++) {
+        await tick(owner);
+        await tick(idle);
+      }
+      expect(duplicateLogs(log)).toHaveLength(0);
+
+      release();
+      await tick(owner);
+      await tick(idle); // baseline after the suspension
+      await tick(owner);
+      await tick(idle);
+      expect(duplicateLogs(log)).toHaveLength(0);
     });
   });
 });

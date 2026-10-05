@@ -56,15 +56,28 @@ describe('SendTextStatusDto recipients validation', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('rejects malformed JIDs', async () => {
-    const errors = await validate(
-      plainToInstance(SendTextStatusDto, { text: 'hi', recipients: ['not-a-jid', '123@g.us', '@c.us', 'abc@lid'] }),
-    );
+  // One entry per validate call: any single bad entry fails the whole array, so a combined list
+  // would still fail if one of the others (a group JID, say) were wrongly accepted.
+  it.each(['not-a-jid', '123@g.us', '@c.us', 'abc@lid'])('rejects the malformed JID %s', async jid => {
+    const errors = await validate(plainToInstance(SendTextStatusDto, { text: 'hi', recipients: [jid] }));
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 
   it('accepts @lid recipients', async () => {
     const errors = await validate(plainToInstance(SendTextStatusDto, { text: 'hi', recipients: ['6281@lid'] }));
     expect(errors).toHaveLength(0);
+  });
+});
+
+describe('SendTextStatusDto text validation', () => {
+  it('rejects an empty or whitespace-only body', async () => {
+    for (const text of ['', '   ', '\n\t']) {
+      const errors = await validate(plainToInstance(SendTextStatusDto, { text }));
+      expect(errors.some(e => e.property === 'text')).toBe(true);
+    }
+  });
+
+  it('accepts a body with surrounding whitespace', async () => {
+    expect(await validate(plainToInstance(SendTextStatusDto, { text: '  hi  ' }))).toHaveLength(0);
   });
 });

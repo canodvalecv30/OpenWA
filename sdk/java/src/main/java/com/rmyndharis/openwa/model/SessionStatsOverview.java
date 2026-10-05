@@ -11,6 +11,6 @@ public record SessionStatsOverview(
     Map<String, Integer> byStatus,
     MemoryUsage memoryUsage) {
 
-    /** Process memory snapshot (bytes). */
+    /** Process memory snapshot, in MiB (rounded). */
     public record MemoryUsage(long heapUsed, long heapTotal, long rss) {}
 }

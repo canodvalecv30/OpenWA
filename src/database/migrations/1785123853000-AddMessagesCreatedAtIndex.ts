@@ -12,13 +12,14 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `synchronize` already created the same-named index declared on the Message entity.
  *
  * The `messages` table is the hottest data table (every inbound/outbound row), so on Postgres a
- * CREATE INDEX over a large table at boot can exceed the runtime pool's statement_timeout and abort
- * the migration. Lift it for THIS transaction (SET LOCAL auto-reverts at COMMIT; SQLite rejects it
- * syntactically, hence the guard) — the same discipline AddWebhooksSessionIdIndex and
- * AddMessagesWaMessageIdUnique already use. `CONCURRENTLY` would avoid the ACCESS EXCLUSIVE lock
- * but cannot run inside a transaction, so it is deliberately NOT used here (the boot-time blocking
- * window is acceptable for a self-hosted gateway; consistency with the sibling index migrations
- * outweighs it).
+ * CREATE INDEX over a large table can run long. Boot and CLI migrations run on a pool without the
+ * runtime statement_timeout (pg-boot-migrations.ts); lifting it for THIS transaction only guards
+ * against a role- or database-level default cancelling the build (SET LOCAL auto-reverts at COMMIT;
+ * SQLite rejects it syntactically, hence the guard), the same discipline AddWebhooksSessionIdIndex
+ * and AddMessagesWaMessageIdUnique already use. `CONCURRENTLY` would avoid the SHARE lock (writes to
+ * messages wait for the build, reads do not) but cannot run inside a transaction, so it is
+ * deliberately NOT used here (the boot-time blocking window is acceptable for a self-hosted gateway;
+ * consistency with the sibling index migrations outweighs it).
  */
 export class AddMessagesCreatedAtIndex1785123853000 implements MigrationInterface {
   name = 'AddMessagesCreatedAtIndex1785123853000';

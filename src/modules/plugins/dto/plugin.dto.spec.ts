@@ -30,6 +30,13 @@ describe('InstallFromUrlDto', () => {
     await expect(validate(dtoWith(`http://plugins.example/pkg.zip#sha256=${digest}`))).resolves.toHaveLength(0);
   });
 
+  it('accepts single-label and underscore hosts, which the download guard allow-lists by name', async () => {
+    const digest = 'a'.repeat(64);
+    await expect(validate(dtoWith(`http://plugin-mirror:8080/x.zip#sha256=${digest}`))).resolves.toHaveLength(0);
+    await expect(validate(dtoWith(`http://localhost:8080/p.zip#sha256=${digest}`))).resolves.toHaveLength(0);
+    await expect(validate(dtoWith('https://h_x.example.com/p.zip'))).resolves.toHaveLength(0);
+  });
+
   it('rejects a non-http(s) scheme', async () => {
     const errors = await validate(dtoWith('ftp://plugins.example/pkg.zip'));
 

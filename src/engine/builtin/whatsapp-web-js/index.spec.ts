@@ -5,6 +5,7 @@ jest.mock('../../adapters/whatsapp-web-js.adapter', () => ({
 import { WhatsAppWebJsPlugin } from './index';
 import { WhatsAppWebJsAdapter } from '../../adapters/whatsapp-web-js.adapter';
 import { PluginContext } from '../../../core/plugins';
+import type { LidMappingStore } from '../../identity/lid-mapping-store.service';
 
 describe('WhatsAppWebJsPlugin.createEngine (opaque config)', () => {
   beforeEach(() => {
@@ -47,18 +48,39 @@ describe('WhatsAppWebJsPlugin.createEngine (opaque config)', () => {
     );
   });
 
-  it('falls back to safe defaults when context has no config', () => {
+  it('threads the shared lid mapping store to the adapter', () => {
+    const lidMappingStore = {} as LidMappingStore;
+
+    new WhatsAppWebJsPlugin(undefined, lidMappingStore).createEngine({ sessionId: 's' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(expect.objectContaining({ lidMappingStore }));
+  });
+
+  it('falls back to safe defaults when context has no config, leaving the flag list to the adapter', () => {
     const plugin = new WhatsAppWebJsPlugin();
 
     plugin.createEngine({ sessionId: 'sess-2' });
 
-    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'sess-2',
-        sessionDataPath: './data/sessions',
-        puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'], executablePath: undefined },
-      }),
-    );
+    const [config] = (WhatsAppWebJsAdapter as unknown as jest.Mock).mock.calls[0] as [
+      { sessionId: string; sessionDataPath: string; puppeteer: Record<string, unknown> },
+    ];
+    expect(config.sessionId).toBe('sess-2');
+    expect(config.sessionDataPath).toBe('./data/sessions');
+    expect(config.puppeteer.headless).toBe(true);
+    expect(config.puppeteer.args).toBeUndefined();
+  });
+
+  it('does not pin a flag list when a persisted puppeteer override carries no args', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+    withContext(plugin, { puppeteer: { headless: false } });
+
+    plugin.createEngine({ sessionId: 'sess-4' });
+
+    const [config] = (WhatsAppWebJsAdapter as unknown as jest.Mock).mock.calls[0] as [
+      { puppeteer: Record<string, unknown> },
+    ];
+    expect(config.puppeteer.headless).toBe(false);
+    expect(config.puppeteer.args).toBeUndefined();
   });
 
   it('Uses the constructor-supplied engine config when onLoad never ran (enable-failure path)', () => {
@@ -89,6 +111,19 @@ describe('WhatsAppWebJsPlugin.createEngine (opaque config)', () => {
 
     expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'sess-4', sessionDataPath: '/context/path' }),
+    );
+  });
+
+  // The factory hardens and purges credential dirs under its own base, so the engine must write there
+  // even when a persisted plugin-config override names another directory.
+  it('Prefers the per-call sessionDataPath over a context.config override', () => {
+    const plugin = new WhatsAppWebJsPlugin();
+    withContext(plugin, { sessionDataPath: '/override/sessions' });
+
+    plugin.createEngine({ sessionId: 'sess-5', sessionDataPath: '/factory/sessions' });
+
+    expect(WhatsAppWebJsAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sess-5', sessionDataPath: '/factory/sessions' }),
     );
   });
 });

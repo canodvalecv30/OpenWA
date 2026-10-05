@@ -23,6 +23,39 @@ describe('validatePluginManifest', () => {
     expect(() => validatePluginManifest(bad)).toThrow(/required field: main/i);
   });
 
+  it('rejects a list field that is not an array of strings', () => {
+    // `.includes` also works on a string, so `sessions: 'sales-team'` would match session 'sales'.
+    for (const field of ['permissions', 'sessions', 'hooks']) {
+      for (const value of ['sales-team', [1], {}]) {
+        expect(() => validatePluginManifest({ ...valid, [field]: value })).toThrow(
+          `manifest.json ${field} must be an array of strings`,
+        );
+      }
+    }
+    expect(() => validatePluginManifest({ ...valid, net: { allow: 'api.example.com' } })).toThrow(
+      'manifest.json net.allow must be an array of strings',
+    );
+    expect(() => validatePluginManifest({ ...valid, net: { allowConfigHosts: 'baseUrl' } })).toThrow(
+      'manifest.json net.allowConfigHosts must be an array of strings',
+    );
+    expect(() => validatePluginManifest({ ...valid, net: ['api.example.com'] })).toThrow(
+      'manifest.json net must be an object',
+    );
+  });
+
+  it('accepts absent, null or string-array list fields', () => {
+    expect(() =>
+      validatePluginManifest({
+        ...valid,
+        permissions: ['net:fetch'],
+        sessions: null,
+        hooks: [],
+        net: { allow: ['api.example.com'], allowConfigHosts: null },
+      }),
+    ).not.toThrow();
+    expect(() => validatePluginManifest({ ...valid, net: null })).not.toThrow();
+  });
+
   it('rejects a non-string required field (numeric main)', () => {
     expect(() => validatePluginManifest({ ...valid, main: 123 })).toThrow(/invalid required field/i);
   });
@@ -56,5 +89,41 @@ describe('validatePluginManifest', () => {
     expect(() => validatePluginManifest({ ...valid, main: 'dist/main.js' })).not.toThrow();
     expect(() => validatePluginManifest({ ...valid, main: './index.js' })).not.toThrow();
     expect(() => validatePluginManifest({ ...valid, main: 'dist/../index.js' })).not.toThrow();
+  });
+
+  describe('minOpenWAVersion', () => {
+    const host = '0.23.7';
+
+    it('accepts an absent or null floor', () => {
+      expect(() => validatePluginManifest({ ...valid }, host)).not.toThrow();
+      expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: null }, host)).not.toThrow();
+    });
+
+    it('accepts a floor at or below the running host', () => {
+      for (const min of ['0.23.7', '0.8.16', '0.0.1']) {
+        expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: min }, host)).not.toThrow();
+      }
+    });
+
+    it('rejects a floor above the running host, naming both versions', () => {
+      expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: '0.24.0' }, host)).toThrow(
+        /my-plg requires OpenWA >= 0\.24\.0 \(running 0\.23\.7\)/,
+      );
+    });
+
+    it('rejects a malformed floor instead of reading it as 0.0.0', () => {
+      for (const min of ['v1.0.0', '1.2', 'garbage', 5, '']) {
+        expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: min }, host)).toThrow(/minOpenWAVersion/);
+      }
+    });
+
+    it('lets a prerelease host satisfy its own release floor', () => {
+      expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: '0.24.0' }, '0.24.0-rc.1')).not.toThrow();
+    });
+
+    it('checks against the running package version by default', () => {
+      expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: '0.0.1' })).not.toThrow();
+      expect(() => validatePluginManifest({ ...valid, minOpenWAVersion: '999.0.0' })).toThrow(/requires OpenWA/);
+    });
   });
 });

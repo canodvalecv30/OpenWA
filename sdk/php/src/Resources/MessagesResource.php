@@ -39,71 +39,71 @@ class MessagesResource
      * @param array<string,mixed> $body
      * @return array<string,mixed>
      */
-    public function sendText(string $sessionId, array $body): array
+    public function sendText(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-text", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-text", [], $body, $idempotencyKey);
     }
 
     /**
      * @param array<string,mixed> $body
      * @return array<string,mixed>
      */
-    public function sendImage(string $sessionId, array $body): array
+    public function sendImage(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->sendMedia($sessionId, 'send-image', $body);
+        return $this->sendMedia($sessionId, 'send-image', $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendVideo(string $sessionId, array $body): array
+    public function sendVideo(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->sendMedia($sessionId, 'send-video', $body);
+        return $this->sendMedia($sessionId, 'send-video', $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendAudio(string $sessionId, array $body): array
+    public function sendAudio(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->sendMedia($sessionId, 'send-audio', $body);
+        return $this->sendMedia($sessionId, 'send-audio', $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendDocument(string $sessionId, array $body): array
+    public function sendDocument(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->sendMedia($sessionId, 'send-document', $body);
+        return $this->sendMedia($sessionId, 'send-document', $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendSticker(string $sessionId, array $body): array
+    public function sendSticker(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->sendMedia($sessionId, 'send-sticker', $body);
+        return $this->sendMedia($sessionId, 'send-sticker', $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    private function sendMedia(string $sessionId, string $segment, array $body): array
+    private function sendMedia(string $sessionId, string $segment, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/{$this->http->encodeSegment($segment)}", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/{$this->http->encodeSegment($segment)}", [], $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendLocation(string $sessionId, array $body): array
+    public function sendLocation(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-location", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-location", [], $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendContact(string $sessionId, array $body): array
+    public function sendContact(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-contact", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-contact", [], $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function sendTemplate(string $sessionId, array $body): array
+    public function sendTemplate(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
         // vars is a map: an empty PHP array would serialize as a JSON list [] and be rejected by the
         // gateway's object validation. Cast the empty map to stdClass so it encodes as {}.
         if (isset($body['vars']) && $body['vars'] === []) {
             $body['vars'] = new \stdClass();
         }
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-template", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-template", [], $body, $idempotencyKey);
     }
 
     /**
@@ -112,15 +112,15 @@ class MessagesResource
      * @param array<string,mixed> $body {chatId, name, options, allowMultipleAnswers?}
      * @return array<string,mixed>
      */
-    public function sendPoll(string $sessionId, array $body): array
+    public function sendPoll(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-poll", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-poll", [], $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */
-    public function reply(string $sessionId, array $body): array
+    public function reply(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/reply", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/reply", [], $body, $idempotencyKey);
     }
 
     /**
@@ -135,9 +135,9 @@ class MessagesResource
     }
 
     /** @return array<string,mixed> */
-    public function forward(string $sessionId, array $body): array
+    public function forward(string $sessionId, array $body, ?string $idempotencyKey = null): array
     {
-        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/forward", [], $body);
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/forward", [], $body, $idempotencyKey);
     }
 
     /** @return array<string,mixed> */

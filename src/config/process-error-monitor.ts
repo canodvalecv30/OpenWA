@@ -1,3 +1,5 @@
+import { incrementUnhandledRejections } from '../common/metrics/process-error-metrics';
+
 /** Minimal structured-logger surface the monitor needs (satisfied by createLogger()'s result). */
 interface FatalLogger {
   error: (message: string, detail?: string) => void;
@@ -32,6 +34,18 @@ interface RejectionLogger extends FatalLogger {
  * teaching it there would produce a confidently wrong advisory.
  */
 const PAGE_CONTEXT_LOST_REJECTION = /execution context was destroyed|window\.require is not a function/i;
+
+/**
+ * String() throws on a null-prototype object or one whose toString/valueOf throws. Inside a process
+ * listener that throw becomes a fresh uncaught exception, so fall back to the `[object Tag]` form.
+ */
+function safeString(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
 
 /**
  * Register an `uncaughtExceptionMonitor` that routes an otherwise-fatal uncaught exception through the
@@ -79,9 +93,11 @@ export function registerUncaughtExceptionMonitor(logger: FatalLogger): void {
  */
 export function registerUnhandledRejectionHandler(logger: RejectionLogger): void {
   process.on('unhandledRejection', (reason: unknown) => {
-    const message = reason instanceof Error ? reason.message : String(reason);
-    const detail = reason instanceof Error ? reason.stack : String(reason);
-    if (PAGE_CONTEXT_LOST_REJECTION.test(message)) {
+    const message = reason instanceof Error ? reason.message : safeString(reason);
+    const detail = reason instanceof Error ? reason.stack : safeString(reason);
+    const pageContextLost = PAGE_CONTEXT_LOST_REJECTION.test(message);
+    incrementUnhandledRejections(pageContextLost ? 'page_context_lost' : 'other');
+    if (pageContextLost) {
       // The stack goes in the context object, not the second positional slot: `warn`'s second
       // parameter is the log context, and a string there becomes the line's scope name.
       logger.warn(

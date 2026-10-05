@@ -406,12 +406,7 @@ const SqliteSession = new EntitySchema<Record<string, unknown>>({
       );
     }
 
-    const stats = new StatsService(
-      ds.getRepository(Session),
-      messages,
-      { setSessionsStats: () => Promise.resolve(undefined) } as never,
-      cfg as never,
-    );
+    const stats = new StatsService(ds.getRepository(Session), messages, cfg as never);
 
     expect((await stats.getOverview()).messages.today).toEqual({ sent: 1, received: 0 });
   });

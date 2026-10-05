@@ -72,9 +72,35 @@ describe('IngressEnqueueService', () => {
       expect(await svc.existingJobState(data, 'd1')).toBeUndefined();
       expect(await svc.existingJobState(data, 'd1')).toBeUndefined();
 
+      getJobState.mockClear();
       (config.get as jest.Mock).mockReturnValue(false);
       expect(await svc.existingJobState(data, 'd1')).toBeUndefined();
-      expect(getJobState).toHaveBeenCalledTimes(2);
+      expect(getJobState).not.toHaveBeenCalled();
+    });
+
+    // IngressProcessor re-queues a delivery whose dead-letter write failed under a copy id: that copy
+    // owns the delivery while the original stays failed, or after removeOnFail pruned it.
+    it('reports a live or completed re-queued copy of a failed or pruned job', async () => {
+      (config.get as jest.Mock).mockReturnValue(true);
+      const base = sanitizeIngressJobId('d1', 'chatwoot\u0000acct1');
+      const states: Record<string, string> = { [base]: 'failed', [`${base}-requeued-2`]: 'delayed' };
+      const getJobState = jest.fn((id: string) => Promise.resolve(states[id] ?? 'unknown'));
+      const svc = new IngressEnqueueService(
+        loader as PluginLoaderService,
+        config as ConfigService,
+        { ...queue, getJobState } as never,
+      );
+
+      expect(await svc.existingJobState(data, 'd1')).toBe('delayed');
+      delete states[base];
+      expect(await svc.existingJobState(data, 'd1')).toBe('delayed');
+      states[`${base}-requeued-2`] = 'completed';
+      expect(await svc.existingJobState(data, 'd1')).toBe('completed');
+      states[`${base}-requeued-2`] = 'failed';
+      states[base] = 'failed';
+      expect(await svc.existingJobState(data, 'd1')).toBe('failed');
+      delete states[base];
+      expect(await svc.existingJobState(data, 'd1')).toBeUndefined();
     });
   });
 
@@ -240,6 +266,17 @@ describe('IngressEnqueueService', () => {
         else process.env.INGRESS_MAX_ATTEMPTS = prevA;
         if (prevD === undefined) delete process.env.INGRESS_RETRY_DELAY_MS;
         else process.env.INGRESS_RETRY_DELAY_MS = prevD;
+      }
+    });
+
+    it.each(['1e1', '0x10', '0'])('falls back to 3 attempts for INGRESS_MAX_ATTEMPTS=%p', raw => {
+      const prevA = process.env.INGRESS_MAX_ATTEMPTS;
+      try {
+        process.env.INGRESS_MAX_ATTEMPTS = raw;
+        expect(resolveIngressJobOptions().attempts).toBe(3);
+      } finally {
+        if (prevA === undefined) delete process.env.INGRESS_MAX_ATTEMPTS;
+        else process.env.INGRESS_MAX_ATTEMPTS = prevA;
       }
     });
 

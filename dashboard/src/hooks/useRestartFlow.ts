@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { infraApi } from '../services/api';
 import { restartPollAttempts } from '../utils/restartPoll';
 
-// 'unknown': a proxy gave up waiting for the restart request, so whether it went through cannot be told.
+// 'unknown': a proxy answered in the gateway's place (a 504, a Cloudflare 52x, or a 502 with no gateway
+// code), so whether the restart went through cannot be told.
 export type RestartStatus = 'idle' | 'restarting' | 'waiting' | 'success' | 'error' | 'unknown';
 
 export interface RestartOpenRequest {
@@ -16,6 +17,8 @@ export interface RestartOpenRequest {
 export interface RestartFlow {
   showRestartModal: boolean;
   restartCountdown: number;
+  /** The countdown's starting value, the server's estimate once it answers; the progress bar's 100%. */
+  restartTotal: number;
   restartStatus: RestartStatus;
   /** The server's reason when it refused the restart; shown in place of the generic error text. */
   restartError: string | null;
@@ -43,6 +46,7 @@ export interface RestartFlow {
 export function useRestartFlow(): RestartFlow {
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [restartCountdown, setRestartCountdown] = useState(0);
+  const [restartTotal, setRestartTotal] = useState(30);
   const [restartStatus, setRestartStatus] = useState<RestartStatus>('idle');
   const [restartError, setRestartError] = useState<string | null>(null);
   const [restartWarnings, setRestartWarnings] = useState<string[]>([]);
@@ -59,12 +63,19 @@ export function useRestartFlow(): RestartFlow {
   // away mid-restart) cancels them instead of letting them fire setState on a dead component. The
   // trailing window.location.reload() on success is kept — a restart that already completed is meant
   // to reload the page.
+  // mountedRef stops what an unmount cannot clear: a restart answer or a readiness check still in
+  // flight would otherwise arm a new interval or poll after the cleanup ran, and that poll could end
+  // by reloading whatever page the operator moved on to. Set in the effect body, not the initializer,
+  // so StrictMode's dev unmount/remount leaves it true.
   const pollTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     const pollTimeouts = pollTimeoutsRef.current;
     return () => {
+      mountedRef.current = false;
       for (const handle of pollTimeouts) clearTimeout(handle);
       pollTimeouts.clear();
       if (countdownIntervalRef.current) {
@@ -75,6 +86,7 @@ export function useRestartFlow(): RestartFlow {
   }, []);
 
   const schedulePollTimeout = (fn: () => void, ms: number) => {
+    if (!mountedRef.current) return;
     const handle = setTimeout(() => {
       pollTimeoutsRef.current.delete(handle);
       fn();
@@ -133,6 +145,7 @@ export function useRestartFlow(): RestartFlow {
   const start = async () => {
     setRestartStatus('restarting');
     setRestartCountdown(30);
+    setRestartTotal(30);
 
     const profilesToRemove = profiles.running.filter(p => !profiles.pending.includes(p));
 
@@ -143,7 +156,10 @@ export function useRestartFlow(): RestartFlow {
     try {
       const response = await infraApi.restart(profiles.pending, profilesToRemove);
       estimatedTime = response.estimatedTime;
-      if (response.estimatedTime) setRestartCountdown(response.estimatedTime);
+      if (response.estimatedTime) {
+        setRestartCountdown(response.estimatedTime);
+        setRestartTotal(response.estimatedTime);
+      }
       warnings = [...(response.orchestration?.errors ?? []), ...(response.removal?.errors ?? [])];
       setRestartWarnings(warnings);
     } catch (err) {
@@ -154,10 +170,13 @@ export function useRestartFlow(): RestartFlow {
       if (typeof failure?.status === 'number') {
         stopCountdown();
         setRestartCountdown(0);
-        // A 504, or a 502 the gateway did not stamp with a code, came from a proxy that stopped waiting.
-        // The request may still be running (a first-time enable pulls an image before the restart), so
-        // this is neither a refusal nor something a readiness poll can settle: the old process answers.
-        if (failure.status === 504 || (failure.status === 502 && failure.code === undefined)) {
+        // A 502, a 504 or a Cloudflare 520-527 the gateway did not stamp with a code is a proxy answering in
+        // the gateway's place: a timeout, or an upstream connection that failed or dropped. The client cannot
+        // tell which, and the request may still be running (a first-time enable pulls an image before the
+        // restart), so this is neither a refusal nor something a readiness poll can settle: the old process
+        // answers.
+        const { status } = failure;
+        if (failure.code === undefined && (status === 502 || status === 504 || (status >= 520 && status <= 527))) {
           setRestartStatus('unknown');
           return;
         }
@@ -166,6 +185,7 @@ export function useRestartFlow(): RestartFlow {
         return;
       }
     }
+    if (!mountedRef.current) return;
 
     setRestartStatus('waiting');
     stopCountdown();
@@ -185,6 +205,7 @@ export function useRestartFlow(): RestartFlow {
   return {
     showRestartModal,
     restartCountdown,
+    restartTotal,
     restartStatus,
     restartError,
     restartWarnings,

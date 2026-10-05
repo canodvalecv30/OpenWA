@@ -38,6 +38,7 @@ class ContactsResource:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}")
 
     def check(self, session_id: str, number: str) -> CheckNumberResponse:
+        """Check whether a number is on WhatsApp (OPERATOR)."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/check/{quote_segment(number)}")
 
     def profile_picture(self, session_id: str, contact_id: str) -> ProfilePictureResponse:
@@ -56,6 +57,7 @@ class ContactsResource:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/phone")
 
     def block(self, session_id: str, contact_id: str) -> SuccessResult:
+        """Block a contact (OPERATOR)."""
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/block")
 
     def upsert(self, session_id: str, contact_id: str, body: UpsertContactRequest) -> SuccessResult:
@@ -71,6 +73,7 @@ class ContactsResource:
         )
 
     def unblock(self, session_id: str, contact_id: str) -> SuccessResult:
+        """Unblock a contact (OPERATOR)."""
         return self._http.request("DELETE", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/block")
 
     def list_blocked(self, session_id: str) -> List[str]:

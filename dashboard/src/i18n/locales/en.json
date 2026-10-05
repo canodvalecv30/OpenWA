@@ -36,6 +36,7 @@
     "hoursAgo": "{{count}} hour ago",
     "hoursAgo_other": "{{count}} hours ago",
     "optional": "optional",
+    "fieldTooLong": "Limited to {{max}} characters ({{count}} now).",
     "language": "Language",
     "back": "Back",
     "next": "Next",
@@ -90,6 +91,7 @@
     "noMessageYet": "No messages yet",
     "unreadBadge": "{{count}} unread message",
     "unreadBadge_other": "{{count}} unread messages",
+    "markedUnread": "Marked as unread",
     "loadingMessages": "Loading messages...",
     "loadingOlderMessages": "Loading older messages...",
     "loadOlderMessagesError": "Couldn't load older messages. Scroll up to retry.",
@@ -121,7 +123,6 @@
       "unknownType": "Unknown type"
     },
     "you": "You",
-    "youPrefix": "You: ",
     "yesterday": "Yesterday",
     "attachTitle": "Send file / image",
     "emojiTitle": "Pick emoji",
@@ -352,7 +353,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "No proxy configured",
       "hasCredentials": "Credentials are stored but not shown. Enter a full URL to change them.",
-      "hint": "Changes apply on the next session start, not to a running connection. The proxy must be real and reachable — an unreachable value blocks QR delivery and start returns 504.",
+      "hint": "Changes apply on the next session start, not to a running connection. The proxy must be real and reachable — an unreachable value blocks QR delivery: on whatsapp-web.js the start returns 504; on Baileys the start succeeds and the session keeps retrying.",
       "createHint": "Only needed when your network cannot reach WhatsApp directly. Must be a real, reachable proxy.",
       "invalidUrl": "Enter a valid http, https, socks4, or socks5 proxy URL.",
       "saveSuccessTitle": "Proxy Saved",
@@ -446,11 +447,13 @@
     "selectSession": "Select session...",
     "session": "Session",
     "events": "Events",
+    "noEvents": "Select at least one event.",
     "available": "Available Events",
     "saveChanges": "Save Changes",
     "filters": {
       "title": "Filters (optional)",
       "hint": "Only fire when all conditions match. Applies to message events.",
+      "incomplete": "Give every filter condition a value, and use at most 20 conditions, 100 values per condition and 1000 characters of text.",
       "badge": "{{count}} filter",
       "badge_other": "{{count}} filters",
       "addCondition": "Add condition",
@@ -484,11 +487,9 @@
       "valueLabel": "Filter value"
     },
     "columns": {
-      "url": "URL",
       "events": "Events",
       "session": "Session",
-      "status": "Status",
-      "actions": "Actions"
+      "status": "Status"
     },
     "empty": {
       "title": "No webhooks configured",
@@ -538,6 +539,33 @@
       "call.missed": "When a call goes unanswered",
       "status.received": "When a contact posts a status",
       "all": "All events"
+    },
+    "auth": {
+      "title": "Delivery authentication",
+      "hint": "Optional. Stored values are never shown again after saving.",
+      "editHint": "The stored secret and headers are never shown. Leave this section untouched to keep them.",
+      "secret": "Signing secret",
+      "secretHint": "16 to 255 characters. Each delivery carries an HMAC-SHA256 signature in the X-OpenWA-Signature header.",
+      "secretKeepPlaceholder": "Leave blank to keep the current secret",
+      "generateSecret": "Generate",
+      "copySecret": "Copy",
+      "secretCopied": "Signing secret copied",
+      "removeSecret": "Stop signing deliveries (remove the secret)",
+      "headers": "Custom headers",
+      "headerName": "Header name",
+      "headerValue": "Header value",
+      "addHeader": "Add header",
+      "removeHeader": "Remove header",
+      "replaceHeaders": "Replace custom headers",
+      "replaceHint": "These rows replace every stored header. With no rows, the stored headers are removed.",
+      "errors": {
+        "headerName": "Header names may contain only letters, digits and hyphens.",
+        "headerValue": "Header values are limited to 1024 characters, without control characters or characters outside Latin-1.",
+        "headerReserved": "Content-Type, User-Agent, X-OpenWA-* and connection headers are set by the gateway and cannot be used.",
+        "headerDuplicate": "Each header name can be used only once.",
+        "tooMany": "At most 50 custom headers are allowed.",
+        "secretLength": "The signing secret must be 16 to 255 characters long."
+      }
     }
   },
   "templates": {
@@ -571,6 +599,7 @@
     },
     "empty": {
       "title": "No templates saved",
+      "noMatch": "No templates match your search.",
       "description": "Create a reusable template to speed up common replies and notifications.",
       "noSessionsTitle": "No sessions available",
       "noSessionsDesc": "Create a WhatsApp session before adding templates.",
@@ -597,6 +626,7 @@
     "createdTitle": "API Key Created",
     "createdHint": "Copy this key now. You won't be able to see it again.",
     "namePlaceholder": "e.g., Production Key",
+    "nameTooShort": "Use at least 3 characters.",
     "rolesTitle": "Roles Reference",
     "roles": {
       "admin": "Admin",
@@ -615,11 +645,13 @@
       "status": "Status",
       "lastUsed": "Last Used",
       "actions": "Actions",
-      "sessions": "Sessions"
+      "sessions": "Sessions",
+      "restrictions": "Restrictions"
     },
     "statuses": {
       "active": "Active",
-      "revoked": "Revoked"
+      "revoked": "Revoked",
+      "expired": "Expired"
     },
     "empty": {
       "title": "No API keys created",
@@ -637,10 +669,9 @@
       "revoke": "Revoke"
     },
     "actions": {
-      "copy": "Copy",
       "revoke": "Revoke",
       "delete": "Delete",
-      "editSessions": "Edit sessions"
+      "edit": "Edit access"
     },
     "sessions": {
       "label": "Session access",
@@ -648,10 +679,36 @@
       "all": "All sessions",
       "empty": "No sessions yet. This key will be able to access every session once any exist.",
       "restricted": "{{count}} selected",
-      "editTitle": "Edit session access",
       "save": "Save",
       "choose": "Choose sessions",
       "leaveAll": "Leave for all sessions"
+    },
+    "edit": {
+      "title": "Edit key access",
+      "signedIn": "This dashboard is signed in with this key. Changing its role, IP addresses, chats or expiry can sign you out."
+    },
+    "restrictions": {
+      "none": "None",
+      "ips": "IPs: {{count}}",
+      "chats": "Chats: {{count}}",
+      "expires": "Expires {{date}}",
+      "expired": "Expired {{date}}"
+    },
+    "ips": {
+      "label": "Allowed IP addresses (optional)",
+      "hint": "One IP address or CIDR range per line. Leave empty to accept any address.",
+      "invalid": "Not an IPv4 address or CIDR range: {{value}}"
+    },
+    "chats": {
+      "label": "Chat access (optional)",
+      "hint": "One chat per line: a group ID ending in @g.us, a contact ID ending in @c.us or @lid, or a phone number. Leave empty for every chat. A chat-restricted key can use only the routes open to chat-scoped keys; the events WebSocket and MCP refuse it.",
+      "invalid": "Not a chat ID or phone number: {{value}}"
+    },
+    "expiry": {
+      "label": "Expires at (optional)",
+      "hint": "In this browser's time zone. Leave empty for a key that never expires.",
+      "clear": "Remove expiry",
+      "invalid": "Enter a complete date and time no later than the year 9999, or clear the field for a key that never expires."
     }
   },
   "logs": {
@@ -826,7 +883,7 @@
       "sslRejectUnauthorized": "Verify SSL Certificate",
       "sslRejectUnauthorizedDesc": "Reject self-signed or invalid certificates. Turn off for managed Postgres with self-signed certs (Supabase, Heroku, Render, Railway).",
       "migrationsTitle": "Database Migrations",
-      "migrationsStatus": "Schema is auto-synchronized with TypeORM",
+      "migrationsStatus": "Pending migrations are applied automatically at startup",
       "migrationsHint": "Migrations are managed automatically. Use CLI for manual migrations."
     },
     "engine": {
@@ -849,7 +906,7 @@
     "redis": {
       "title": "Redis",
       "enable": "Enable Redis",
-      "enableDesc": "Required for caching, session storage, and BullMQ queues",
+      "enableDesc": "Used for caching, BullMQ queues, rate-limit counters, and multi-node WebSocket fan-out",
       "useBuiltIn": "Use Built-in Redis Container",
       "builtInDesc": "OpenWA will manage a Redis container for you",
       "queueTitle": "Enable BullMQ Queue System",
@@ -861,7 +918,7 @@
       "failed": "Failed",
       "viewBullMq": "View Bull MQ Dashboard",
       "disabledTitle": "Redis is Disabled",
-      "disabledDesc": "Enable Redis for caching, session storage, and BullMQ message queues.",
+      "disabledDesc": "Enable Redis for caching, BullMQ message queues, rate-limit counters, and multi-node WebSocket fan-out.",
       "passwordOptional": "(optional)",
       "bullMqUrlCopied": "Bull MQ dashboard URL copied",
       "bullMqUrlHint": "Open it with an ADMIN API key — a browser tab can't authenticate."
@@ -896,7 +953,7 @@
       "storageWarning": "Existing media files are not moved to the new storage backend automatically; they'll remain in the old location.",
       "downloadBackup": "Download backup first",
       "backupTitle": "Data backup & restore",
-      "backupHint": "Export all data as JSON before switching databases, then import it after the switch. The backup contains webhook secrets and proxy credentials in plaintext — store it securely and delete it after restoring.",
+      "backupHint": "Export all data as JSON before switching databases, then import it after the switch. Webhook signing secrets, custom webhook headers and proxy credentials are not included; re-enter them after restoring. Integration instance secrets and settings are included in plaintext, so store the file securely and delete it after restoring.",
       "export": "Export data",
       "import": "Import data",
       "exportFailed": "Couldn't export data",
@@ -921,8 +978,8 @@
       "checking": "Checking server status...",
       "dontClose": "Please do not close this window",
       "successMsg": "Server is back online! The page will reload automatically.",
-      "errorMsg": "Server did not respond after 30 seconds. Please check the Docker logs and restart manually.",
-      "outcomeUnknown": "The proxy timed out before the server answered. The restart may still be in progress; reload in a minute to check.",
+      "errorMsg": "Server did not respond. Please check the Docker logs and restart manually.",
+      "outcomeUnknown": "The proxy returned an error before the server answered, so it is not known whether the restart is in progress. Reload in a minute to check.",
       "reload": "Reload Page"
     },
     "toasts": {
@@ -964,7 +1021,7 @@
     "config": {
       "title": "Configure {{name}}",
       "noOptions": "No configuration options available for this plugin",
-      "uiHandshakeError": "The plugin configuration UI did not initialize. Use the schema form below if available.",
+      "uiHandshakeError": "The plugin configuration UI did not initialize.",
       "save": "Save Configuration",
       "addItem": "Add",
       "tabConfig": "Configuration",
@@ -995,7 +1052,7 @@
       "healthFail": "Health Check Failed",
       "healthError": "Health Check Error",
       "savedTitle": "Configuration Saved",
-      "savedDesc": "Server restart required to apply changes.",
+      "savedDesc": "Changes take effect without a server restart.",
       "saveFailed": "Save Failed",
       "installed": "Plugin installed",
       "installFailed": "Install failed",
@@ -1100,7 +1157,7 @@
   },
   "search": {
     "placeholder": "Search messages…",
-    "results": "{{count}} results",
+    "loadMore": "Show more ({{shown}} of {{total}})",
     "empty": "No messages found.",
     "error": "Search failed. Try again.",
     "unavailable": "Search is not configured.",

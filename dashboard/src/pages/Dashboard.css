@@ -191,7 +191,7 @@
 }
 
 .dashboard .session-id {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', monospace;
   font-size: 0.8125rem;
   color: var(--text-primary);
   white-space: nowrap;
@@ -226,12 +226,24 @@
   color: var(--primary-text);
 }
 
-.dashboard .status-pill.connecting,
+.dashboard .status-pill.initializing,
 .dashboard .status-pill.authenticating {
   background: rgba(245, 158, 11, 0.15);
   color: var(--warning-text);
 }
 
+.dashboard .status-pill.qr_ready {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--info);
+}
+
+/* Needs a human: a heavier tint of the in-progress amber, so the two do not read alike. */
+.dashboard .status-pill.action_required {
+  background: rgba(245, 158, 11, 0.3);
+  color: var(--warning-text);
+}
+
+.dashboard .status-pill.created,
 .dashboard .status-pill.disconnected {
   background: var(--bg-light);
   color: var(--text-muted);

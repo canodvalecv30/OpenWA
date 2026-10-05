@@ -21,12 +21,15 @@ export class ContactService {
     return this.engines.require(sessionId);
   }
 
+  /** Every contact WITHOUT the response window, for callers that filter before paging. */
+  listContacts(sessionId: string) {
+    // getEngine throws synchronously (keeps the "session not started" guard a sync 400).
+    return this.getEngine(sessionId).getContacts();
+  }
+
   getContacts(sessionId: string, opts: ListOptions = {}) {
-    // getEngine throws synchronously (keeps the "session not started" guard a sync 400); the
-    // engine returns the full set and we bound the HTTP response window via paginate().
-    return this.getEngine(sessionId)
-      .getContacts()
-      .then(contacts => paginate(contacts, opts.limit, opts.offset));
+    // The engine returns the full set and we bound the HTTP response window via paginate().
+    return this.listContacts(sessionId).then(contacts => paginate(contacts, opts.limit, opts.offset));
   }
 
   async getContactById(sessionId: string, contactId: string) {
@@ -40,10 +43,6 @@ export class ContactService {
   /** The read half of block/unblock — neutral ids only (the honest common subset of both engines). */
   getBlockedContacts(sessionId: string) {
     return this.getEngine(sessionId).getBlockedContacts();
-  }
-
-  checkNumberExists(sessionId: string, number: string) {
-    return this.getEngine(sessionId).checkNumberExists(number);
   }
 
   getNumberId(sessionId: string, number: string) {
@@ -133,9 +132,10 @@ export class ContactService {
 
   /**
    * Guarded because whatsapp-web.js's Contact.block()/unblock() silently return false for a group id
-   * (nothing blocked, reported as success), and Baileys passes the id to updateBlockStatus, whose
-   * Boom for an unresolvable jid has no HttpException mapping (opaque 500). See `assertBlockable`
-   * for why this guard is wider than the addressbook one.
+   * (nothing blocked, reported as success). Baileys' updateBlockStatus refuses an id it cannot map
+   * between the phone and privacy-id dialects, which the adapter reports as 400
+   * RecipientUnreachableError. See `assertBlockable` for why this guard is wider than the
+   * addressbook one.
    */
   blockContact(sessionId: string, contactId: string) {
     this.assertBlockable(contactId);
@@ -150,10 +150,12 @@ export class ContactService {
    * the wid as-is), so refusing them made the very ids this API hands out unusable for the matching
    * write and left such a contact listed as blocked with no way to unblock it.
    *
-   * Neither engine needs a phone here: Baileys passes the jid straight to `updateBlockStatus`, and
-   * whatsapp-web.js only short-circuits (`Contact.block()` returns false without acting) for a
-   * group. What must still be refused is an id that names no individual at all, which is what made
-   * whatsapp-web.js answer 200 "blocked" while nothing was blocked.
+   * whatsapp-web.js needs no phone here and only short-circuits (`Contact.block()` returns false
+   * without acting) for a group. Baileys' `updateBlockStatus` maps the id first: blocking a lid
+   * needs its phone mapping, and a phone-based id (block or unblock) needs its lid mapping; an
+   * unmapped id answers 400 RecipientUnreachableError from the adapter. What must still be refused
+   * up front is an id that names no individual at all, which is what made whatsapp-web.js answer
+   * 200 "blocked" while nothing was blocked.
    */
   private assertBlockable(contactId: string): void {
     if (isIndividualWid(contactId) || this.isBareNumber(contactId)) return;

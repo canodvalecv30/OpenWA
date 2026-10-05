@@ -39,11 +39,11 @@ export class SearchController {
   @ApiQuery({ name: 'from', required: false, description: 'Sender filter' })
   @ApiQuery({ name: 'dateFrom', required: false, description: 'Epoch-ms lower bound (inclusive)' })
   @ApiQuery({ name: 'dateTo', required: false, description: 'Epoch-ms upper bound (inclusive)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max hits to return' })
+  @ApiQuery({ name: 'limit', required: false, type: 'integer', description: 'Max hits to return' })
   @ApiQuery({
     name: 'offset',
     required: false,
-    type: Number,
+    type: 'integer',
     description: `Pagination offset, at most ${SEARCH_OFFSET_MAX}`,
   })
   async search(@Query() dto: SearchQueryDto, @CurrentApiKey() apiKey?: ApiKey): Promise<SearchResults> {

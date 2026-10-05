@@ -18,9 +18,10 @@ export class AddTemplateNameUnique1781100000000 implements MigrationInterface {
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.dataSource.options.type === 'postgres') {
-      // See AddMessagesWaMessageIdUnique: lift the runtime statement_timeout for this migration
-      // transaction so the dedup UPDATE / CREATE UNIQUE INDEX over templates is not aborted. SET LOCAL is
-      // transaction-scoped and a no-op on SQLite (which rejects it syntactically — hence the guard).
+      // Boot and CLI migrations run on a pool without the runtime statement_timeout (pg-boot-migrations.ts);
+      // this guards the dedup UPDATE / CREATE UNIQUE INDEX over templates against a role- or database-level
+      // default aborting it mid-flight. SET LOCAL is transaction-scoped (auto-reverts at COMMIT); SQLite
+      // rejects it syntactically, hence the guard.
       await queryRunner.query('SET LOCAL statement_timeout = 0');
     }
     if (!(await queryRunner.hasTable('templates'))) return;

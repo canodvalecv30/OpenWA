@@ -4,37 +4,30 @@ import { join } from 'node:path';
 /**
  * `engines.node` is the only minimum a from-source install is told about, so it must not sit below
  * the floor of a package the lockfile installs: on such a Node, `npm ci` warns (or fails under
- * engine-strict) and the dependency may use an API the runtime lacks. The check reads only plain
- * `>=X.Y.Z` floors, the shape that actually raises the minimum; a `||` range already admits several
- * majors and is left to npm. Optional platform binaries are skipped, as npm skips them.
+ * engine-strict) and the dependency may use an API the runtime lacks. Each package range is checked
+ * against the declared floor itself, so a `||` range that skips the declared major (`^20 || >=24`
+ * under `>=22`) is caught too. Optional platform binaries are skipped, as npm skips them.
  */
 describe('package.json engines.node covers every installed package floor', () => {
   const repo = join(__dirname, '..', '..');
   const readJson = <T>(file: string): T => JSON.parse(readFileSync(join(repo, file), 'utf8')) as T;
-
-  type Version = [number, number, number];
-  const parse = (text: string): Version => {
-    const [major = 0, minor = 0, patch = 0] = text.split('.').map(part => Number.parseInt(part, 10) || 0);
-    return [major, minor, patch];
-  };
-  const below = (a: Version, b: Version): boolean => {
-    for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
-    return false;
-  };
-  const floorOf = (range: string): Version | null => {
-    const match = /^\s*>=\s*v?(\d+(?:\.\d+){0,2})\s*$/.exec(range);
-    return match ? parse(match[1]) : null;
+  // Hoisted by the lockfile (bullmq, sharp and ts-jest depend on it); it ships no types of its own.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const semver = require('semver') as {
+    minVersion(range: string): { version: string } | null;
+    satisfies(version: string, range: string): boolean;
   };
 
   const unmetFloors = (declared: string, packages: Record<string, { optional?: boolean; engines?: unknown }>) => {
-    const own = floorOf(declared);
+    const own = /^\s*>=\s*v?\d+(?:\.\d+){0,2}\s*$/.test(declared) ? semver.minVersion(declared) : null;
     if (!own) throw new Error(`engines.node must be a plain >= floor, got "${declared}"`);
     const unmet: string[] = [];
     for (const [path, meta] of Object.entries(packages)) {
       if (!path || meta.optional) continue;
       const range = (meta.engines as { node?: string } | undefined)?.node;
-      const floor = typeof range === 'string' ? floorOf(range) : null;
-      if (floor && below(own, floor)) unmet.push(`${path.replace(/^.*node_modules\//, '')} ${range}`);
+      if (typeof range === 'string' && !semver.satisfies(own.version, range)) {
+        unmet.push(`${path.replace(/^.*node_modules\//, '')} ${range}`);
+      }
     }
     return unmet.sort();
   };
@@ -58,9 +51,12 @@ describe('package.json engines.node covers every installed package floor', () =>
       '': {},
       'node_modules/high': { engines: { node: '>=22.19.0' } },
       'node_modules/multi': { engines: { node: '^20.19.0 || >=24' } },
+      'node_modules/covered': { engines: { node: '^20.19.0 || >=22.12.0' } },
+      'node_modules/any': { engines: { node: '*' } },
       'node_modules/bin': { optional: true, engines: { node: '>=99' } },
     };
-    expect(unmetFloors('>=22.13', packages)).toEqual(['high >=22.19.0']);
-    expect(unmetFloors('>=22.19', packages)).toEqual([]);
+    expect(unmetFloors('>=22.13', packages)).toEqual(['high >=22.19.0', 'multi ^20.19.0 || >=24']);
+    expect(unmetFloors('>=22.19', packages)).toEqual(['multi ^20.19.0 || >=24']);
+    expect(unmetFloors('>=24', packages)).toEqual([]);
   });
 });

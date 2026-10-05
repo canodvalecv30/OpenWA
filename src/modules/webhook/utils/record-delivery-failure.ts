@@ -1,4 +1,6 @@
 import { MoreThan, Repository } from 'typeorm';
+import { isUniqueViolation } from '../../../common/utils/db-errors';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WebhookDeliveryFailure } from '../entities/webhook-delivery-failure.entity';
 
 export interface WebhookDeliveryFailureInput {
@@ -11,6 +13,12 @@ export interface WebhookDeliveryFailureInput {
   attempts: number;
   lastStatusCode?: number | null;
   lastError: string;
+  /**
+   * The pre-hook event data to keep for a later redrive. Passed only while
+   * WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS > 0, and persisted only on a terminal row: an attempts-0
+   * row keeps its outbox row pending, which already holds the same data for the reconciler.
+   */
+  payload?: Record<string, unknown> | null;
 }
 
 /** Minimal logger shape — both WebhookProcessor and WebhookService pass their `createLogger` instance. */
@@ -53,16 +61,34 @@ export async function clearDeliveryFailureRows(
 }
 
 /**
- * Append a durable record of a webhook delivery that exhausted all retries. Called from BOTH terminal
- * paths — the BullMQ processor's final attempt and the direct-fallback's last attempt. Wrapped in its
- * own try/catch: persisting the failure is best-effort bookkeeping and must never throw back into (and
- * re-poison) the delivery result or the fire-and-forget dispatch loop.
+ * Record a webhook delivery that exhausted its retries (the BullMQ processor's final attempt, the direct
+ * path's last attempt) or was not sent (attempts 0, from recordUndelivered: shed, refused at shutdown,
+ * oversize or a preflight failure). Wrapped in its own try/catch: persisting the failure is best-effort
+ * bookkeeping and must never throw back into (and re-poison) the delivery result or the fire-and-forget
+ * dispatch loop. Returns true for a new row, false for an existing row, and null
+ * when persistence failed.
  */
 export async function recordWebhookDeliveryFailure(
   repo: Repository<WebhookDeliveryFailure>,
   logger: ErrorLogger,
   input: WebhookDeliveryFailureInput,
-): Promise<boolean> {
+): Promise<boolean | null> {
+  const terminal = input.attempts > 0;
+  const refreshTerminal = async (): Promise<boolean | null> => {
+    const updated = await repo.update(
+      { webhookId: input.webhookId, idempotencyKey: input.idempotencyKey, attempts: MoreThan(0) },
+      {
+        url: input.url,
+        lastError: input.lastError,
+        deliveryId: input.deliveryId,
+        attempts: () => `"attempts" + ${input.attempts}`,
+        lastStatusCode: input.lastStatusCode ?? null,
+      },
+    );
+    if (!updated.affected) return null;
+    await clearDeliveryFailureRows(repo, logger, input.webhookId, input.idempotencyKey, true);
+    return false;
+  };
   try {
     // One row per lost delivery, not one per attempt. The reconciler replays a pending outbox row
     // up to its budget and every failed replay arrives here, so without this guard a single lost
@@ -70,7 +96,6 @@ export async function recordWebhookDeliveryFailure(
     // metric. An absent idempotencyKey carries no identity to dedupe on, so it is always appended.
     // A terminal row (attempts > 0) is deduplicated only against other terminal rows: an attempts-0
     // row (a shed or shutdown-refused dispatch) is replaced by it below instead of suppressing it.
-    const terminal = input.attempts > 0;
     if (input.idempotencyKey) {
       const existing = await repo.count({
         where: terminal
@@ -103,13 +128,30 @@ export async function recordWebhookDeliveryFailure(
                 },
               ),
             );
+        } else {
+          // A crash or a failed delete right after an earlier terminal insert can leave the
+          // attempts-0 row behind; nothing else reconciles it, so every repeat finishes the job.
+          return await refreshTerminal();
         }
         return false;
       }
     }
-    await repo.insert({ ...input, lastStatusCode: input.lastStatusCode ?? null });
+    const { payload, ...row } = input;
+    // The cast covers `payload` only: TypeORM's insert typing cannot see through a free-form JSON
+    // record, while simple-json serializes it like the outbox payload.
+    try {
+      await repo.insert({
+        ...row,
+        lastStatusCode: input.lastStatusCode ?? null,
+        ...(terminal && payload ? { payload } : {}),
+      } as QueryDeepPartialEntity<WebhookDeliveryFailure>);
+    } catch (error) {
+      if (terminal && input.idempotencyKey && isUniqueViolation(error)) return await refreshTerminal();
+      throw error;
+    }
     if (terminal) {
-      // Only after the insert, so a crash in between leaves both rows, never none.
+      // Only after the insert, so a crash in between leaves both rows, never none. A later terminal
+      // record of the same delivery repeats this clear.
       await clearDeliveryFailureRows(repo, logger, input.webhookId, input.idempotencyKey, true);
     }
     return true;
@@ -119,8 +161,7 @@ export async function recordWebhookDeliveryFailure(
       err instanceof Error ? err.message : String(err),
       { webhookId: input.webhookId, deliveryId: input.deliveryId, action: 'webhook_failure_record_error' },
     );
-    // The delivery really did fail; only the bookkeeping did. Report it as recorded so the metric
-    // still counts the loss rather than hiding it behind a database problem.
-    return true;
+    // No durable failure row owns the event. Callers must retain their replay copy.
+    return null;
   }
 }

@@ -204,3 +204,18 @@ test('a nested dialog still owns Escape when the parent unmounts first', () => {
   assert.equal(parentClosed, 0);
   unbindNested();
 });
+
+// Unmounting a page with a nested dialog open runs the parent's cleanup first (React unmounts a
+// deleted subtree parent-first). Each dialog restoring its own saved value left the nested one's
+// 'hidden' in place, and the next page could not scroll until a reload.
+test('the scroll lock is released once the last dialog closes, whatever the close order', () => {
+  const { doc, card } = makeWorld();
+  doc.body.style.overflow = 'auto';
+  const unbindParent = bindModalA11y(doc as never, card as never, () => {});
+  const unbindNested = bindModalA11y(doc as never, card as never, () => {});
+
+  unbindParent();
+  assert.equal(doc.body.style.overflow, 'hidden'); // the nested dialog is still open
+  unbindNested();
+  assert.equal(doc.body.style.overflow, 'auto');
+});

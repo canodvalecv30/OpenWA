@@ -1,10 +1,10 @@
 /**
- * Boot-env contract for the e2e family: setup-e2e.ts (a jest setupFile) re-runs before every
- * suite in the worker, so each suite must boot with queue and Redis off regardless of what an
- * earlier suite in the same worker left in process.env — queue-on.e2e-spec.ts mutates
- * REDIS_ENABLED at module load and can't restore it when it self-skips. Run alone this passes
- * trivially; its regression value is in a shared-worker run after queue-on (or with a dirty
- * ambient env), where a missing reset shows up as REDIS_ENABLED !== 'false' here.
+ * Boot-env contract for the e2e family: setup-e2e.ts (a jest setupFile) runs before every suite,
+ * so each suite must boot with queue and Redis off regardless of an ambient REDIS_ENABLED or
+ * QUEUE_ENABLED inherited from the developer's shell or the CI env. Writes from an earlier suite
+ * cannot carry over: jest gives each test file its own copy of process.env. Run in a clean env
+ * this passes trivially; its regression value is in a dirty ambient env, where a missing reset
+ * shows up as REDIS_ENABLED !== 'false' here.
  */
 import { Controller, Get, INestApplication, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';

@@ -1,4 +1,5 @@
 import { ValidationPipe } from '@nestjs/common';
+import { DECORATORS } from '@nestjs/swagger';
 import { plainToInstance } from 'class-transformer';
 import { validate, ValidationError } from 'class-validator';
 import {
@@ -10,6 +11,7 @@ import {
   EditMessageDto,
   ReplyMessageDto,
 } from './message-actions.dto';
+import { MENTIONS_MAX, MENTION_WID_MAX_LENGTH } from './send-message.dto';
 import { GLOBAL_VALIDATION_OPTIONS } from '../../../config/app-validation';
 
 /**
@@ -186,5 +188,30 @@ describe('mentions on the quoted-send and edit routes (whitelist behaviour)', ()
     // takes the field.
     await expect(through(ReplyMessageDto, { ...REPLY, mentions: ['120363000000000000@g.us'] })).rejects.toBeDefined();
     await expect(through(EditMessageDto, { ...EDIT, mentions: ['not-a-wid'] })).rejects.toBeDefined();
+  });
+});
+
+// @nestjs/swagger does not derive bounds from the validators, so the published schema has to declare
+// them itself, or a client generated from it accepts arrays the server answers with a 400.
+describe('message action DTO published schema', () => {
+  const published = (dto: object, key: string): Record<string, unknown> | undefined =>
+    Reflect.getMetadata(DECORATORS.API_MODEL_PROPERTIES, dto, key) as Record<string, unknown> | undefined;
+
+  it('publishes the poll option bounds the validators enforce', () => {
+    expect(published(SendPollDto.prototype, 'options')).toMatchObject({
+      minItems: 2,
+      maxItems: 12,
+      items: { type: 'string', maxLength: 100 },
+    });
+  });
+
+  it.each([
+    ['ReplyMessageDto', ReplyMessageDto],
+    ['EditMessageDto', EditMessageDto],
+  ])('%s publishes the mention list bounds', (_name, dto) => {
+    expect(published(dto.prototype, 'mentions')).toMatchObject({
+      maxItems: MENTIONS_MAX,
+      items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+    });
   });
 });

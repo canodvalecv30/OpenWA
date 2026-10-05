@@ -37,11 +37,18 @@ const SESSION_SCOPE_KEYS = [
   'apiKeys.sessions.all',
   'apiKeys.sessions.empty',
   'apiKeys.sessions.restricted',
-  'apiKeys.sessions.editTitle',
   'apiKeys.sessions.save',
   'apiKeys.sessions.choose',
   'apiKeys.sessions.leaveAll',
-  'apiKeys.actions.editSessions',
+  'apiKeys.actions.edit',
+  'apiKeys.edit.title',
+  'apiKeys.edit.signedIn',
+  'apiKeys.columns.restrictions',
+  'apiKeys.restrictions.ips',
+  'apiKeys.restrictions.chats',
+  'apiKeys.ips.label',
+  'apiKeys.chats.label',
+  'apiKeys.expiry.label',
 ];
 
 const NEW_PLUGIN_KEYS = [
@@ -250,6 +257,18 @@ test('English unlink success/incomplete copy does not claim handset Linked-Devic
   assert.ok(/incomplete/i.test(incomplete), `incomplete copy lost the "incomplete" framing: "${incomplete}"`);
 });
 
+// The data export drops webhook secrets and headers and strips proxy userinfo, but carries
+// integration instance secrets as-is (src/modules/infra/export-tables.ts). The hint must say which.
+test('English backup hint says which credentials the export leaves out and which it carries', () => {
+  const hint = i18n.t('infrastructure.migration.backupHint', { lng: 'en' });
+  assert.ok(!/contains webhook secrets/i.test(hint), `hint claims webhook secrets are exported: "${hint}"`);
+  assert.ok(/webhook signing secrets[^.]*not included/i.test(hint), `hint lost the webhook omission: "${hint}"`);
+  assert.ok(
+    /integration instance secrets[^.]*included in plaintext/i.test(hint),
+    `hint lost the plaintext note: "${hint}"`,
+  );
+});
+
 test('English start teardown-pending copy is a retryable warning, not an error', () => {
   const title = i18n.t('sessions.start.teardownPendingTitle', { lng: 'en' });
   const body = i18n.t('sessions.start.teardownPending', { lng: 'en' });
@@ -335,6 +354,28 @@ test('no locale catalogue is imported statically, anywhere in the dashboard sour
   assert.deepEqual(offenders, [], 'a static locale import is back — those languages are on the critical path again');
 });
 
+// The parity gate compares the other catalogues with en.json and never reads the source, and a
+// component test that builds its expected label with t() passes on the raw key too. So a literal key
+// that no catalogue has would render to the operator as the key itself. Template-literal and variable
+// keys are out of reach of this scan.
+const LITERAL_KEY = /\bt\(\s*['"]([a-zA-Z][\w-]*(?:\.[\w-]+)+)['"]|i18nKey=['"]([\w.-]+)['"]/g;
+
+test('every literal t() and i18nKey key in the dashboard source resolves in every locale', () => {
+  const keys = new Set(
+    readdirSync(SRC_DIR, { recursive: true, withFileTypes: true })
+      .filter(entry => entry.isFile() && /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name))
+      .flatMap(entry => [...readFileSync(join(entry.parentPath, entry.name), 'utf8').matchAll(LITERAL_KEY)])
+      .map(m => m[1] ?? m[2]),
+  );
+  assert.ok(keys.size > 500, `only ${keys.size} literal keys found, the scan pattern has drifted`);
+  const missing = LOCALE_IDS.flatMap(lng =>
+    [...keys]
+      .filter(key => !i18n.exists(key, { lng }) && !i18n.exists(`${key}_other`, { lng }))
+      .map(key => `${lng}: ${key}`),
+  );
+  assert.deepEqual(missing, [], 'these keys would render as the raw key');
+});
+
 // rtlLanguages is deliberately a SUBSET (only he/ar today), so it is checked for validity, not parity:
 // an id here that is not a shipped locale would set dir="rtl" for a language that cannot be selected.
 test('rtlLanguages only names shipped locales', () => {
@@ -374,4 +415,28 @@ test('the Templates nav item reads the same as the page it opens in every locale
   for (const lng of LOCALE_IDS) {
     assert.equal(i18n.t('nav.templates', { lng }), i18n.t('templates.title', { lng }), `${lng} nav.templates`);
   }
+});
+
+// Both databases apply their pending migrations at startup unless *_SYNCHRONIZE=true opts into
+// TypeORM synchronize, so the Infrastructure card must not name synchronize as the default.
+test('English migrations status describes migrations, not schema synchronize', () => {
+  const status = i18n.t('infrastructure.database.migrationsStatus', { lng: 'en' });
+  assert.doesNotMatch(status, /synchroni[sz]/i, `status names synchronize: "${status}"`);
+  assert.match(status, /migrations/i, `status lost the migrations wording: "${status}"`);
+});
+
+// Session auth state lives on disk or in the database; Redis only backs the cache, the queues, the
+// rate-limit counters and the multi-node WebSocket fan-out.
+test('English Redis copy does not claim Redis stores sessions', () => {
+  for (const key of ['infrastructure.redis.enableDesc', 'infrastructure.redis.disabledDesc']) {
+    const copy = i18n.t(key, { lng: 'en' });
+    assert.doesNotMatch(copy, /session/i, `${key} claims session storage: "${copy}"`);
+  }
+});
+
+// Plugin config, session activation and per-session overrides all apply live; a restart the toast
+// asks for would only drop every WhatsApp session for nothing.
+test('English plugin save toast does not ask for a server restart', () => {
+  const desc = i18n.t('plugins.toasts.savedDesc', { lng: 'en' });
+  assert.doesNotMatch(desc, /restart required/i, `toast asks for a restart: "${desc}"`);
 });

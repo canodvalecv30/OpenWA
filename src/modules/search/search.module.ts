@@ -16,7 +16,8 @@ import { PLUGIN_SEARCH_REGISTRY_PORT } from '../../core/plugins/plugin-host-port
  * from `SEARCH_ENABLED=false`, which omits the module entirely (route 404).
  *
  * The module is imported by AppModule only when `SEARCH_ENABLED !== 'false'`. Plugin providers
- * (Spec 2) will register themselves the same way and `auto` will select a healthy plugin over builtin.
+ * register themselves through the same registry; in `auto` mode the most recently registered plugin
+ * supersedes builtin (no health gating).
  */
 export function bootstrapSearchProviders(
   registry: SearchProviderRegistry,

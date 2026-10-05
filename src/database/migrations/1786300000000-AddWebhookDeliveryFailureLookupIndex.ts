@@ -15,9 +15,9 @@ export class AddWebhookDeliveryFailureLookupIndex1786300000000 implements Migrat
   name = 'AddWebhookDeliveryFailureLookupIndex1786300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // The data pool boots with a runtime statement_timeout (default 30s), and MigrationExecutor
-    // wraps a lone pending migration in its own transaction, so no earlier SET LOCAL is in effect.
-    // Lift it for this transaction only, exactly like AddMessageMediaPathIndex.
+    // Boot and CLI migrations run on a pool without the runtime statement_timeout (pg-boot-migrations.ts),
+    // and MigrationExecutor wraps a lone pending migration in its own transaction, so lift any role- or
+    // database-level default for this transaction only, exactly like AddMessageMediaPathIndex.
     if (queryRunner.dataSource.options.type === 'postgres') {
       await queryRunner.query('SET LOCAL statement_timeout = 0');
     }

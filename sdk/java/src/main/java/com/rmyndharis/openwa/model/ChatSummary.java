@@ -3,8 +3,8 @@ package com.rmyndharis.openwa.model;
 /**
  * A chat-list entry. Optional fields are {@code null} when absent.
  *
- * <p>{@code timestamp} is loosely typed on the wire (string or number), so it is
- * exposed as {@link Object}.
+ * <p>{@code timestamp} is the Unix time in seconds of the last activity (unlike
+ * {@code muteExpiration}, which is epoch milliseconds).
  */
 public record ChatSummary(
     String id,

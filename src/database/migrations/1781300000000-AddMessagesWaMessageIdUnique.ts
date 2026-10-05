@@ -15,10 +15,10 @@ export class AddMessagesWaMessageIdUnique1781300000000 implements MigrationInter
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.dataSource.options.type === 'postgres') {
-      // The runtime 'data' pool carries a statement_timeout (app.module.ts) and migrations run on it at
-      // boot. Lift it for THIS transaction so the dedup DELETE / CREATE UNIQUE INDEX over the hot messages
-      // table is never aborted mid-flight. SET LOCAL is transaction-scoped (auto-reverts at COMMIT) and is
-      // a no-op everywhere else — SQLite rejects it syntactically, hence the guard.
+      // Boot and CLI migrations run on a pool without the runtime statement_timeout (pg-boot-migrations.ts);
+      // this guards the dedup DELETE / CREATE UNIQUE INDEX over the hot messages table against a role- or
+      // database-level default aborting it mid-flight. SET LOCAL is transaction-scoped (auto-reverts at
+      // COMMIT); SQLite rejects it syntactically, hence the guard.
       await queryRunner.query('SET LOCAL statement_timeout = 0');
     }
     if (!(await queryRunner.hasTable('messages'))) return;

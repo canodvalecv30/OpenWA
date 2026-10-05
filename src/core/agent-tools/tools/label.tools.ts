@@ -63,6 +63,7 @@ export function labelTools(labels: LabelService): AnyToolDescriptor[] {
         'labels and answers 501.',
       tier: 'write',
       sessionScoped: true,
+      destructive: true,
       requiredRole: ApiKeyRole.OPERATOR,
       inputSchema: z.object({
         sessionId,

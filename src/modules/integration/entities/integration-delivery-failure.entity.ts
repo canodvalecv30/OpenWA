@@ -1,5 +1,6 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 import { jsonColumnType } from '../../../common/utils/column-types';
+import { NulFreeTransformer } from '../../../common/transformers/nul-free.transformer';
 
 // DLQ-of-record for both inbound (ingress) and outbound (provider egress) delivery failures.
 // Generalizes webhook_delivery_failures. sessionId is provenance (no FK).
@@ -27,7 +28,7 @@ export class IntegrationDeliveryFailure {
   @Column({ type: 'int' })
   attempts!: number;
 
-  @Column({ type: 'text' })
+  @Column({ type: 'text', transformer: NulFreeTransformer })
   lastError!: string;
 
   @Column({ type: jsonColumnType(), nullable: true })

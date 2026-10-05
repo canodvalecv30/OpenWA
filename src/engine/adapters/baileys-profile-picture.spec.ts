@@ -1,3 +1,4 @@
+import { Boom } from '@hapi/boom';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { BaileysContacts, BaileysContactsHost } from './baileys-contacts';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
@@ -36,8 +37,33 @@ describe('getProfilePicture', () => {
   });
 
   it('still answers null when the library reports no picture', async () => {
-    const profilePictureUrl = jest.fn().mockRejectedValue(new Error('item-not-found'));
+    // assertNodeErrorFree's verdict: a Boom carrying WhatsApp's numeric code.
+    const profilePictureUrl = jest.fn().mockRejectedValue(new Boom('item-not-found', { data: 404 }));
     await expect(contacts({ profilePictureUrl }, 500).getProfilePicture('628123@c.us')).resolves.toBeNull();
+  });
+
+  it('reports a rate-limited lookup instead of "no picture"', async () => {
+    const profilePictureUrl = jest.fn().mockRejectedValue(new Boom('rate-overlimit', { data: 429 }));
+    await expect(contacts({ profilePictureUrl }, 500).getProfilePicture('628123@c.us')).rejects.toBeInstanceOf(
+      EngineTransportError,
+    );
+  });
+
+  it.each([
+    ['internal-server-error', 500],
+    ['service-unavailable', 503],
+  ])('reports a WhatsApp server error (%s) instead of "no picture"', async (text, code) => {
+    const profilePictureUrl = jest.fn().mockRejectedValue(new Boom(text, { data: code }));
+    await expect(contacts({ profilePictureUrl }, 500).getProfilePicture('628123@c.us')).rejects.toBeInstanceOf(
+      EngineTransportError,
+    );
+  });
+
+  it('reports a connection that closed mid-lookup instead of "no picture"', async () => {
+    const profilePictureUrl = jest.fn().mockRejectedValue(new Boom('Connection Closed', { statusCode: 428 }));
+    await expect(contacts({ profilePictureUrl }, 500).getProfilePicture('628123@c.us')).rejects.toBeInstanceOf(
+      EngineTransportError,
+    );
   });
 
   it('still answers null when the library resolves nothing', async () => {

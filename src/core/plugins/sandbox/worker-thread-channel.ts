@@ -8,7 +8,7 @@ export interface WorkerThreadChannelOptions {
   maxOldGenerationSizeMb?: number;
   /** Extra Node args for the worker (e.g. a TS loader in tests). */
   execArgv?: string[];
-  /** Environment for the worker. Later phases use this to hand the worker a minimal, scrubbed env. */
+  /** Environment for the worker; production passes the allowlisted env from buildSandboxWorkerEnv(). */
   env?: NodeJS.ProcessEnv;
 }
 

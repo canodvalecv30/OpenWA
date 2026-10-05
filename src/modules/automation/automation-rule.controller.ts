@@ -15,7 +15,11 @@ export class AutomationRuleController {
   @ApiOperation({ summary: 'Create an autoreply rule' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiResponse({ status: 201, description: 'Rule created.', type: AutomationRuleResponseDto })
-  @ApiResponse({ status: 400, description: 'Invalid rule (bad conditions, over-limit text).' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid rule (bad conditions, over-limit text, out-of-range cooldown), or the per-session rule limit is reached.',
+  })
   @ApiResponse({ status: 404, description: 'No session with this id.' })
   async create(
     @Param('sessionId') sessionId: string,
@@ -58,6 +62,7 @@ export class AutomationRuleController {
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'ruleId', description: 'Rule ID' })
   @ApiResponse({ status: 200, description: 'Updated rule.', type: AutomationRuleResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid rule (bad conditions, over-limit text, out-of-range cooldown).' })
   @ApiResponse({ status: 404, description: 'No such rule in this session.' })
   async update(
     @Param('sessionId') sessionId: string,

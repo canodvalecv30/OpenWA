@@ -75,8 +75,8 @@ export class MediaController {
   @ApiResponse({
     status: 200,
     description:
-      'Converted bytes: baseline H.264 with AAC audio, long edge bounded at 1280, index moved to the ' +
-      'front so the recipient can start playing before the whole file arrives.',
+      'Converted bytes: baseline H.264 with AAC audio, fitted inside 1280x720 (720x1280 portrait), index ' +
+      'moved to the front so the recipient can start playing before the whole file arrives.',
     type: ConvertedMediaResponseDto,
   })
   @ApiResponse({

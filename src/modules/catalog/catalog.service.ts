@@ -6,7 +6,7 @@ import type {
   PaginatedProducts,
   MessageResult,
 } from '../../engine/interfaces/whatsapp-engine.interface';
-import { SendPacingService, countsTowardSendBreaker } from '../message/send-pacing.service';
+import { SendPacingService, countsTowardSendBreaker, sentNothing } from '../message/send-pacing.service';
 import { HookManager, applySendingGate } from '../../core/hooks';
 
 @Injectable()
@@ -50,30 +50,45 @@ export class CatalogService {
    * API key's chat scope was checked against. No PENDING row is written up front. On Baileys the
    * own-send echo (MessageProjector.handleOwnSendEcho) persists the OUTGOING row afterwards and fires
    * `message:sent` and `message:persisted`, so the send is counted into the pacing daily cap once
-   * that row lands.
+   * that row lands. Until then its pacing admission is held: for as long as the engine call runs, and for
+   * the hold window after it returns.
    */
   async sendProduct(sessionId: string, chatId: string, productId: string, body?: string): Promise<MessageResult> {
-    await this.pacing.assertSendAllowed(sessionId, chatId);
-    const gated = await applySendingGate(
-      this.hookManager,
-      sessionId,
-      'product',
-      { chatId, productId, body },
-      'CatalogService',
-    );
-    const gatedProductId: unknown = gated.productId;
-    const gatedBody: unknown = gated.body;
-    if (typeof gatedProductId !== 'string' || gatedProductId === '') {
-      throw new BadRequestException('A message:sending handler returned an invalid productId');
+    const settle = await this.pacing.assertSendAllowed(sessionId, chatId, { untilSettled: true });
+    let engineAsked = false;
+    try {
+      const gated = await applySendingGate(
+        this.hookManager,
+        sessionId,
+        'product',
+        // The DTO lets a JSON null through as "no body". Normalised here, so the checks below only ever
+        // judge what a plugin handed back, never the caller's own input.
+        { chatId, productId, body: body ?? undefined },
+        'CatalogService',
+      );
+      const gatedProductId: unknown = gated.productId;
+      const gatedBody: unknown = gated.body;
+      if (typeof gatedProductId !== 'string' || gatedProductId === '') {
+        throw new BadRequestException('A message:sending handler returned an invalid productId');
+      }
+      if (gatedBody !== undefined && typeof gatedBody !== 'string') {
+        throw new BadRequestException('A message:sending handler returned an invalid body');
+      }
+      const engine = this.engines.require(
+        sessionId,
+        () => new NotFoundException(`Session ${sessionId} not found or not connected`),
+      );
+      engineAsked = true;
+      const result = await this.recordedSend(sessionId, () => engine.sendProduct(chatId, gatedProductId, gatedBody));
+      settle?.(true);
+      return result;
+    } catch (error) {
+      // No row is written here, so a send that provably never went out gives its pacing admission back.
+      // One whose outcome is unknown stays held for a window from now: its own-send echo may still write
+      // the row.
+      settle?.(engineAsked && !sentNothing(error));
+      throw error;
     }
-    if (gatedBody !== undefined && typeof gatedBody !== 'string') {
-      throw new BadRequestException('A message:sending handler returned an invalid body');
-    }
-    const engine = this.engines.require(
-      sessionId,
-      () => new NotFoundException(`Session ${sessionId} not found or not connected`),
-    );
-    return this.recordedSend(sessionId, () => engine.sendProduct(chatId, gatedProductId, gatedBody));
   }
 
   /**

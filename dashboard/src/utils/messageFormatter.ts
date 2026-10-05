@@ -185,9 +185,12 @@ function parseFormatting(input: string, depth = 0): MessageNode[] {
   if (depth >= MAX_FORMAT_DEPTH) return pushText([], input);
 
   const nodes: MessageNode[] = [];
+  // Shared across the loop because every `rest` is a suffix of `input`, so a marker that found no
+  // closer stays without one; not shared with the recursive call, whose `inner` ends earlier.
+  const exhausted = new Set<string>();
   let rest = input;
   while (rest.length > 0) {
-    const split = splitFirstFormat(rest);
+    const split = splitFirstFormat(rest, exhausted);
     if (!split) {
       pushText(nodes, rest);
       break;
@@ -205,9 +208,15 @@ function parseFormatting(input: string, depth = 0): MessageNode[] {
  * marker satisfying the same boundary rules. Returns the text before the span, the format, the
  * inner content, and the unconsumed remainder — or null when the segment holds no valid span
  * (unbalanced or boundary-violating markers stay literal).
+ *
+ * `exhausted` holds the markers an earlier opener already scanned to the end without a closer. A
+ * closer's validity depends only on its neighbours, so a later opener of the same marker would see
+ * a subset of those candidates and cannot succeed either; skipping it keeps the parse linear instead
+ * of rescanning the rest of the message for every unmatched opener.
  */
 function splitFirstFormat(
   input: string,
+  exhausted: Set<string>,
 ): { before: string; fmt: 'bold' | 'italic' | 'strike'; inner: string; after: string } | null {
   for (let i = 0; i < input.length; i++) {
     const skip = mentionEnd(input, i);
@@ -217,7 +226,7 @@ function splitFirstFormat(
     }
     const ch = input[i];
     const fmt = FORMATS[ch];
-    if (!fmt) continue;
+    if (!fmt || exhausted.has(ch)) continue;
 
     // Boundary outside the opener: previous char must be a boundary or string-start.
     const prev = i === 0 ? '' : input[i - 1];
@@ -249,7 +258,8 @@ function splitFirstFormat(
         after: input.slice(j + 1),
       };
     }
-    // No matching closer for this opener — fall through to next character.
+    // No matching closer for this opener, so none for any later one of the same marker either.
+    exhausted.add(ch);
   }
 
   return null;

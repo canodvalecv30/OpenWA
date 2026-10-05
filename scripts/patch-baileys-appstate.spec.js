@@ -68,9 +68,9 @@ test('refuses when the decode site appears more than once', () => {
   assert.throws(() => applyAppStatePatch(dir), /found 2/);
 });
 
-test('skips a tree that has no chats.js rather than throwing', () => {
+test('refuses a tree that has no chats.js rather than skipping it', () => {
+  // A moved or renamed chats.js is an upstream layout change: skipping it let the fatal image-build
+  // run pass and ship the unbounded loop. postinstall's --best-effort run still only warns.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baileys-absent-'));
-  const result = applyAppStatePatch(dir);
-  assert.equal(result.skipped, true);
-  assert.match(result.reason, /not found/);
+  assert.throws(() => applyAppStatePatch(dir), /not found/);
 });

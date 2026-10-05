@@ -67,3 +67,25 @@ func TestUpdateTemplateRequestTransmitsEmptyHeaderAndFooter(t *testing.T) {
 		}
 	}
 }
+
+// A nil Conditions slice encoded as `"conditions": null`, which the gateway rejects with a 400
+// ("filters.conditions must be an array"), so the zero value &WebhookFilters{} could not express the
+// documented empty filter `{ "conditions": [] }` on either create or update.
+func TestWebhookFiltersZeroValueEncodesEmptyConditions(t *testing.T) {
+	for name, req := range map[string]any{
+		"create": CreateWebhookRequest{URL: "https://example.com/hook", Events: []string{"message.received"}, Filters: &WebhookFilters{}},
+		"update": UpdateWebhookRequest{Filters: &WebhookFilters{}},
+	} {
+		body, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		if v := string(got["filters"]); v != `{"conditions":[]}` {
+			t.Errorf("%s: filters should marshal to {\"conditions\":[]}, got %s", name, v)
+		}
+	}
+}

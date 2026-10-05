@@ -116,11 +116,9 @@ test('refuses an unknown shape rather than shipping unpatched', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('skips a tree with no baileys rather than failing the install', () => {
+test('refuses a tree with no newsletter.js rather than shipping unpatched', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baileys-newsletter-'));
-  const result = applyNewsletterCreatePatch(dir);
-  assert.equal(result.skipped, true);
-  assert.match(result.reason, /not found/);
+  assert.throws(() => applyNewsletterCreatePatch(dir), /not found/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -15,6 +15,7 @@ from ..types import (
     StarMessageRequest,
     VotePollRequest,
     UnpinMessageRequest,
+    BatchCancelResponse,
     BatchStatusResponse,
     BulkMessageResponse,
     ChatHistoryMessage,
@@ -51,42 +52,42 @@ class MessagesResource:
     def list(self, session_id: str, query: ListMessagesQuery | None = None) -> MessageListResponse:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/messages", query=query)
 
-    def send_text(self, session_id: str, body: SendTextRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-text", body=body)
+    def send_text(self, session_id: str, body: SendTextRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-text", body=body, idempotency_key=idempotency_key)
 
-    def send_image(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
-        return self._send_media(session_id, "send-image", body)
+    def send_image(self, session_id: str, body: SendMediaRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._send_media(session_id, "send-image", body, idempotency_key=idempotency_key)
 
-    def send_video(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
-        return self._send_media(session_id, "send-video", body)
+    def send_video(self, session_id: str, body: SendMediaRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._send_media(session_id, "send-video", body, idempotency_key=idempotency_key)
 
-    def send_audio(self, session_id: str, body: SendAudioRequest) -> MessageResponse:
-        return self._send_media(session_id, "send-audio", body)
+    def send_audio(self, session_id: str, body: SendAudioRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._send_media(session_id, "send-audio", body, idempotency_key=idempotency_key)
 
-    def send_document(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
-        return self._send_media(session_id, "send-document", body)
+    def send_document(self, session_id: str, body: SendMediaRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._send_media(session_id, "send-document", body, idempotency_key=idempotency_key)
 
-    def send_sticker(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
-        return self._send_media(session_id, "send-sticker", body)
+    def send_sticker(self, session_id: str, body: SendMediaRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._send_media(session_id, "send-sticker", body, idempotency_key=idempotency_key)
 
-    def _send_media(self, session_id: str, segment: str, body: SendMediaRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/{quote_segment(segment)}", body=body)
+    def _send_media(self, session_id: str, segment: str, body: SendMediaRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/{quote_segment(segment)}", body=body, idempotency_key=idempotency_key)
 
-    def send_location(self, session_id: str, body: SendLocationRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-location", body=body)
+    def send_location(self, session_id: str, body: SendLocationRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-location", body=body, idempotency_key=idempotency_key)
 
-    def send_contact(self, session_id: str, body: SendContactRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-contact", body=body)
+    def send_contact(self, session_id: str, body: SendContactRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-contact", body=body, idempotency_key=idempotency_key)
 
-    def send_template(self, session_id: str, body: SendTemplateRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-template", body=body)
+    def send_template(self, session_id: str, body: SendTemplateRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-template", body=body, idempotency_key=idempotency_key)
 
-    def send_poll(self, session_id: str, body: SendPollRequest) -> MessageResponse:
+    def send_poll(self, session_id: str, body: SendPollRequest, *, idempotency_key: str | None = None) -> MessageResponse:
         """Send a native WhatsApp poll (2–12 options)."""
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-poll", body=body)
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-poll", body=body, idempotency_key=idempotency_key)
 
-    def reply(self, session_id: str, body: ReplyMessageRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/reply", body=body)
+    def reply(self, session_id: str, body: ReplyMessageRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/reply", body=body, idempotency_key=idempotency_key)
 
     def click_button(self, session_id: str, body: ClickButtonRequest) -> MessageResponse:
         """Click a button on a WhatsApp Business prompt. Baileys only (whatsapp-web.js returns 501)."""
@@ -94,8 +95,8 @@ class MessagesResource:
             "POST", f"/api/sessions/{quote_segment(session_id)}/messages/click-button", body=body
         )
 
-    def forward(self, session_id: str, body: ForwardMessageRequest) -> MessageResponse:
-        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/forward", body=body)
+    def forward(self, session_id: str, body: ForwardMessageRequest, *, idempotency_key: str | None = None) -> MessageResponse:
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/forward", body=body, idempotency_key=idempotency_key)
 
     def react(self, session_id: str, body: ReactMessageRequest) -> SuccessResult:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/react", body=body)
@@ -150,8 +151,8 @@ class MessagesResource:
     def batch_status(self, session_id: str, batch_id: str) -> BatchStatusResponse:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/messages/batch/{quote_segment(batch_id)}")
 
-    def cancel_batch(self, session_id: str, batch_id: str) -> BatchStatusResponse:
-        """Cancel a running batch. Requires an OPERATOR-level key."""
+    def cancel_batch(self, session_id: str, batch_id: str) -> BatchCancelResponse:
+        """Cancel a running batch. Requires an OPERATOR-level key. The reply carries no per-recipient results."""
         return self._http.request(
             "POST", f"/api/sessions/{quote_segment(session_id)}/messages/batch/{quote_segment(batch_id)}/cancel"
         )

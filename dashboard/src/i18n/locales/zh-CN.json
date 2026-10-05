@@ -36,6 +36,7 @@
     "hoursAgo": "{{count}} 小时前",
     "hoursAgo_other": "{{count}} 小时前",
     "optional": "可选",
+    "fieldTooLong": "最多 {{max}} 个字符（当前 {{count}} 个）。",
     "language": "语言",
     "back": "返回",
     "next": "下一步",
@@ -90,6 +91,7 @@
     "noMessageYet": "暂无消息",
     "unreadBadge": "{{count}} 条未读消息",
     "unreadBadge_other": "{{count}} 条未读消息",
+    "markedUnread": "已标记为未读",
     "loadingMessages": "正在加载消息...",
     "loadingOlderMessages": "正在加载更早的消息...",
     "loadOlderMessagesError": "无法加载更早的消息。向上滚动重试。",
@@ -121,7 +123,6 @@
       "unknownType": "未知类型"
     },
     "you": "你",
-    "youPrefix": "你：",
     "yesterday": "昨天",
     "attachTitle": "发送文件 / 图片",
     "emojiTitle": "选择表情",
@@ -347,7 +348,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "未配置代理",
       "hasCredentials": "凭据已保存，但不会显示。输入完整的 URL 即可更改。",
-      "hint": "更改将在下次启动会话时生效，不会作用于正在运行的连接。代理必须真实且可访问：无法访问的代理会导致 QR 码无法送达，启动请求将返回 504。",
+      "hint": "更改将在下次启动会话时生效，不会作用于正在运行的连接。代理必须真实且可访问：无法访问的代理会导致 QR 码无法送达。在 whatsapp-web.js 上启动请求将返回 504，在 Baileys 上启动会成功，但会话会持续重试。",
       "createHint": "仅当你的网络无法直接访问 WhatsApp 时才需要。必须是真实且可访问的代理。",
       "invalidUrl": "请输入有效的 http、https、socks4 或 socks5 代理 URL。",
       "saveSuccessTitle": "代理已保存",
@@ -446,11 +447,13 @@
     "selectSession": "选择会话...",
     "session": "会话",
     "events": "事件",
+    "noEvents": "请至少选择一个事件。",
     "available": "可用事件",
     "saveChanges": "保存更改",
     "filters": {
       "title": "筛选条件（可选）",
       "hint": "仅当所有条件都匹配时才触发。适用于消息事件。",
+      "incomplete": "请为每个筛选条件填写值，且条件最多 20 个、每个条件最多 100 个值、文本最多 1000 个字符。",
       "badge": "{{count}} 个筛选条件",
       "badge_other": "{{count}} 个筛选条件",
       "addCondition": "添加条件",
@@ -484,11 +487,9 @@
       "valueLabel": "筛选值"
     },
     "columns": {
-      "url": "URL",
       "events": "事件",
       "session": "会话",
-      "status": "状态",
-      "actions": "操作"
+      "status": "状态"
     },
     "empty": {
       "title": "尚未配置 Webhook",
@@ -538,6 +539,33 @@
       "call.missed": "来电未接听时",
       "status.received": "联系人发布状态时",
       "all": "所有事件"
+    },
+    "auth": {
+      "title": "投递认证",
+      "hint": "可选。保存后，已存储的值不会再次显示。",
+      "editHint": "已存储的密钥和请求头永远不会显示。保持此部分不变即可保留它们。",
+      "secret": "签名密钥",
+      "secretHint": "16 到 255 个字符。每次投递都会在 X-OpenWA-Signature 请求头中携带 HMAC-SHA256 签名。",
+      "secretKeepPlaceholder": "留空以保留当前密钥",
+      "generateSecret": "生成",
+      "copySecret": "复制",
+      "secretCopied": "已复制签名密钥",
+      "removeSecret": "停止为投递签名（删除密钥）",
+      "headers": "自定义请求头",
+      "headerName": "请求头名称",
+      "headerValue": "请求头值",
+      "addHeader": "添加请求头",
+      "removeHeader": "移除请求头",
+      "replaceHeaders": "替换自定义请求头",
+      "replaceHint": "这些行将替换所有已存储的请求头。没有任何行时，将删除已存储的请求头。",
+      "errors": {
+        "headerName": "请求头名称只能包含字母、数字和连字符。",
+        "headerValue": "请求头值最多 1024 个字符，不能包含控制字符或 Latin-1 以外的字符。",
+        "headerReserved": "Content-Type、User-Agent、X-OpenWA-* 和连接类请求头由网关设置，不能使用。",
+        "headerDuplicate": "每个请求头名称只能使用一次。",
+        "tooMany": "最多允许 50 个自定义请求头。",
+        "secretLength": "签名密钥长度必须为 16 到 255 个字符。"
+      }
     }
   },
   "templates": {
@@ -571,6 +599,7 @@
     },
     "empty": {
       "title": "暂无已保存的模板",
+      "noMatch": "没有与搜索匹配的模板。",
       "description": "创建可复用的模板，加快处理常见回复和通知。",
       "noSessionsTitle": "暂无可用会话",
       "noSessionsDesc": "添加模板前请先创建 WhatsApp 会话。",
@@ -597,6 +626,7 @@
     "createdTitle": "API 密钥已创建",
     "createdHint": "请立即复制此密钥。之后将无法再次查看。",
     "namePlaceholder": "例如：Production Key",
+    "nameTooShort": "请至少输入 3 个字符。",
     "rolesTitle": "角色参考",
     "roles": {
       "admin": "管理员",
@@ -615,11 +645,13 @@
       "status": "状态",
       "lastUsed": "上次使用",
       "actions": "操作",
-      "sessions": "会话"
+      "sessions": "会话",
+      "restrictions": "限制"
     },
     "statuses": {
       "active": "活跃",
-      "revoked": "已撤销"
+      "revoked": "已撤销",
+      "expired": "已过期"
     },
     "empty": {
       "title": "尚未创建 API 密钥",
@@ -637,10 +669,9 @@
       "revoke": "撤销"
     },
     "actions": {
-      "copy": "复制",
       "revoke": "撤销",
       "delete": "删除",
-      "editSessions": "编辑会话"
+      "edit": "编辑访问权限"
     },
     "sessions": {
       "label": "会话访问",
@@ -648,10 +679,36 @@
       "all": "全部会话",
       "empty": "暂无会话。创建会话后，此密钥将可以访问全部会话。",
       "restricted": "已选 {{count}} 个",
-      "editTitle": "编辑会话访问",
       "save": "保存",
       "choose": "选择会话",
       "leaveAll": "保留为全部会话"
+    },
+    "edit": {
+      "title": "编辑密钥访问权限",
+      "signedIn": "此仪表板正使用该密钥登录。更改其角色、IP 地址、聊天或过期时间可能会使你退出登录。"
+    },
+    "restrictions": {
+      "none": "无",
+      "ips": "IP：{{count}}",
+      "chats": "聊天：{{count}}",
+      "expires": "{{date}} 过期",
+      "expired": "已于 {{date}} 过期"
+    },
+    "ips": {
+      "label": "允许的 IP 地址（可选）",
+      "hint": "每行一个 IP 地址或 CIDR 范围。留空则接受任意地址。",
+      "invalid": "不是 IPv4 地址或 CIDR 范围：{{value}}"
+    },
+    "chats": {
+      "label": "聊天访问（可选）",
+      "hint": "每行一个聊天：以 @g.us 结尾的群组 ID、以 @c.us 或 @lid 结尾的联系人 ID，或电话号码。留空则允许所有聊天。受聊天限制的密钥只能使用对此类密钥开放的路由；事件 WebSocket 和 MCP 会拒绝它。",
+      "invalid": "不是聊天 ID 或电话号码：{{value}}"
+    },
+    "expiry": {
+      "label": "过期时间（可选）",
+      "hint": "使用此浏览器的时区。留空则密钥永不过期。",
+      "clear": "移除过期时间",
+      "invalid": "请填写不晚于 9999 年的完整日期和时间，或清空此字段使密钥永不过期。"
     }
   },
   "logs": {
@@ -826,7 +883,7 @@
       "sslRejectUnauthorized": "验证 SSL 证书",
       "sslRejectUnauthorizedDesc": "拒绝自签名或无效的证书。对于使用自签名证书的托管 Postgres（Supabase、Heroku、Render、Railway），请关闭此项。",
       "migrationsTitle": "数据库迁移",
-      "migrationsStatus": "架构会通过 TypeORM 自动同步",
+      "migrationsStatus": "待处理的迁移会在启动时自动应用",
       "migrationsHint": "迁移会自动管理。手动迁移请使用 CLI。"
     },
     "engine": {
@@ -849,7 +906,7 @@
     "redis": {
       "title": "Redis",
       "enable": "启用 Redis",
-      "enableDesc": "缓存、会话存储和 BullMQ 队列需要 Redis",
+      "enableDesc": "用于缓存、BullMQ 队列、限流计数器和多节点 WebSocket 分发",
       "useBuiltIn": "使用内置 Redis 容器",
       "builtInDesc": "OpenWA 将为你管理 Redis 容器",
       "queueTitle": "启用 BullMQ 队列系统",
@@ -861,7 +918,7 @@
       "failed": "失败",
       "viewBullMq": "查看 Bull MQ 仪表盘",
       "disabledTitle": "Redis 已禁用",
-      "disabledDesc": "启用 Redis 以使用缓存、会话存储和 BullMQ 消息队列。",
+      "disabledDesc": "启用 Redis 以使用缓存、BullMQ 消息队列、限流计数器和多节点 WebSocket 分发。",
       "passwordOptional": "（可选）",
       "bullMqUrlCopied": "已复制 Bull MQ 仪表板网址",
       "bullMqUrlHint": "请使用 ADMIN API 密钥打开 — 浏览器标签页无法进行身份验证。"
@@ -901,8 +958,8 @@
       "checking": "正在检查服务器状态...",
       "dontClose": "请不要关闭此窗口",
       "successMsg": "服务器已恢复在线！页面将自动重新加载。",
-      "errorMsg": "服务器在 30 秒后仍无响应。请检查 Docker 日志并手动重启。",
-      "outcomeUnknown": "服务器响应前代理已超时。重启可能仍在进行中；请在一分钟后重新加载页面查看。",
+      "errorMsg": "服务器无响应。请检查 Docker 日志并手动重启。",
+      "outcomeUnknown": "服务器响应前代理返回了错误，因此无法确定重启是否正在进行。请在一分钟后重新加载页面查看。",
       "reload": "重新加载页面"
     },
     "toasts": {
@@ -916,7 +973,7 @@
       "storageWarning": "现有的媒体文件不会自动迁移到新的存储后端；它们将保留在原位置。",
       "downloadBackup": "请先下载备份",
       "backupTitle": "数据备份与恢复",
-      "backupHint": "在切换数据库之前，将所有数据导出为 JSON，然后在切换后导入。备份中包含明文的 webhook 密钥和代理凭据 —— 请妥善保管，并在恢复完成后将其删除。",
+      "backupHint": "在切换数据库之前，将所有数据导出为 JSON，然后在切换后导入。备份不包含 webhook 签名密钥、webhook 自定义请求头和代理凭据，恢复后请重新填写。集成实例的密钥和设置以明文形式包含在内，请妥善保管文件，并在恢复完成后将其删除。",
       "export": "导出数据",
       "import": "导入数据",
       "exportFailed": "无法导出数据",
@@ -964,7 +1021,7 @@
     "config": {
       "title": "配置 {{name}}",
       "noOptions": "此插件没有可用配置项",
-      "uiHandshakeError": "插件配置界面未初始化。如有可用的架构表单，请使用下方表单。",
+      "uiHandshakeError": "插件配置界面未初始化。",
       "save": "保存配置",
       "addItem": "添加",
       "tabConfig": "配置",
@@ -995,7 +1052,7 @@
       "healthFail": "健康检查失败",
       "healthError": "健康检查出错",
       "savedTitle": "配置已保存",
-      "savedDesc": "需要重启服务器以应用更改。",
+      "savedDesc": "更改无需重启服务器即可生效。",
       "saveFailed": "保存失败",
       "installed": "插件已安装",
       "installFailed": "安装失败",
@@ -1100,7 +1157,7 @@
   },
   "search": {
     "placeholder": "搜索消息…",
-    "results": "{{count}} 条结果",
+    "loadMore": "显示更多（{{shown}}/{{total}}）",
     "empty": "未找到消息。",
     "error": "搜索失败。请重试。",
     "unavailable": "搜索未配置。",

@@ -3,8 +3,9 @@
 Helm chart for [OpenWA](https://github.com/rmyndharis/OpenWA) — WhatsApp API.
 
 > **Single instance only.** A session lease stops two pods from launching the same session,
-> but API-key socket eviction, WS rate-limit buckets and in-flight bulk batches are still
-> process-local. Keep `replicaCount: 1`. See
+> but API keys and the audit log live in each pod's own `main.sqlite` (a key revoked or
+> narrowed on one pod stays valid on the others), and WS rate-limit buckets and in-flight
+> bulk batches are process-local. Keep `replicaCount: 1`. See
 > [docs/13-horizontal-scaling.md](../../docs/13-horizontal-scaling.md).
 
 ## Install
@@ -22,9 +23,6 @@ With `secretEnv.API_MASTER_KEY` left empty the app bootstraps a key into
 `env` (→ ConfigMap) and `secretEnv` (→ Secret) are free-form maps: any variable
 from the repo's `.env.example` works, e.g.:
 
-The container port is fixed at 2785; do not set PORT in env (probes and the
-Service targetPort are pinned to it) — service.port changes the Service port.
-
 ```bash
 helm install openwa ./charts/openwa \
   --set env.DATABASE_TYPE=postgres \
@@ -34,6 +32,9 @@ helm install openwa ./charts/openwa \
 ```
 
 Or bring your own Secret: `--set existingSecret=my-openwa-secret`.
+
+The container port is fixed at 2785; do not set PORT in env (probes and the
+Service targetPort are pinned to it) — service.port changes the Service port.
 
 All other values (`persistence`, `resources`, `ingress`, `serviceMonitor`, …) are
 documented inline in [values.yaml](values.yaml). The chart does NOT bundle

@@ -5,7 +5,7 @@ Three-way comparison of every capability: the **Baileys library** (`@whiskeysock
 its adapter layer and REST API — including which "supported" cells only work because OpenWA patches
 the installed library. Coverage is total: all 113 `IWhatsAppEngine` methods (29.4), **all 152
 Baileys + 81 whatsapp-web.js library methods** (29.5), all 34 + 31 library events (29.5.4), and all
-11 install-time patches (29.3). If it exists upstream or in OpenWA, it has a row here.
+12 install-time patches (29.3). If it exists upstream or in OpenWA, it has a row here.
 
 ## 29.1 How to read this matrix
 
@@ -21,7 +21,8 @@ Statuses used in the tables:
 - **OpenWA REST** column — what a caller of the REST API gets: **✅** on any engine session,
   **⚠️ `<engine>` only** when the answer depends on the session's engine (the other engine
   answers HTTP 501), **❌ 501** on both engines, and **⚙️ internal** for a method the REST surface
-  never exposes because the gateway calls it itself (`probeLiveness`).
+  never exposes: the gateway calls it itself (`probeLiveness`), or no route calls it (`getPhoneNumber`,
+  `getPushName`; a caller reads the session's `phone` and `pushName`, stored from the ready event).
 
 Two complementary views:
 
@@ -49,7 +50,7 @@ flowchart LR
         IF --> BA["BaileysAdapter"]
         SVC --> STORE["OpenWA-side stores"]
     end
-    WA --> WLIB["whatsapp-web.js 1.34.7<br/>+ 9 OpenWA patches"]
+    WA --> WLIB["whatsapp-web.js 1.34.7<br/>+ 10 OpenWA patches"]
     BA --> BLIB["@whiskeysockets/baileys 7.0.0-rc14<br/>+ 2 OpenWA patches"]
     WLIB --> WEB["WhatsApp Web<br/>headless Chromium"]
     BLIB --> WAS["WhatsApp servers<br/>browser-free socket"]
@@ -127,7 +128,7 @@ wrong interface method. Those three remain reader-verified.
 
 ## 29.3 Install-time patches OpenWA applies to the libraries
 
-OpenWA ships eleven exact, self-disabling source transforms over the installed engines. Each runs at
+OpenWA ships twelve exact, self-disabling source transforms over the installed engines. Each runs at
 `npm install` (`scripts/postinstall.js`, `--best-effort`) and again in the Docker production stage
 (**without** best-effort — dependency drift fails the image build). "Self-disabling" means the
 patcher no-ops once the fix is present upstream, and an unrecognized source shape fails loudly
@@ -140,7 +141,7 @@ it is missing as it starts (`src/engine/adapters/engine-patch-status.ts`; 🔧¹
 check described below). The report is diagnostic, not preventive: startup continues, so a session
 reaching READY is not evidence that every patch landed. See docs/12 for the operator procedure.
 
-### 29.3.1 The eleven patches
+### 29.3.1 The twelve patches
 
 | #    | Patcher                                                    | Library target                       | What it repairs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Stand-down predicate                                                                                                                                                                                                                                                                                                                                                  |
 | ---- | ---------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -155,10 +156,11 @@ reaching READY is not evidence that every patch landed. See docs/12 for the oper
 | 🔧⁹  | `scripts/patch-wwebjs-group-description.js`                | whatsapp-web.js `GroupChat.js`       | `GroupChat.setDescription()` calls the page's `WAWebGroupModifyInfoJob.setGroupDescription(chatWid, description, newId, descId)` positionally, but that job now takes a single options object `{desc, groupWid, newDescId, prevDescId}`. The first positional argument lands where the object is read, every field comes back undefined, and `widToGroupJid(undefined)` throws inside the page — reaching the caller as a bare `500` while the library still types the method `Promise<boolean>`. `setGroupSubject` in the same module is still positional, which is why subjects kept working and made the Wid look innocent. The patch sends the options object, takes `newDescId` from `WARandomHex.randomHex(8)` as the product does, and maps an empty description to `desc: null` so it selects the job's delete branch rather than sending an empty body element. The open upstream fix #201895 changes the same call, but keeps `WAWebMsgKey.newId()` and passes an empty description through verbatim, so this patcher will not stand down when it lands and the `desc: null` mapping has to be carried over rather than dropped with it. | exact-shape match; unknown shape fails the build.                                                                                                                                                                                                                                                                                                                     |
 | 🔧¹⁰ | `scripts/patch-wwebjs-media-id.js`                         | whatsapp-web.js `Injected/Utils.js`  | Every media send built by `processMediaData` failed on the WhatsApp Web builds rolled out on 2026-09-17 with `Data passed to getter must include an id property`, while text still sent. `window.WWebJS.sendMessage` builds the outgoing message with `id: newMsgKey` and then spreads the media model returned by `processMediaData` into it, and on those builds that model carries an enumerable private `__x_id` that clobbers the id when the `Msg` model initialises. The patch deletes `message.__x_id` right after the object is built, which is upstream's own fix (whatsapp-web.js PR #201923, unmerged, no release after 1.34.7). It stands down once the installed tree carries that line.                                                                                                                                                                                                                                                                                                                                                                                                                                             | exact-shape match; unknown shape fails the build.                                                                                                                                                                                                                                                                                                                     |
 | 🔧¹¹ | `scripts/patch-wwebjs-send-error.js`                       | whatsapp-web.js `Client.js`          | A send the page refused reached OpenWA as the minified `t: t`, with nothing but Node frames: puppeteer rebuilds a page-side exception from its class name and description only, and WhatsApp Web's own error classes are minified to one letter and keep their detail in their own properties. The patch wraps the `window.WWebJS.sendMessage` call inside `Client.sendMessage`'s evaluate. A plain `Error`, which is what whatsapp-web.js's own send failures and WhatsApp Web's `No LID for user` already are, is rethrown as the same object, so its text and OpenWA's matching on it are unchanged. Anything else is rethrown as an `Error` reading `page threw {...}`, a capped JSON summary of the WhatsApp Web build actually running, the constructor name, `name`, `message`, `stack` and the value's own properties. Diagnostic only: a successful send returns what it returned before, and the dead-page classifier never reads a captured error as a transport death.                                                                                                                                                                 | exact-shape match; unknown shape fails the build.                                                                                                                                                                                                                                                                                                                     |
+| 🔧¹² | `scripts/patch-wwebjs-download-mimetype.js`                | whatsapp-web.js `Message.js`         | Every download of inbound media the page had not decrypted before failed on current WhatsApp Web builds, so webhooks, the chat-media archive and `history?includeMedia=true` carried the `omitted` marker and the media route answered `404`. `Message#downloadMedia()` calls `downloadAndMaybeDecrypt()` without a `mimetype`; WhatsApp Web defaults the missing value to `application/octet-stream`, rejects it as the wrong type for the media, and the `InvalidMediaFileType` it throws reaches OpenWA as `t: t`. A file the page already decrypted comes from a cache keyed by file hash and skips that check, which is why some downloads kept working. The patch passes `msg.mimetype` to the call, the fix diagnosed in whatsapp-web.js issue #201908 (no release after 1.34.7). It stands down once the installed tree carries that line.                                                                                                                                                                                                                                                                                                 | exact-shape match; unknown shape fails the build.                                                                                                                                                                                                                                                                                                                     |
 
 ### 29.3.2 Which matrix rows depend on which patch
 
-This is the patch visibility the matrix cells refer to. Every patch is engine-specific (9 on wwjs,
+This is the patch visibility the matrix cells refer to. Every patch is engine-specific (10 on wwjs,
 2 on Baileys), and **no row carries a row-level patch mark on both engines**. The two column-wide
 patches are a separate matter: 🔧¹ underwrites every wwjs cell and 🔧⁵ every baileys cell, so in
 that sense every row does depend on a patch on each side. "Patch-dependent" below means a patch
@@ -178,6 +180,7 @@ class of rows (🔧⁸ and 🔧¹⁰), stated in the table instead.
 | 🔧⁸ block/unblock           | `blockContact`, `unblockContact` on **wwjs**. Without it both answer an opaque `500` on every id, so the capability is dead rather than degraded; the blocklist read still works, which makes the failure look one-sided.                                                                                                                                                                                                                                                                                                                                |
 | 🔧¹⁰ media send repair      | Every **wwjs** media send built by `processMediaData`: `sendImageMessage`, `sendVideoMessage`, `sendAudioMessage` (voice notes included, through `ptt`), `sendDocumentMessage` and the media status posts. A sticker is built by `processStickerData`, which returns a new object rather than the media model. On the WhatsApp Web builds from 2026-09-17 the library's own id is clobbered by the media model and every such send answers a bare `500`, while text sends keep working. Not row-marked: it covers a whole class of rows rather than one. |
 | 🔧¹¹ send error capture     | No row. Every **wwjs** send that fails in the page reports what the page threw instead of `t: t`, but no cell's outcome depends on it: a send that works without the patch works the same way with it.                                                                                                                                                                                                                                                                                                                                                   |
+| 🔧¹² download mimetype      | No single row. Every **wwjs** media download goes through `Message#downloadMedia()`: inbound message media (webhook, chat-media archive, the media route), the own-send echo, `getChatHistory` with `includeMedia`, and received statuses. Without it, media the page has not decrypted before arrives as the `omitted` marker instead of its bytes; the messages themselves still arrive.                                                                                                                                                               |
 
 Rows that are ✅ on **both** engines where one side is patch-dependent: `initialize` (🔧⁴ wwjs),
 `sendTextMessage` (🔧³ wwjs), `postTextStatus` / `postImageStatus` / `postVideoStatus` /
@@ -302,8 +305,8 @@ socket is caught by the transport instead. No REST route: the session watchdog p
 | `getBlockedContacts`  | ✅                  | ✅               | ✅          |
 | `checkNumberExists`   | ✅                  | ✅               | ✅          |
 | `getNumberId`         | ✅                  | ✅               | ✅          |
-| `getPhoneNumber`      | ✅                  | ✅               | ✅          |
-| `getPushName`         | ✅                  | ✅               | ✅          |
+| `getPhoneNumber`      | ✅                  | ✅               | ⚙️ internal |
+| `getPushName`         | ✅                  | ✅               | ⚙️ internal |
 | `resolveContactPhone` | ✅                  | ✅               | ✅          |
 | `getProfilePicture`   | ✅                  | ✅               | ✅          |
 
@@ -410,7 +413,8 @@ answers 501.
 library-limitations, 0 uncertain) across 26 methods. From the REST caller's side: **89** methods
 work on any engine (87 fully supported + 2 store-backed status reads), **14** are Baileys-only,
 **9** are wwjs-only (the 2 store-backed rows excluded); `sendCatalog`, unavailable on both engines,
-is not exposed.
+is not exposed. Three of the 89 (`probeLiveness`, `getPhoneNumber`, `getPushName`) are ⚙️ internal and
+have no route.
 
 ## 29.5 Full engine method inventory — every library method, mapped to OpenWA
 
@@ -682,7 +686,7 @@ with zero OpenWA surface. Baileys-only; whatsapp-web.js has no community API at 
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `archiveChat`    | ✅ `archiveChat`                                                                                                                                                                                                                                                                                                                                                                         |
 | `getChatById`    | ✅ `muteChannel`, `sendSeen`, `clearChatMessages`, `markUnread`, `deleteChat`, `sendChatState`, `getGroupInfo`, `addParticipants`, `leaveGroup`, `setGroupSubject`, `setGroupDescription`, `getGroupInviteCode`, `revokeGroupInviteCode`, `getChatLabels`, `replyToMessage`, `forwardMessage`, `reactToMessage`, `getMessageReactions`, `getChatHistory`, `deleteMessage`, `editMessage` |
-| `getChats`       | ✅ `getChats`, `getGroups`                                                                                                                                                                                                                                                                                                                                                               |
+| `getChats`       | ⚙️ read via a direct page walk, not `Client.getChats`, for `getChats` and `getGroups`                                                                                                                                                                                                                                                                                                    |
 | `markChatUnread` | ❌ **not exposed**                                                                                                                                                                                                                                                                                                                                                                       |
 | `muteChat`       | ✅ `muteChat`                                                                                                                                                                                                                                                                                                                                                                            |
 | `pinChat`        | ✅ `pinChat`                                                                                                                                                                                                                                                                                                                                                                             |
@@ -941,6 +945,15 @@ adapter boundary — none silently stubs.
   the same engine, and the list with it.
   The `sendMessage(status@broadcast, {delete})` revoke shape is _empirically unverified_: only posting
   was live-spiked. On wwjs it calls `revokeStatusMessage(statusId)` (own status only).
+- **`getChats` after a restart (baileys).** Baileys keeps no chat list of its own, and WhatsApp
+  skips history sync on every connect after the first link, so a new engine (a process restart, a
+  session stop and start, or a reconnect the gateway runs itself, as for `deleteStatus` above) starts
+  with an empty one. `GET /chats` then lists the groups, re-fetched on every connect, and every chat
+  with a persisted archive, pin or mute state (bounded by `BAILEYS_CHAT_STATE_CACHE_MAX`); any other
+  1:1 chat comes back when its next message arrives and stays out of the list until then. Rows
+  rebuilt this way carry timestamp `0` and no `lastMessage` until a message arrives. The transient
+  reconnects Baileys runs on its own keep the list. whatsapp-web.js reads WhatsApp Web's own chat
+  list and is unaffected.
 - **`getContactStatus` / `getContactStatuses` (wwjs).** `Status.type` is the `text|image|video`
   union — audio/other story types collapse to `text`.
 - **`archiveChat` / `clearChatMessages` / `deleteChat` / `sendSeen` / `markUnread` (baileys).** The
@@ -1003,11 +1016,12 @@ adapter sources — re-derive the same way when anything changes:
   depends on 🔧¹, the whole Baileys column on 🔧⁵ — so every row rests on a patch on each side,
   even though no row carries a row-level mark on both.
 - REST caller's view: **89** engine-neutral (87 + 2 store-backed status reads), **14** Baileys-only,
-  **9** wwjs-only; `sendCatalog` (unavailable on both engines) is not exposed.
+  **9** wwjs-only; `sendCatalog` (unavailable on both engines) is not exposed; three of the 89
+  (`probeLiveness`, `getPhoneNumber`, `getPushName`) are ⚙️ internal and have no route.
 - Full engine inventory (29.5), split by the exposure legend rather than lumped: Baileys **152**
   socket methods — 48 wired into interface methods, 5 internal wiring, 29 plumbing, **70 ❌ not
-  exposed** (incl. the whole 23-method community cluster); wwjs **81** Client methods — 42 wired,
-  3 internal wiring, 1 class plumbing, **35 ❌ not exposed** (27 real capabilities + 8
+  exposed** (incl. the whole 23-method community cluster); wwjs **81** Client methods — 41 wired,
+  4 internal wiring, 1 class plumbing, **35 ❌ not exposed** (27 real capabilities + 8
   session/transport settings that are not WhatsApp capabilities). The backlog is the ❌ rows minus
   those 8 settings; 🔩 plumbing is correctly never exposed.
 - Events: Baileys **34** (17 consumed / 17 dropped), wwjs **31** (16 consumed / 15 dropped).
@@ -1019,7 +1033,7 @@ adapter sources — re-derive the same way when anything changes:
   cannot repopulate; and `rejectCall`, whose `Call.reject()` resolves while the caller's phone
   keeps ringing (all in 29.6.2). Each answers 501 on wwjs. `.d.ts` presence is not capability, and
   only a live call distinguishes the two.
-- **11** install-time patches (9 whatsapp-web.js + 2 Baileys), all exact and self-disabling.
+- **12** install-time patches (10 whatsapp-web.js + 2 Baileys), all exact and self-disabling.
 - **0 phantom-support rows** — every `not-available` cell throws at the adapter boundary.
 - Remaining adapter-gaps (fixable in this repo, ranked): **#1** `getChannelMessages` (Baileys —
   fetch is one line, `BinaryNode`→`ChannelMessage` parser is the work); **#2** `subscribeToChannel`

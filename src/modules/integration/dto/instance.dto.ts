@@ -20,6 +20,7 @@ export class CreateInstanceDto {
   @ApiProperty({
     description:
       'Operator-chosen instance id (unique within the plugin). Namespaces the ingress URL and the instance secret.',
+    pattern: INSTANCE_ID_PATTERN.source,
     example: 'chatwoot-prod-1',
   })
   @IsString()
@@ -28,6 +29,8 @@ export class CreateInstanceDto {
 
   @ApiPropertyOptional({
     description: 'Session id the instance is scoped to. Omit for all sessions.',
+    minLength: 1,
+    maxLength: 256,
     example: '8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a',
   })
   @IsOptional()
@@ -38,6 +41,7 @@ export class CreateInstanceDto {
 
   @ApiPropertyOptional({
     description: 'Token echoed back for the provider webhook verification handshake. Auto-generated when omitted.',
+    maxLength: 512,
     example: 'a1b2c3d4e5f6',
   })
   @IsOptional()
@@ -50,8 +54,10 @@ export class CreateInstanceDto {
   // Omit to auto-generate a random 64-hex secret.
   @ApiPropertyOptional({
     description:
-      'Ingress HMAC secret shared with the provider. Omit to auto-generate a random 64-hex secret. Masked (****) on every read.',
+      "Ingress HMAC secret shared with the provider. Omit to auto-generate a random 64-hex secret. Masked ('***') on every later read; plaintext returned only once on create/regenerate-secret.",
     writeOnly: true,
+    minLength: 16,
+    maxLength: 512,
     example: 'super-secret-provider-webhook-key',
   })
   @IsOptional()
@@ -87,6 +93,8 @@ export class UpdateInstanceDto {
     nullable: true,
     // `string | null` reduces to `Object` under emitDecoratorMetadata; declare the real type.
     type: String,
+    minLength: 1,
+    maxLength: 256,
   })
   @IsOptional()
   @IsString()

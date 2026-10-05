@@ -232,15 +232,20 @@ describe('ProxyAwareThrottlerGuard.shouldSkip', () => {
 describe('ProxyAwareThrottlerGuard.throwThrottlingException', () => {
   const invoke = async (
     setHeaders: boolean | undefined,
-  ): Promise<{ headers: Record<string, string>; threw: boolean }> => {
+  ): Promise<{ headers: Record<string, string>; error: unknown }> => {
     const headers: Record<string, string> = {};
     const guard = Object.create(ProxyAwareThrottlerGuard.prototype) as ProxyAwareThrottlerGuard;
-    Object.assign(guard, { commonOptions: { setHeaders }, errorMessage: 'ThrottlerException: Too Many Requests' });
+    // `options` is what the base constructor would set; getErrorMessage reads it.
+    Object.assign(guard, {
+      options: {},
+      commonOptions: { setHeaders },
+      errorMessage: 'ThrottlerException: Too Many Requests',
+    });
     (guard as unknown as { getRequestResponse(c: unknown): unknown }).getRequestResponse = () => ({
       req: {},
       res: { header: (name: string, value: string) => void (headers[name] = value) },
     });
-    let threw = false;
+    let error: unknown;
     try {
       await (
         guard as unknown as {
@@ -259,22 +264,22 @@ describe('ProxyAwareThrottlerGuard.throwThrottlingException', () => {
           timeToBlockExpire: 37,
         },
       );
-    } catch {
-      threw = true;
+    } catch (caught) {
+      error = caught;
     }
-    return { headers, threw };
+    return { headers, error };
   };
 
   it('emits a plain Retry-After carrying the blocked window, and still throws', async () => {
-    const { headers, threw } = await invoke(undefined);
+    const { headers, error } = await invoke(undefined);
     expect(headers['Retry-After']).toBe('37');
-    expect(threw).toBe(true);
+    expect(error).toBeInstanceOf(ThrottlerException);
   });
 
   it('respects setHeaders: false, matching the flag the base guard gates its own header on', async () => {
-    const { headers, threw } = await invoke(false);
+    const { headers, error } = await invoke(false);
     expect(headers['Retry-After']).toBeUndefined();
-    expect(threw).toBe(true);
+    expect(error).toBeInstanceOf(ThrottlerException);
   });
 });
 

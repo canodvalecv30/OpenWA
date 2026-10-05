@@ -46,8 +46,8 @@ class MediaResource:
     ) -> ConvertedMedia:
         """Convert video into an MP4 every WhatsApp client accepts.
 
-        Baseline H.264 with AAC audio, long edge bounded at 1280, index moved to the front
-        for immediate playback. Requires an OPERATOR-level key.
+        Baseline H.264 with AAC audio, fitted inside 1280x720 (720x1280 portrait), index
+        moved to the front for immediate playback. Requires an OPERATOR-level key.
         """
         return self._http.request(
             "POST",

@@ -2,19 +2,10 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 import { dateColumnType, jsonColumnType } from '../../../common/utils/column-types';
 import { DateTransformer } from '../../../common/transformers/date.transformer';
 
-// The dispatch lifecycle of one outbound delivery, mirroring ingress_events on the inbound side:
-//  - 'pending'    - the row was written before the attempt; nothing durable owns the delivery yet.
-//                   The reconciler sweeps these.
-//  - 'dispatched' - the delivery reached a durable owner: handed to BullMQ, or completed inline in
-//                   direct mode. A failure INSIDE that owner dead-letters separately through
-//                   webhook_delivery_failures, so a 'dispatched' row is never the reconciler's
-//                   concern. Retiring on ENQUEUE rather than on the POST is what stops the
-//                   reconciler duplicating work BullMQ already owns.
-//  - 'failed'     - terminal: the reconciler exhausted its replay budget. Recovery continues
-//                   through the failure row.
-// NULL marks rows that predate these columns on a synchronize-bootstrapped database. NULL reads as
-// "not watched", so an upgrade can never mass-replay history.
-export type WebhookOutboxState = 'pending' | 'dispatched' | 'failed';
+// pending: recorded before dispatch; queued: BullMQ owns the current job.
+// Both retain replay data. The worker settles queued rows after success or durable failure.
+// dispatched/failed: settled, payload retired. NULL denotes unwatched legacy rows.
+export type WebhookOutboxState = 'pending' | 'queued' | 'dispatched' | 'failed';
 
 /**
  * Durable record of an outbound webhook delivery, written before the attempt.
@@ -50,8 +41,7 @@ export class WebhookOutboxEvent {
   @Column()
   deliveryId!: string;
 
-  // Retired to NULL the moment an outcome is recorded: only 'pending' rows are replayable, and a
-  // dispatched or failed row has no reason to keep a payload that can carry a whole message body.
+  // Pending and queued rows keep their payload until delivery or durable failure handoff.
   @Column({ type: jsonColumnType(), nullable: true })
   payload!: Record<string, unknown> | null;
 

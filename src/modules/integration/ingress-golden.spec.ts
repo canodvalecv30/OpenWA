@@ -31,8 +31,9 @@ describe('Integration SDK v1 golden contract — Chatwoot message_created', () =
       prefix: 'sha256=',
       timestampHeader: 'X-Chatwoot-Timestamp',
       toleranceSec: 300,
+      // Where a real manifest declares it, in the provider's casing; the request below sends it lower-cased.
+      dedupHeader: 'X-Chatwoot-Delivery',
     },
-    dedupHeader: 'x-chatwoot-delivery',
   });
 
   const resolveInstance = () =>

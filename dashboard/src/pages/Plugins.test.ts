@@ -39,6 +39,13 @@ let putReply: { success: boolean; message?: string } = { success: false, message
 let putBodies: unknown[] = [];
 // When set, a PUT waits for it before answering, so a test can act while the request is in flight.
 let putGate: Promise<void> | undefined;
+// Fields that replace the installed plugin's, and what the catalog route answers (and how often it was read).
+let pluginOverride: Record<string, unknown> = {};
+let catalogReply: () => Promise<Response> = () => Promise.resolve(jsonResponse([]));
+let catalogReads = 0;
+// Further installed plugins listed after PLUGIN, and a gate a POST /disable waits for before answering.
+let extraPlugins: Record<string, unknown>[] = [];
+let disableGate: Promise<void> | undefined;
 
 function installFetchStub(): void {
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -46,7 +53,19 @@ function installFetchStub(): void {
     const path = url.replace(/^https?:\/\/[^/]+/, '');
     const method = init?.method ?? 'GET';
     if (method === 'GET' && path === '/api/plugins') {
-      return Promise.resolve(jsonResponse([{ ...PLUGIN, sessionConfig }]));
+      return Promise.resolve(jsonResponse([{ ...PLUGIN, sessionConfig, ...pluginOverride }, ...extraPlugins]));
+    }
+    if (method === 'POST' && path.endsWith('/disable')) {
+      return (disableGate ?? Promise.resolve()).then(() => jsonResponse({ success: true, message: 'Disabled' }));
+    }
+    if (method === 'GET' && path.endsWith('/health')) return Promise.resolve(jsonResponse({ healthy: true }));
+    if (method === 'GET' && path === '/api/plugins/catalog') {
+      catalogReads++;
+      return catalogReply();
+    }
+    if (method === 'POST' && path === '/api/plugins/install') return Promise.resolve(jsonResponse(PLUGIN));
+    if (method === 'DELETE' && path === `/api/plugins/${PLUGIN.id}`) {
+      return Promise.resolve(jsonResponse({ success: true, message: 'Uninstalled' }));
     }
     if (method === 'GET' && path === '/api/sessions') return Promise.resolve(jsonResponse([SESSION, SESSION_2]));
     const put = method === 'PUT' ? path.match(new RegExp(`^/api/plugins/${PLUGIN.id}/config/([^/]+)$`)) : null;
@@ -99,13 +118,17 @@ afterEach(() => {
   putReply = { success: false, message: REJECTION };
   putBodies = [];
   putGate = undefined;
+  pluginOverride = {};
+  catalogReply = () => Promise.resolve(jsonResponse([]));
+  catalogReads = 0;
+  extraPlugins = [];
+  disableGate = undefined;
   rtl.cleanup();
   queryClient?.clear();
   queryClient = undefined;
 });
 
-async function openSessionOverride(sessionLabel: string): Promise<void> {
-  const { screen, fireEvent, findByText } = rtl;
+function renderPlugins(): void {
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 1_000 } } });
   rtl.render(
     createElement(
@@ -114,6 +137,11 @@ async function openSessionOverride(sessionLabel: string): Promise<void> {
       createElement(ToastProvider, null, createElement(Plugins)),
     ),
   );
+}
+
+async function openSessionOverride(sessionLabel: string): Promise<void> {
+  const { screen, fireEvent, findByText } = rtl;
+  renderPlugins();
 
   fireEvent.click(await screen.findByTitle('Configure'));
   fireEvent.click(await screen.findByRole('button', { name: 'Sessions' }));
@@ -128,7 +156,7 @@ test('a per-session override the server rejects reports the failure, not "Saved"
   fireEvent.click(await screen.findByRole('button', { name: 'Save override' }));
 
   await screen.findByText(REJECTION);
-  assert.equal(screen.queryByText('Configuration Saved'), null);
+  assert.equal(screen.queryByText('Configuration Saved') === null, true);
 });
 
 test('clearing an override shows the Global values, so the next save does not pin the cleared ones back', async () => {
@@ -169,4 +197,101 @@ test('a clear that answers after the operator switched sessions leaves the new s
   releasePut();
   await screen.findByText('Configuration Saved');
   assert.equal(screen.getByLabelText<HTMLInputElement>('Greeting').value, 'hey');
+});
+
+test('a catalog prefetch that fails after the Catalog tab opened shows the error with a retry', async () => {
+  const { screen, fireEvent } = rtl;
+  let failCatalog!: () => void;
+  catalogReply = () =>
+    new Promise(resolve => (failCatalog = () => resolve(jsonResponse({ message: 'catalog unreachable' }, 502))));
+  renderPlugins();
+  await screen.findByTitle('Configure');
+  fireEvent.click(screen.getByRole('button', { name: 'Install plugin' }));
+  fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.install-tab')[1]);
+  await screen.findByText(/Install directly from the OpenWA plugin catalog/);
+
+  failCatalog();
+  const message = await screen.findByText(/catalog unreachable/);
+  assert.ok(rtl.within(message).getByRole('button', { name: 'Refresh' }));
+  assert.equal(screen.queryByText('No plugins in the catalog.') === null, true);
+});
+
+test('uninstalling a plugin reloads the catalog, whose installed flags it changed', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  const realConfirm = window.confirm;
+  window.confirm = () => true;
+  try {
+    renderPlugins();
+    await waitFor(() => assert.equal(catalogReads, 1));
+    fireEvent.click(await screen.findByTitle('Uninstall'));
+    await screen.findByText('Plugin uninstalled');
+    await waitFor(() => assert.equal(catalogReads, 2));
+  } finally {
+    window.confirm = realConfirm;
+  }
+});
+
+test('uploading a plugin .zip reloads the catalog, whose installed flags it changed', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  renderPlugins();
+  await waitFor(() => assert.equal(catalogReads, 1));
+  fireEvent.click(await screen.findByRole('button', { name: 'Install plugin' }));
+  const input = document.querySelector<HTMLInputElement>('.install-drop input[type="file"]');
+  assert.ok(input);
+  fireEvent.change(input, { target: { files: [new File(['zip'], 'greeter.zip', { type: 'application/zip' })] } });
+  await screen.findByText('greeter.zip');
+  const submit = screen.getAllByRole<HTMLButtonElement>('button', { name: 'Install plugin' }).at(-1);
+  assert.ok(submit && !submit.disabled);
+  fireEvent.click(submit);
+  await screen.findByText('Plugin installed');
+  await waitFor(() => assert.equal(catalogReads, 2));
+});
+
+test('a config schema without properties opens the config modal and the Sessions tab', async () => {
+  const { screen, fireEvent } = rtl;
+  pluginOverride = { configSchema: { type: 'object' } };
+  renderPlugins();
+  fireEvent.click(await screen.findByTitle('Configure'));
+  assert.equal(screen.queryByRole('button', { name: 'Save Configuration' }) === null, true);
+  fireEvent.click(await screen.findByRole('button', { name: 'Sessions' }));
+  // No declared field means nothing to override per session.
+  await screen.findByText('Run for');
+  assert.equal(screen.queryByRole('combobox', { name: 'Select a session…' }) === null, true);
+});
+
+test('a fractional value in a bounded number field does not block the override save', async () => {
+  const { screen, fireEvent, waitFor } = rtl;
+  pluginOverride = {
+    config: { threshold: 0.7 },
+    configSchema: { type: 'object', properties: { threshold: { type: 'number', title: 'Threshold', min: 0, max: 1 } } },
+  };
+  putReply = { success: true };
+  await openSessionOverride('Main');
+  const field = await screen.findByLabelText<HTMLInputElement>('Threshold');
+  assert.equal(field.value, '0.7');
+  fireEvent.change(field, { target: { value: '0.5' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save override' }));
+  await waitFor(() => assert.equal(putBodies.length, 1));
+  assert.deepEqual(putBodies, [{ config: { threshold: 0.5 } }]);
+});
+
+test("another plugin's action settling first keeps a pending plugin's buttons disabled", async () => {
+  const { screen, fireEvent, within } = rtl;
+  extraPlugins = [{ ...PLUGIN, id: 'echo', name: 'Echo', configSchema: undefined, sessionScoped: false }];
+  let releaseDisable!: () => void;
+  disableGate = new Promise(resolve => (releaseDisable = resolve));
+  renderPlugins();
+  await rtl.waitFor(() => assert.equal(document.querySelectorAll('.plugin-card').length, 2));
+  const [greeter, echo] = Array.from(document.querySelectorAll<HTMLElement>('.plugin-card'));
+  const greeterToggle = within(greeter).getByRole<HTMLButtonElement>('button', { name: 'Disable' });
+
+  fireEvent.click(greeterToggle);
+  assert.equal(greeterToggle.disabled, true);
+  fireEvent.click(within(echo).getByTitle('Health Check'));
+  await screen.findByText('Health Check Passed');
+  assert.equal(greeterToggle.disabled, true);
+  assert.equal(within(greeter).getByTitle<HTMLButtonElement>('Uninstall').disabled, true);
+
+  releaseDisable();
 });

@@ -13,7 +13,8 @@
  *   4. PLURAL FORMS (hard fail): for every plural key in en.json (one with an `_other` variant), a
  *      locale carries a form for each category `Intl.PluralRules` gives its language. i18next falls
  *      back to the bare (singular) key for a missing category, so French without `_many` renders
- *      "1000000 abonné". The bare key covers `one`.
+ *      "1000000 abonné". The bare key covers `one`. LEGACY_PLURAL_CATEGORIES adds a category a
+ *      supported browser still selects from older CLDR data (Hebrew `many`).
  *
  * Wire into CI with: `npm run i18n:check`
  */
@@ -85,6 +86,10 @@ const referenceEntries = flattenEntries(load(REFERENCE));
 const pluralBases = [...referenceKeys].filter((k) => k.endsWith('_other')).map((k) => k.slice(0, -'_other'.length));
 const pluralBaseSet = new Set(pluralBases);
 const PLURAL_SUFFIX = /_(zero|one|two|few|many|other)$/;
+// Categories a language had in CLDR releases a supported browser still ships. Hebrew lost `many` in
+// CLDR 42, but Safari takes its plural data from the operating system, so Safari 16.4 and 17 on
+// macOS 12 still select it. Without the form i18next renders the singular bare key for 20, 30, 40.
+const LEGACY_PLURAL_CATEGORIES = { he: ['many'] };
 const localeFiles = readdirSync(LOCALES_DIR)
   .filter((f) => f.endsWith('.json') && f !== REFERENCE)
   .sort();
@@ -95,7 +100,13 @@ for (const file of localeFiles) {
   const keys = flatten(load(file));
   const entries = flattenEntries(load(file));
   const missing = [...referenceKeys].filter((k) => !keys.has(k)).sort();
-  const pluralCategories = new Intl.PluralRules(file.replace(/\.json$/, '')).resolvedOptions().pluralCategories;
+  const lang = file.replace(/\.json$/, '');
+  const pluralCategories = [
+    ...new Set([
+      ...new Intl.PluralRules(lang).resolvedOptions().pluralCategories,
+      ...(LEGACY_PLURAL_CATEGORIES[lang] ?? []),
+    ]),
+  ];
   const pluralForms = new Set(pluralBases.flatMap((base) => pluralCategories.map((c) => `${base}_${c}`)));
   const missingPlurals = [...pluralForms]
     .filter((k) => !keys.has(k) && !(k.endsWith('_one') && keys.has(k.slice(0, -'_one'.length))))

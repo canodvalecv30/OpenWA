@@ -1,5 +1,6 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 import { DateTransformer } from '../../../common/transformers/date.transformer';
+import { NulFreeTransformer } from '../../../common/transformers/nul-free.transformer';
 import { jsonColumnType, dateColumnType } from '../../../common/utils/column-types';
 import type { AccountRestriction } from '../../../engine/interfaces/whatsapp-engine.interface';
 
@@ -32,7 +33,7 @@ export class Session {
   @Column({ type: 'varchar', length: 20, nullable: true })
   phone!: string | null;
 
-  @Column({ type: 'varchar', length: 100, nullable: true })
+  @Column({ type: 'varchar', length: 100, nullable: true, transformer: NulFreeTransformer })
   pushName!: string | null;
 
   @Column({ type: jsonColumnType(), default: '{}' })
@@ -79,6 +80,16 @@ export class Session {
    */
   @Column({ type: dateColumnType(), nullable: true, transformer: DateTransformer })
   leaseExpiresAt!: Date | null;
+
+  /**
+   * Operator intent, server-owned and not part of any session response (only the export-data
+   * backup carries it): 'stopped' once POST /stop or POST /force-kill took the session down,
+   * cleared again by an explicit POST /start. Boot auto-start and the takeover sweep skip a stopped
+   * row, so a deliberate stop survives a restart. NULL (every row that predates the column) means
+   * eligible, exactly as before.
+   */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  desiredState!: 'stopped' | null;
 
   @CreateDateColumn()
   createdAt!: Date;

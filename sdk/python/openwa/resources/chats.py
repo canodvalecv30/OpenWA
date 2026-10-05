@@ -88,12 +88,21 @@ class ChatsResource:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/chats/mute", body=body)
 
     def clear_messages(self, session_id: str, chat_id: str) -> SuccessResult:
-        """Delete every message in a chat, keeping the chat. success=False means the engine declined."""
+        """Delete every message in a chat, keeping the chat. success=False means the engine declined.
+
+        On success the gateway also deletes its stored copy of the chat's messages (rows, inline and
+        archived media, search entries); export the history first if you need it.
+        """
         return self._http.request(
             "DELETE", f"/api/sessions/{quote_segment(session_id)}/chats/{quote_segment(chat_id)}/messages"
         )
 
     def delete(self, session_id: str, body: DeleteChatRequest) -> SuccessResult:
+        """Delete a chat from the chat list.
+
+        On success the gateway also deletes its stored copy of the chat's messages (rows, inline and
+        archived media, search entries); export the history first if you need it.
+        """
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/chats/delete", body=body)
 
     def send_state(self, session_id: str, body: SendChatStateRequest) -> SuccessResult:

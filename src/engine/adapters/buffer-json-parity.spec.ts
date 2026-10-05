@@ -41,6 +41,17 @@ describe('the BufferJSON stub encodes bytes the way the library does', () => {
     expect(back.fileEncSha256).toEqual(Buffer.from('deadbeef', 'hex'));
   });
 
+  it('revives only the shapes the library revives', () => {
+    // Measured from the real @whiskeysockets/baileys 7.0.0-rc14 BufferJSON.reviver: a numeric-key
+    // object of numbers becomes a Buffer, while array-form data and the old `{ buffer, value }`
+    // shape come back untouched.
+    const revive = (json: string): unknown => (JSON.parse(json, stub.reviver) as { a: unknown }).a;
+
+    expect(revive('{"a":{"0":1,"1":2}}')).toEqual(Buffer.from([1, 2]));
+    expect(revive('{"a":{"type":"Buffer","data":[1,2,3]}}')).toEqual({ type: 'Buffer', data: [1, 2, 3] });
+    expect(revive('{"a":{"buffer":true,"value":"AQID"}}')).toEqual({ buffer: true, value: 'AQID' });
+  });
+
   // The discriminating check: an identity codec — the thing the old fixture could not tell apart
   // from a working one — must fail this.
   it('fails for an identity codec, so the assertion is not vacuous', () => {

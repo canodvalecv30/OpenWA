@@ -6,13 +6,13 @@ socket. Security matters here, and we appreciate responsible disclosure.
 
 ## Supported versions
 
-Security fixes land on the latest minor release (currently 0.23.x). Older minor
+Security fixes land on the latest minor release (currently 0.24.x). Older minor
 lines receive no backports — please upgrade older deployments.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.23.x  | :white_check_mark: |
-| < 0.23  | :x:                |
+| 0.24.x  | :white_check_mark: |
+| < 0.24  | :x:                |
 
 ## Reporting a vulnerability
 
@@ -64,10 +64,13 @@ new value. The Helm chart does not set `ENABLE_SWAGGER`.
 
 Installing or enabling a plugin is executing third-party code on the host that runs OpenWA.
 This is inherent to what a plugin IS here: the sandbox (a `worker_threads` isolate with a
-capped heap, an allowlisted environment, a deny-by-default network manifest, and a
-capability router with per-call timeouts) contains a buggy or runaway plugin — it is NOT a
-security boundary against a malicious one. A worker shares the process's filesystem and
-OS privileges with the API.
+capped heap, an allowlisted environment, a deny-by-default network manifest for
+`ctx.net.fetch`, and a capability router with per-call timeouts) contains a buggy or
+runaway plugin — it is NOT a security boundary against a malicious one. A worker shares
+the process's filesystem and OS privileges with the API, so it can reach anything the API
+container can, including the process environment, the data volume and the `docker-proxy`
+described below. See [docs/30-plugin-sandboxing.md](docs/30-plugin-sandboxing.md) for the
+full list.
 
 The compensating gates on the install path:
 
@@ -101,14 +104,14 @@ it as one:
   bind-mount, which is host-root-equivalent.
 
 Mitigations in place: the proxy is unreachable except from `openwa-api` (dedicated
-`internal: true` network), the orchestration endpoints require an ADMIN-role API key,
-both teardown and start are constrained to the three managed profiles (`postgres`,
-`redis`, `minio`) — non-managed names are dropped before reaching `DockerService` —
-and OpenWA itself never issues deletes (profile teardown is stop-only). If you do not
-use the built-in datastore orchestration (Dashboard → Infrastructure built-in
-toggles), disable the proxy entirely — see the `docker-proxy` comments in
-`docker-compose.yml`; `DockerService` then reports Docker unavailable and
-orchestration degrades gracefully.
+`internal: true` network; any plugin loaded into `openwa-api` shares that reach), the
+orchestration endpoints require an ADMIN-role API key, both teardown and start are
+constrained to the three managed profiles (`postgres`, `redis`, `minio`) — non-managed
+names are dropped before reaching `DockerService` — and OpenWA itself never issues
+deletes (profile teardown is stop-only). If you do not use the built-in datastore
+orchestration (Dashboard → Infrastructure built-in toggles), disable the proxy entirely —
+see the `docker-proxy` comments in `docker-compose.yml`; `DockerService` then reports
+Docker unavailable and orchestration degrades gracefully.
 
 ### Session-restricted API keys
 

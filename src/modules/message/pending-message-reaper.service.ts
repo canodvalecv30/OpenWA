@@ -7,9 +7,9 @@ import { createLogger } from '../../common/services/logger.service';
 import { resolveNonNegativeIntEnv } from '../../config/configuration';
 
 export interface PendingMessageReaperOptions {
-  // Sweep cadence. 0 disables the reaper (mirrors INGRESS_RECONCILE_INTERVAL_MS). A blank or
-  // otherwise unparseable value falls back to the default rather than disabling the sweep, so a
-  // mis-set variable can never silently turn the reaper off.
+  // Sweep cadence. 0 disables the reaper (mirrors INGRESS_RECONCILE_INTERVAL_MS). A blank value
+  // falls back to the default; boot validation refuses a negative or unparseable one, so a mis-set
+  // variable can never silently turn the reaper off.
   intervalMs: number;
   // An outgoing PENDING row only becomes reap-eligible once it is older than this — the live send
   // path gets the whole window to persist its own SENT/FAILED outcome first.
@@ -63,7 +63,7 @@ export class PendingMessageReaperService implements OnModuleInit, OnModuleDestro
   onModuleInit(): void {
     const opts = resolvePendingMessageReaperOptions();
     if (opts.intervalMs <= 0) {
-      this.logger.log('Pending message reaper disabled (MESSAGE_REAPER_INTERVAL_MS <= 0)');
+      this.logger.log('Pending message reaper disabled (MESSAGE_REAPER_INTERVAL_MS=0)');
       return;
     }
     this.timer = setInterval(() => {

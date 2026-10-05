@@ -16,7 +16,17 @@ export class AuthValidateController {
   @ApiHeader({ name: 'X-API-Key', description: 'API key to validate' })
   @ApiResponse({ status: 200, description: 'API key is valid', type: ValidateApiKeyResponseDto })
   @ApiResponse({ status: 401, description: 'Invalid or missing API key' })
-  validate(@CurrentApiKey() apiKey?: ApiKey): { valid: boolean; role?: string; engineType?: string } {
+  @ApiResponse({
+    status: 403,
+    description:
+      'The key is valid but refused here: its allowedIps exclude this client, or it is restricted to selected chats',
+  })
+  validate(@CurrentApiKey() apiKey?: ApiKey): {
+    valid: boolean;
+    role?: string;
+    engineType?: string;
+    scoped?: boolean;
+  } {
     // This route is behind the global API-key guard, so only a validated key reaches this handler
     // (a missing/invalid key 401s first). The guard has already verified the key — including its
     // client-IP and session-scope restrictions — and attached it to the request. Re-validating here
@@ -28,7 +38,13 @@ export class AuthValidateController {
       return { valid: false };
     }
     // The engine rides along because GET /infra/engines/current is admin-only, and the dashboard needs
-    // it for every role that can post a status or read channels.
-    return { valid: true, role: apiKey.role, engineType: this.engineFactory.getCurrentEngine() };
+    // it for every role that can post a status or read channels. `scoped` lets it skip the routes that
+    // refuse a session-scoped key (@RequireUnscopedKey) instead of sending reads the guard rejects.
+    return {
+      valid: true,
+      role: apiKey.role,
+      engineType: this.engineFactory.getCurrentEngine(),
+      scoped: (apiKey.allowedSessions?.length ?? 0) > 0,
+    };
   }
 }

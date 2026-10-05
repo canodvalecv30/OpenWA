@@ -4,6 +4,8 @@ import { EngineRegistry } from '../../engine/engine-registry.service';
 import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineThrottledError } from '../../common/errors/engine-throttled.error';
 import { SendPacingService } from '../message/send-pacing.service';
 
 /** Pacing is off by default; its own spec covers the governor, so here it must simply not refuse. */
@@ -131,7 +133,7 @@ describe('GroupService', () => {
   });
 
   it('refunds the reservation when the engine refuses the add (the participants were never contacted)', async () => {
-    const addParticipants = jest.fn().mockRejectedValue(new Error('no admin rights'));
+    const addParticipants = jest.fn().mockRejectedValue(new EngineRefusedError('no admin rights'));
     const reservation = { coldCount: 3, dayStartMs: 1 };
     const { svc, pacing } = makeServiceWithPacing(
       { addParticipants },
@@ -145,7 +147,7 @@ describe('GroupService', () => {
   });
 
   it('refunds the reservation when createGroup fails (whatsapp-web.js always 501s)', async () => {
-    const createGroup = jest.fn().mockRejectedValue(new Error('EngineNotSupportedError'));
+    const createGroup = jest.fn().mockRejectedValue(new EngineNotSupportedError('createGroup'));
     const reservation = { coldCount: 2, dayStartMs: 1 };
     const { svc, pacing } = makeServiceWithPacing(
       { createGroup },
@@ -156,6 +158,42 @@ describe('GroupService', () => {
     );
     await expect(svc.createGroup('s1', 'G', ['628111111@c.us', '628222222@c.us'])).rejects.toThrow();
     expect(pacing.refundGroupReachouts).toHaveBeenCalledWith('s1', reservation);
+  });
+
+  // WhatsApp turned a throttled request away before it ran, so the batch contacted nobody.
+  it.each([
+    ['createGroup', (svc: GroupService) => svc.createGroup('s1', 'G', ['628111111@c.us'])],
+    ['addParticipants', (svc: GroupService) => svc.addParticipants('s1', 'g1', ['628111111@c.us'])],
+  ])('refunds the reservation when WhatsApp rate-limits %s', async (_label, call) => {
+    const error = new EngineThrottledError('rate-limited (code 429)');
+    const reservation = { coldCount: 1, dayStartMs: 1 };
+    const { svc, pacing } = makeServiceWithPacing(
+      { createGroup: jest.fn().mockRejectedValue(error), addParticipants: jest.fn().mockRejectedValue(error) },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue(reservation),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(call(svc)).rejects.toBe(error);
+    expect(pacing.refundGroupReachouts).toHaveBeenCalledWith('s1', reservation);
+  });
+
+  it.each([
+    ['a timed-out add (WhatsApp may still apply it)', new EngineTransportError('did not answer in time')],
+    ['a raw socket error', new Error('Connection Closed')],
+  ])('keeps the reservation charged after %s: the outcome is unknown', async (_label, error) => {
+    const addParticipants = jest.fn().mockRejectedValue(error);
+    const createGroup = jest.fn().mockRejectedValue(error);
+    const { svc, pacing } = makeServiceWithPacing(
+      { addParticipants, createGroup },
+      {
+        assertReachoutAllowed: jest.fn().mockResolvedValue({ coldCount: 3, dayStartMs: 1 }),
+        refundGroupReachouts: jest.fn(),
+      },
+    );
+    await expect(svc.addParticipants('s1', 'g1', ['628111111@c.us'])).rejects.toBe(error);
+    await expect(svc.createGroup('s1', 'G', ['628111111@c.us'])).rejects.toBe(error);
+    expect(pacing.refundGroupReachouts).not.toHaveBeenCalled();
   });
 
   it('passes participant lists straight through to the engine', async () => {
@@ -172,6 +210,16 @@ describe('GroupService', () => {
     const svc = makeService({ joinGroupViaInviteCode });
     await expect(svc.joinGroupViaInviteCode('s1', 'CODE123')).resolves.toBe('120363000@g.us');
     expect(joinGroupViaInviteCode).toHaveBeenCalledWith('CODE123');
+  });
+
+  // Same rule as the join-info preview, so a code that previews also joins.
+  it('joinGroupViaInviteCode sends the trimmed code and refuses a blank one locally', () => {
+    const joinGroupViaInviteCode = jest.fn().mockResolvedValue('120363000@g.us');
+    const svc = makeService({ joinGroupViaInviteCode });
+    void svc.joinGroupViaInviteCode('s1', ' CODE123 ');
+    expect(joinGroupViaInviteCode).toHaveBeenCalledWith('CODE123');
+    expect(() => svc.joinGroupViaInviteCode('s1', '   ')).toThrow(BadRequestException);
+    expect(joinGroupViaInviteCode).toHaveBeenCalledTimes(1);
   });
 
   describe('getGroupSettings', () => {
@@ -313,6 +361,26 @@ describe('GroupService', () => {
         svc.updateGroupSettings('s1', 'g1', { announce: true, ephemeralSeconds: 86400 }),
       ).rejects.toBeInstanceOf(EngineRefusedError);
       expect(engine.setGroupMessagesAdminsOnly).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an Error', new Error('Protocol error (Runtime.callFunctionOn): Target closed at /srv/app/page.js')],
+      ['a non-Error value', 'raw-engine-text'],
+    ])('reports a partial apply after %s as an internal error without its text', async (_label, raw) => {
+      const engine = {
+        setGroupEphemeral: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest.fn().mockRejectedValue(raw),
+      };
+      const svc = makeService(engine);
+      const error = await svc
+        .updateGroupSettings('s1', 'g1', { announce: true, ephemeralSeconds: 86400 })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(HttpException);
+      const { message } = error as HttpException;
+      expect((error as HttpException).getStatus()).toBe(500);
+      expect(message).toContain("'announce' failed (internal error)");
+      expect(message).toContain('already applied: ephemeralSeconds');
+      expect(message).not.toMatch(/Protocol error|\/srv\/app|raw-engine-text/);
     });
   });
 });

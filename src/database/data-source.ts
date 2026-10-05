@@ -40,8 +40,8 @@ if (pgSchemaError) {
 
 const sourceGlob = (...segments: string[]): string => path.join(__dirname, ...segments).replace(/\\/g, '/');
 
-// Scoped to the DATA-owned modules only (session/webhook/message/template/engine/integration/status-store), mirroring
-// the runtime data connection (app.module.ts). A broad '**' glob would also sweep in the main-owned
+// Scoped to the DATA-owned modules only (session/webhook/message/template/engine/integration/status-store/automation),
+// mirroring the runtime data connection (app.module.ts). A broad '**' glob would also sweep in the main-owned
 // auth/audit entities and pollute `migration:generate` against the data DB with their DDL.
 const dataEntities = [
   sourceGlob('..', 'modules', 'session', '**', '*.entity{.ts,.js}'),

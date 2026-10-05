@@ -15,6 +15,11 @@ const FOCUSABLE =
 // loses its form input. Only the topmost entry owns Escape.
 const modalStack: object[] = [];
 
+// The page's own overflow, saved when the first dialog opens and restored when the last one closes.
+// Per-dialog save/restore breaks when a parent's cleanup runs before its nested dialog's (React
+// unmounts a deleted subtree parent-first): the nested one would restore the 'hidden' it saw.
+let lockedOverflow = '';
+
 function visibleFocusables(card: HTMLElement): HTMLElement[] {
   return Array.from(card.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(el => el.offsetParent !== null);
 }
@@ -25,7 +30,7 @@ function visibleFocusables(card: HTMLElement): HTMLElement[] {
  * focused when the dialog opened (the trigger).
  */
 export function bindModalA11y(doc: Document, card: HTMLElement, onClose: () => void): () => void {
-  const previousOverflow = doc.body.style.overflow;
+  if (modalStack.length === 0) lockedOverflow = doc.body.style.overflow;
   doc.body.style.overflow = 'hidden';
 
   // Capture before moving focus into the dialog — this is the trigger focus returns to on close.
@@ -71,7 +76,7 @@ export function bindModalA11y(doc: Document, card: HTMLElement, onClose: () => v
     const stackIndex = modalStack.indexOf(stackEntry);
     if (stackIndex !== -1) modalStack.splice(stackIndex, 1);
     doc.removeEventListener('keydown', onKeyDown, true);
-    doc.body.style.overflow = previousOverflow;
+    if (modalStack.length === 0) doc.body.style.overflow = lockedOverflow;
     // Restore focus to the trigger — unless it left the document while the dialog was open
     // (e.g. the row that opened it was deleted), in which case focus() would throw/no-op.
     if (previouslyFocused && doc.contains(previouslyFocused)) previouslyFocused.focus();

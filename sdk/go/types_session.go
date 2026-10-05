@@ -75,7 +75,6 @@ type UpsertLabelRequest struct {
 	Color *int `json:"color,omitempty"`
 }
 
-// ParticipantPresence is one participant's presence within a chat.
 // SessionStatus is the session lifecycle state reported by the gateway.
 type SessionStatus string
 
@@ -110,6 +109,7 @@ const (
 	PresencePaused      PresenceState = "paused"
 )
 
+// ParticipantPresence is one participant's presence within a chat.
 type ParticipantPresence struct {
 	ID string `json:"id"`
 	// State is one of: available, unavailable, composing, recording, paused. "composing" and
@@ -183,13 +183,13 @@ const (
 	ProxySOCKS5 ProxyType = "socks5"
 )
 
-// CreateSessionRequest is the body for creating a session. ProxyType is one of:
-// http, https, socks4, socks5.
+// CreateSessionRequest is the body for creating a session.
 type CreateSessionRequest struct {
-	Name      string         `json:"name"`
-	Config    map[string]any `json:"config,omitempty"`
-	ProxyURL  string         `json:"proxyUrl,omitempty"`
-	ProxyType ProxyType      `json:"proxyType,omitempty"`
+	Name     string         `json:"name"`
+	Config   map[string]any `json:"config,omitempty"`
+	ProxyURL string         `json:"proxyUrl,omitempty"`
+	// Deprecated: ignored by the server; the ProxyURL scheme selects the proxy protocol.
+	ProxyType ProxyType `json:"proxyType,omitempty"`
 }
 
 // SessionProxy is the masked per-session proxy configuration returned by GET/PATCH /proxy.
@@ -268,8 +268,9 @@ type SessionConfig struct {
 	ReconnectBaseDelay   int  `json:"reconnectBaseDelay"`
 }
 
-// UpdateSessionConfigRequest is a partial update of a RUNNING session's config — no re-link, no QR
-// scan.
+// UpdateSessionConfigRequest is a partial update of a session's config, merged in any session state
+// with no restart, re-link or QR scan. AutoRejectCalls applies immediately; MaxReconnectAttempts and
+// ReconnectBaseDelay apply on the next start.
 //
 // The route needs THREE states per field, not two: a key that is absent leaves the value unchanged, a
 // key sent as explicit null clears it back to the default, and a value sets it. A `*int` with

@@ -114,6 +114,18 @@ export class WorkerHookRegistry {
       data,
     };
     if (firstError !== undefined) result.error = firstError;
-    this.post(result);
+    try {
+      this.post(result);
+    } catch (error) {
+      // An uncloneable result (a missing await, a function property) throws DataCloneError here. Left
+      // unhandled it would kill the worker, so report it like a handler failure; without `data` the host
+      // keeps the original data.
+      this.post({
+        kind: 'hook-result',
+        id: message.id,
+        continue: shouldContinue,
+        error: firstError ?? `hook result could not be sent: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 }

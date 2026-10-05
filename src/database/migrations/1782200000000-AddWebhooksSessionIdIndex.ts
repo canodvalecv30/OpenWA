@@ -13,9 +13,9 @@ export class AddWebhooksSessionIdIndex1782200000000 implements MigrationInterfac
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.dataSource.options.type === 'postgres') {
-      // Lift the runtime pool's statement_timeout (app.module.ts) for THIS transaction so a CREATE INDEX
-      // over a large webhooks table at boot is never aborted. SET LOCAL auto-reverts at COMMIT; SQLite
-      // rejects it syntactically, hence the guard.
+      // Boot and CLI migrations run on a pool without the runtime statement_timeout (pg-boot-migrations.ts);
+      // this guards a CREATE INDEX over a large webhooks table against a role- or database-level default.
+      // SET LOCAL auto-reverts at COMMIT; SQLite rejects it syntactically, hence the guard.
       await queryRunner.query('SET LOCAL statement_timeout = 0');
     }
     if (!(await queryRunner.hasTable('webhooks'))) return;

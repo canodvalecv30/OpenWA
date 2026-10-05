@@ -29,9 +29,8 @@ export type EnqueueOutcome = { outcome: 'queued' | 'dispatched' | 'failed'; erro
  * INGRESS_RETRY_DELAY_MS); an invalid value falls back to the default.
  */
 export function resolveIngressJobOptions(): { attempts: number; backoff: { type: 'exponential'; delay: number } } {
-  const attempts = Number(process.env.INGRESS_MAX_ATTEMPTS);
   return {
-    attempts: Number.isInteger(attempts) && attempts >= 1 ? attempts : 3,
+    attempts: resolveNonNegativeIntEnv(process.env.INGRESS_MAX_ATTEMPTS, 0) || 3,
     backoff: { type: 'exponential', delay: resolveNonNegativeIntEnv(process.env.INGRESS_RETRY_DELAY_MS, 5000) },
   };
 }
@@ -65,6 +64,18 @@ export function sanitizeIngressJobId(jobId: string, namespace = ''): string {
 function queueJobId(data: IngressJobData, jobId: string): string {
   return sanitizeIngressJobId(jobId, `${data.pluginId}\u0000${data.instanceId}`);
 }
+
+/**
+ * The two ids IngressProcessor re-queues a delivery under when its dead-letter row cannot be written.
+ * A copy that fails the same way re-queues under the other one, so the ids stay fixed and a live copy
+ * can be looked up by id instead of being mistaken for a dead-lettered delivery.
+ */
+export function requeuedJobIds(baseJobId: string): [string, string] {
+  return [`${baseJobId}-requeued-1`, `${baseJobId}-requeued-2`];
+}
+
+// A job in one of these states still owns the delivery, or already delivered it.
+const isLiveOrCompleted = (state: JobState | 'unknown'): state is JobState => state !== 'failed' && state !== 'unknown';
 
 /**
  * Build the dead-letter row for an ingress delivery whose inline-dispatch fallback failed. The shape
@@ -129,12 +140,20 @@ export class IngressEnqueueService implements OnApplicationBootstrap {
    * State of the job an earlier enqueue() of this delivery left in the queue, or undefined when the
    * queue is off, holds no such job, or cannot answer. add() resolves for a duplicate jobId whatever
    * state the existing job is in, so a caller replaying under the original jobId must look first: a
-   * retained failed job (removeOnFail keeps it for a day) would silently swallow the replay.
+   * retained failed job (removeOnFail keeps it for a day) would silently swallow the replay. When that
+   * job failed or is gone, a live or completed re-queued copy (see requeuedJobIds) answers for it: the
+   * copy owns the delivery, so neither a replay nor a dead-letter row may stand in for it.
    */
   async existingJobState(data: IngressJobData, jobId: string): Promise<JobState | undefined> {
     if (!this.config.get<boolean>('queue.enabled', false) || !this.ingressQueue) return undefined;
     try {
-      const state = await this.ingressQueue.getJobState(queueJobId(data, jobId));
+      const id = queueJobId(data, jobId);
+      const state = await this.ingressQueue.getJobState(id);
+      if (isLiveOrCompleted(state)) return state;
+      for (const copyId of requeuedJobIds(id)) {
+        const copyState = await this.ingressQueue.getJobState(copyId);
+        if (isLiveOrCompleted(copyState)) return copyState;
+      }
       return state === 'unknown' ? undefined : state;
     } catch (err) {
       // Redis unreachable: enqueue() then takes its own inline fallback, as it would without the probe.

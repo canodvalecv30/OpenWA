@@ -1,4 +1,5 @@
-// Package openwa is the official Go client for the OpenWA WhatsApp API Gateway.
+// Package openwa is the official Go client for OpenWA, the open-source WhatsApp API Gateway (not
+// affiliated with WhatsApp or Meta).
 //
 // The single entry point is New, which returns a *Client whose exported fields
 // are the domain services:
@@ -17,6 +18,8 @@
 //	if _, err := client.Sessions.Start(ctx, session.ID); err != nil {
 //	    log.Fatal(err)
 //	}
+//	// Link the account before sending: scan Sessions.QRCode or use Sessions.RequestPairingCode,
+//	// then wait for status "ready". An unlinked session answers the send with 409.
 //	res, err := client.Messages.SendText(ctx, session.ID, openwa.SendTextRequest{
 //	    ChatID: "628123456789@c.us",
 //	    Text:   "Hello from the OpenWA Go SDK!",
@@ -191,18 +194,26 @@ func warnIfInsecure(cfg *config) {
 
 // Do issues a raw request against the API and decodes the JSON response into
 // out (pass nil to ignore the body). It is the escape hatch for endpoints the
-// typed services do not cover. path must begin with "/".
+// typed services do not cover. path must begin with "/"; any other path returns
+// an error and nothing is sent.
 //
 // A 2xx body is assigned verbatim when out is a *[]byte, and a non-JSON 2xx
 // body falls back to the raw text when out is a *string — mirroring the
 // JS/Python/PHP transports, which return the raw text instead of failing.
 // Any other out type still requires a JSON body.
+//
+// A "." or ".." segment (also written %2e) returns an error and nothing is
+// sent; empty segments, such as a trailing slash, are sent as written.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	return c.do(ctx, method, path, query, body, out)
+	return c.call(ctx, method, path, query, body, out, true)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	data, _, err := c.doRaw(ctx, method, path, query, body)
+	return c.call(ctx, method, path, query, body, out, false)
+}
+
+func (c *Client) call(ctx context.Context, method, path string, query url.Values, body, out any, rawPath bool) error {
+	data, _, err := c.doRaw(ctx, method, path, query, body, rawPath)
 	if err != nil {
 		return err
 	}
@@ -226,9 +237,26 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return nil
 }
 
+type idempotencyContextKey struct{}
+
+// WithIdempotencyKey supplies a caller-owned key for one logical send. Reuse
+// this context for its retries and choose another key for an unrelated send.
+// Only the gateway's documented idempotent send routes interpret the header.
+func WithIdempotencyKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, idempotencyContextKey{}, key)
+}
+
 // doRaw performs the request and returns the response body and Content-Type.
 // Any non-2xx status (including an unfollowed 3xx) is an error.
-func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body any) ([]byte, string, error) {
+//
+// A path segment that is "." or ".." is refused before sending: a proxy that
+// resolves dot segments would route the request to the parent resource. A
+// typed service path (rawPath false) also refuses an empty segment, which
+// means a required id was blank; a hand-written Do path may keep one.
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body any, rawPath bool) ([]byte, string, error) {
+	if err := checkPathSegments(path, rawPath); err != nil {
+		return nil, "", err
+	}
 	var bodyBytes []byte
 	var reader io.Reader
 	if body != nil {
@@ -242,12 +270,25 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 
 	rawURL := c.baseURL + path
 	if len(query) > 0 {
-		rawURL += "?" + query.Encode()
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		rawURL += sep + query.Encode()
 	}
 
+	key, hasKey := ctx.Value(idempotencyContextKey{}).(string)
+	if hasKey {
+		if len(key) < 1 || len(key) > 255 || strings.IndexFunc(key, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
+			return nil, "", errors.New("openwa: idempotency key must contain 1-255 visible ASCII characters")
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
 	if err != nil {
 		return nil, "", fmt.Errorf("openwa: building request: %w", err)
+	}
+	if hasKey {
+		req.Header.Set("Idempotency-Key", key)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -261,7 +302,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if isTimeout(err) {
-			return nil, "", &TimeoutError{Timeout: c.timeout, Err: err}
+			return nil, "", c.timeoutErr(ctx, err)
 		}
 		return nil, "", fmt.Errorf("openwa: %s %s: %w", method, path, err)
 	}
@@ -269,14 +310,27 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if isTimeout(err) {
+			return nil, "", c.timeoutErr(ctx, err)
+		}
 		return nil, "", fmt.Errorf("openwa: reading response body: %w", err)
 	}
 
 	// Any non-2xx (including an unfollowed 3xx) is an error.
 	if resp.StatusCode >= 300 {
-		return nil, "", parseAPIError(resp.StatusCode, data, method+" "+path)
+		return nil, "", parseAPIError(resp.StatusCode, data, method+" "+path, resp.Header)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
+}
+
+// timeoutErr names the client timeout only when it is the budget that ran out.
+// The client timeout never cancels ctx, so an expired ctx means the caller's own
+// deadline fired first and the error carries no duration.
+func (c *Client) timeoutErr(ctx context.Context, err error) *TimeoutError {
+	if ctx.Err() != nil {
+		return &TimeoutError{Err: err}
+	}
+	return &TimeoutError{Timeout: c.timeout, Err: err}
 }
 
 func isTimeout(err error) bool {
@@ -292,13 +346,41 @@ func isTimeout(err error) bool {
 
 // pathEscape percent-encodes a single path segment so a value containing "/",
 // "#", or "?" can't break out of its path position. WhatsApp-JID characters
-// that are already path-safe ("@", ":", "+") are kept readable.
+// that are already path-safe ("@", ":", "+") are kept readable. An empty, "."
+// or ".." id is left as is and refused by doRaw before anything is sent.
 func pathEscape(segment string) string {
 	escaped := url.PathEscape(segment)
 	return jidRestorer.Replace(escaped)
 }
 
 var jidRestorer = strings.NewReplacer("%40", "@", "%3A", ":", "%2B", "+")
+
+var dotFolder = strings.NewReplacer("%2e", ".", "%2E", ".")
+
+// checkPathSegments refuses a path that does not begin with "/" (appended to the
+// base URL, "@host/x" would move the request and its API key to another host), a
+// "." or ".." segment (also written %2e), and an empty one unless allowEmpty. The
+// query and fragment are not path segments.
+func checkPathSegments(path string, allowEmpty bool) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("openwa: path must begin with \"/\": %q", path)
+	}
+	p := path
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	for _, seg := range strings.Split(p, "/")[1:] {
+		switch dotFolder.Replace(seg) {
+		case ".", "..":
+			return fmt.Errorf("openwa: dot path segment in %q", path)
+		case "":
+			if !allowEmpty {
+				return fmt.Errorf("openwa: empty path segment in %q", path)
+			}
+		}
+	}
+	return nil
+}
 
 // query helpers used by the typed *Query structs.
 

@@ -9,6 +9,7 @@ const FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/echo-plugin.cjs');
 const CAP_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/cap-echo-plugin.cjs');
 const HOOK_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/hook-plugin.cjs');
 const HOOK_HANG_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/hook-hang-plugin.cjs');
+const BUSY_HOOK_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/busy-hook-plugin.cjs');
 const RUNAWAY_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/runaway-plugin.cjs');
 const CTX_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/ctx-aware-plugin.cjs');
 const HOOK_CONFIG_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/hook-config-plugin.cjs');
@@ -16,6 +17,8 @@ const HOOK_ERROR_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/hook-error-
 const CTX_LIFECYCLE_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/ctx-lifecycle-plugin.cjs');
 const SEARCH_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/search-plugin.cjs');
 const UNLOAD_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/unload-plugin.cjs');
+const UNCLONEABLE_LOG_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/uncloneable-log-plugin.cjs');
+const CONFIG_THROW_FIXTURE = path.resolve(ROOT, 'test/fixtures/sandbox/config-throw-plugin.cjs');
 const flushAsync = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
 // Run the TS bootstrap inside the worker via ts-node. The base tsconfig is nodenext; we pin the
@@ -145,6 +148,76 @@ describe('plugin worker — real worker_threads round-trip (B1)', () => {
     await expect(host.terminate()).resolves.toBeUndefined();
   });
 
+  const probingHost = (onUnresponsive: () => void): PluginWorkerHost =>
+    new PluginWorkerHost(
+      makeChannel(),
+      undefined,
+      () => undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      300,
+      onUnresponsive,
+    );
+
+  it('a slow async hook handler answers the liveness probe, so it is not reported', async () => {
+    const onUnresponsive = jest.fn();
+    const host = probingHost(onUnresponsive);
+    try {
+      await host.load(HOOK_HANG_FIXTURE);
+      await host.runLifecycle('onEnable');
+      await flushAsync();
+
+      await host.dispatchHook({ event: 'message:received', data: {}, source: 'Engine', timeoutMs: 200 });
+      await new Promise(resolve => setTimeout(resolve, 900));
+      expect(onUnresponsive).not.toHaveBeenCalled();
+    } finally {
+      await host.terminate();
+    }
+  });
+
+  it('a worker working through a burst of short synchronous handlers is not reported', async () => {
+    const onUnresponsive = jest.fn();
+    const host = probingHost(onUnresponsive);
+    try {
+      await host.load(BUSY_HOOK_FIXTURE);
+      await host.runLifecycle('onEnable');
+      await flushAsync();
+
+      // ~1 s of queued work against a 300 ms hook budget and a 300 ms probe: most dispatches time out
+      // and the ping waits behind the backlog, but results keep arriving the whole time.
+      const burst = Array.from({ length: 100 }, () =>
+        host.dispatchHook({ event: 'message:received', data: {}, source: 'Engine', timeoutMs: 300 }),
+      );
+      await Promise.all(burst);
+      await expect(host.healthCheck(5000)).resolves.toMatchObject({ healthy: true });
+      expect(onUnresponsive).not.toHaveBeenCalled();
+    } finally {
+      await host.terminate();
+    }
+  });
+
+  it('reports a worker whose event loop is blocked, and terminate() reclaims it', async () => {
+    let reported!: () => void;
+    const unresponsive = new Promise<void>(resolve => (reported = resolve));
+    const host = probingHost(() => reported());
+    try {
+      await host.load(RUNAWAY_FIXTURE);
+      const wedged = host.runLifecycle('onEnable');
+      wedged.catch(() => undefined); // terminate() rejects this pending call
+
+      // The dispatch queues behind the spinning onEnable and times out; the ping behind it is never read.
+      await host.dispatchHook({ event: 'message:received', data: {}, source: 'Engine', timeoutMs: 200 });
+      await unresponsive;
+    } finally {
+      await expect(host.terminate()).resolves.toBeUndefined();
+    }
+  });
+
   it('a throwing worker hook handler is reported back on the hook-result (not silently swallowed)', async () => {
     const host = new PluginWorkerHost(makeChannel(), undefined, () => undefined);
     await host.load(HOOK_ERROR_FIXTURE);
@@ -253,6 +326,58 @@ describe('plugin worker — real worker_threads round-trip (B1)', () => {
     // The plugin read ctx.pluginId + ctx.config and logged via ctx.logger; all of it crossed the bridge.
     expect(logs).toContainEqual({ level: 'log', message: 'hello from ctx-demo', meta: { greeting: 'hi' } });
     await host.terminate();
+  });
+
+  it('keeps the worker alive when a timer logs a meta the structured clone cannot copy', async () => {
+    const logs: Array<{ level: string; message: string; meta?: Record<string, unknown> }> = [];
+    const host = new PluginWorkerHost(makeChannel(), undefined, undefined, undefined, (level, message, meta) =>
+      logs.push({ level, message, meta }),
+    );
+
+    try {
+      await host.load(UNCLONEABLE_LOG_FIXTURE, { pluginId: 'uncloneable-log', config: {} });
+      await host.runLifecycle('onEnable');
+
+      // A DataCloneError thrown from the timer used to be uncaught in the worker, so the worker exited.
+      await expect(host.healthCheck(3000)).resolves.toEqual({ healthy: true, message: 'alive' });
+      expect(logs).toContainEqual({ level: 'warn', message: 'timer log', meta: undefined });
+      // The error reason is a string, so it still crosses when the rest of the meta cannot.
+      expect(logs).toContainEqual({ level: 'error', message: 'timer error', meta: { error: 'upstream down' } });
+    } finally {
+      await host.terminate();
+    }
+  });
+
+  it('keeps the worker alive when a synchronous onConfigChange throws, and logs why', async () => {
+    const logs: Array<{ level: string; message: string; meta?: Record<string, unknown> }> = [];
+    const onExit = jest.fn();
+    const host = new PluginWorkerHost(
+      makeChannel(),
+      undefined,
+      undefined,
+      undefined,
+      (level, message, meta) => logs.push({ level, message, meta }),
+      undefined,
+      undefined,
+      undefined,
+      onExit,
+    );
+    try {
+      await host.load(CONFIG_THROW_FIXTURE, { pluginId: 'config-throw', config: { mode: 'ok' } });
+      await host.runLifecycle('onEnable');
+
+      host.sendConfigChange({ mode: 'bad' });
+
+      await expect(host.healthCheck(3000)).resolves.toEqual({ healthy: true, message: 'alive' });
+      expect(logs).toContainEqual({
+        level: 'error',
+        message: 'onConfigChange threw',
+        meta: { error: 'unsupported mode: bad' },
+      });
+      expect(onExit).not.toHaveBeenCalled();
+    } finally {
+      await host.terminate();
+    }
   });
 
   it('delivers healthCheck and onConfigChange to a sandboxed plugin (and refreshes ctx.config)', async () => {

@@ -23,8 +23,9 @@ export class MuteChatDto {
       'Milliseconds, not seconds: a seconds-scale value is an instant in 1970, so the mute expires ' +
       'immediately while the request still answers 200.',
     example: 1800000000000,
-    type: Number,
+    type: 'integer',
     nullable: true,
+    minimum: 1,
   })
   // `null` is a real instruction (unmute), so it skips the numeric checks rather than failing them.
   // A missing field is NOT null, so it still falls through to @IsInt and is rejected with a 400.

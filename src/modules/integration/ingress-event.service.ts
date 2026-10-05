@@ -11,7 +11,7 @@ export interface IngressEventInput {
   pluginId: string;
   providerDeliveryId: string;
   route: string;
-  payload: { headers: Record<string, string>; query: Record<string, string>; body: string; rawBody: string };
+  payload: NonNullable<IngressEvent['payload']>;
   // sha256 hex of payload.rawBody — the slim content fingerprint that survives payload retirement.
   payloadHash: string;
   sessionId: string | null;

@@ -41,6 +41,13 @@ describe('joinGroupViaInviteCode', () => {
     );
   });
 
+  it('reports a rate-limited join as retryable instead of calling the invite code invalid', async () => {
+    const groupAcceptInvite = jest.fn().mockRejectedValue(new Boom('rate-overlimit', { data: 429 }));
+    await expect(groups({ groupAcceptInvite }, 500).joinGroupViaInviteCode('CODE')).rejects.toBeInstanceOf(
+      EngineTransportError,
+    );
+  });
+
   it('still calls an answered-but-empty result invalid — that is a real refusal', async () => {
     const groupAcceptInvite = jest.fn().mockResolvedValue(undefined);
     await expect(groups({ groupAcceptInvite }, 500).joinGroupViaInviteCode('BAD')).rejects.toBeInstanceOf(

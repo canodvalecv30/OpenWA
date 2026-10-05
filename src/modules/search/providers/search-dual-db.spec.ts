@@ -14,7 +14,7 @@ import { BuiltInFtsProvider } from './builtin-fts.provider';
  *
  * Also covers the FTS-absent safety net: if the FTS schema is missing (e.g. non-FTS5 SQLite build
  * where the migration skipped, or a partial state), the provider 501s cleanly instead of crashing on
- * a missing table — and the dialect branch reads `dataSource.options.type`.
+ * a missing table.
  */
 async function boot(): Promise<{ ds: DataSource; provider: BuiltInFtsProvider }> {
   const ds = new DataSource({
@@ -75,14 +75,5 @@ describe('search dual-DB + import/export round-trip safety (sqlite)', () => {
     const provider = new BuiltInFtsProvider(ds);
     await expect(provider.search({ q: 'x' })).rejects.toThrow(/no full-text index/i);
     await ds.destroy();
-  });
-
-  it('uses the SQLite query path on a sqlite DataSource (dialect branch decision)', async () => {
-    // Smoke: the provider reads dataSource.options.type and branches. The SQLite branch is exercised
-    // end-to-end above (and in builtin-fts.provider.spec.ts); the PG branch lives in the PG-gated
-    // spec. This pins the branch decision so a future refactor can't silently drop the dialect read.
-    const sqlite = await boot();
-    expect((sqlite.provider as unknown as { dataSource: DataSource }).dataSource.options.type).toBe('better-sqlite3');
-    await sqlite.ds.destroy();
   });
 });

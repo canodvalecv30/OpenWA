@@ -139,6 +139,27 @@ describe('IngressController', () => {
     expect(arg.rawBody).toBe('');
   });
 
+  it('flags a body that no parser captured, and only that', async () => {
+    const handle = jest.fn().mockResolvedValue({ status: 202, body: 'accepted' });
+    const controller = new IngressController({ handle } as unknown as IngressService);
+    const send = (headers: Record<string, string>, rawBody?: Buffer) =>
+      controller.receive(
+        'p',
+        'i',
+        {},
+        { method: 'POST', params: { path: ['hook'] }, headers, rawBody } as unknown as Request & { rawBody?: Buffer },
+        fakeRes().res,
+      );
+
+    await send({ 'content-type': 'text/plain', 'content-length': '5' });
+    await send({ 'content-type': 'application/xml', 'transfer-encoding': 'chunked' });
+    await send({ 'content-type': 'application/json', 'content-length': '2' }, Buffer.from('{}'));
+    await send({ 'content-length': '0' });
+
+    const flags = (handle.mock.calls as Array<[{ unparsedBody?: boolean }]>).map(([arg]) => arg.unparsedBody);
+    expect(flags).toEqual([true, true, false, false]);
+  });
+
   it('forwards response headers from the pipeline', async () => {
     const handle = jest.fn().mockResolvedValue({
       status: 200,

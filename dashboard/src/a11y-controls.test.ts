@@ -33,7 +33,8 @@ import ts from 'typescript';
 // and the control referencing it render under the SAME condition. `aria-labelledby` pointing at a
 // span that is behind a different `&&` resolves to nothing at runtime while passing here. The render
 // test in pages/Infrastructure.test.ts closes that for the page carrying most of these controls, by
-// resolving each reference against a real DOM; the other pages have no render harness yet.
+// resolving each reference against a real DOM; the other pages render in their own tests but do
+// not resolve these references.
 //
 // The vacuity floors sit close to today's counts on purpose. They exist to catch the sweep silently
 // finding NOTHING (a renamed class, a moved directory), not to pin an exact inventory. Deleting a

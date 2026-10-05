@@ -42,6 +42,8 @@ describe('request-metrics (HTTP RED store)', () => {
   it('escapes special label characters (quote, backslash, newline) in the route label', () => {
     recordHttpRequest('GET', '/api/"weird"/path', 200, 0.01);
     expect(lines()).toContain('route="/api/\\"weird\\"/path"');
+    recordHttpRequest('GET', 'a\\b\nc', 200, 0.01);
+    expect(lines()).toContain('route="a\\\\b\\nc"');
   });
 
   it('reset clears both the counter and the histogram', () => {

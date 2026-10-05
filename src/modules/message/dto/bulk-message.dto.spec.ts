@@ -1,13 +1,19 @@
-import { plainToInstance } from 'class-transformer';
-import { validate } from 'class-validator';
-import { SendBulkMessageDto } from './bulk-message.dto';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { DECORATORS } from '@nestjs/swagger';
+import { GLOBAL_VALIDATION_OPTIONS } from '../../../config/app-validation';
+import { BULK_MESSAGES_MAX, BulkMessageContentDto, SendBulkMessageDto } from './bulk-message.dto';
+import { MENTIONS_MAX, MENTION_WID_MAX_LENGTH } from './send-message.dto';
 
-// Mirror the global ValidationPipe (main.ts): whitelist + forbidNonWhitelisted strip/reject unknown
-// props. Before the nested media objects were typed DTOs they were bare object literals, so these
-// options could not reach inside a media object — junk in `content.image` passed straight through
-// and was persisted verbatim.
-const validateBulk = (obj: unknown) =>
-  validate(plainToInstance(SendBulkMessageDto, obj), { whitelist: true, forbidNonWhitelisted: true });
+// The production pipe, built from the options main.ts uses, so these cases cannot assert a contract
+// the running app does not apply (restated options left out implicit conversion). Its whitelist +
+// forbidNonWhitelisted strip/reject unknown props. Before the nested media objects were typed DTOs
+// they were bare object literals, so these options could not reach inside a media object — junk in
+// `content.image` passed straight through and was persisted verbatim.
+const pipe = new ValidationPipe(GLOBAL_VALIDATION_OPTIONS);
+const validateBulk = (obj: unknown): Promise<SendBulkMessageDto> =>
+  pipe.transform(obj, { type: 'body', metatype: SendBulkMessageDto }) as Promise<SendBulkMessageDto>;
+const accepts = (obj: unknown) => expect(validateBulk(obj)).resolves.toBeInstanceOf(SendBulkMessageDto);
+const rejects = (obj: unknown) => expect(validateBulk(obj)).rejects.toBeInstanceOf(BadRequestException);
 
 const imageItem = (image: unknown) => ({
   messages: [{ chatId: 'c@c.us', type: 'image', content: { image } }],
@@ -15,15 +21,18 @@ const imageItem = (image: unknown) => ({
 
 describe('SendBulkMessageDto nested media validation', () => {
   it('accepts a well-formed base64 media object', async () => {
-    expect(await validateBulk(imageItem({ base64: 'AAAA', mimetype: 'image/png' }))).toHaveLength(0);
+    await accepts(imageItem({ base64: 'AAAA', mimetype: 'image/png' }));
   });
 
   it('rejects an unknown property inside a media object', async () => {
-    expect((await validateBulk(imageItem({ base64: 'AAAA', evil: 'x' }))).length).toBeGreaterThan(0);
+    await rejects(imageItem({ base64: 'AAAA', evil: 'x' }));
   });
 
-  it('rejects a non-string base64 inside a media object', async () => {
-    expect((await validateBulk(imageItem({ base64: 12345 }))).length).toBeGreaterThan(0);
+  // Implicit conversion turns a number into its string form before @IsString runs, so the service
+  // receives a string either way.
+  it('converts a numeric base64 inside a media object to a string', async () => {
+    const dto = await validateBulk(imageItem({ base64: 12345 }));
+    expect(dto.messages[0].content.image?.base64).toBe('12345');
   });
 });
 
@@ -33,22 +42,21 @@ const textItem = (text: string, extra: Record<string, unknown> = {}) => ({
 
 describe('SendBulkMessageDto content length + variables validation', () => {
   it('accepts text at the 4096 cap and rejects beyond it (parity with single-send)', async () => {
-    expect(await validateBulk(textItem('a'.repeat(4096)))).toHaveLength(0);
-    expect((await validateBulk(textItem('a'.repeat(4097)))).length).toBeGreaterThan(0);
+    await accepts(textItem('a'.repeat(4096)));
+    await rejects(textItem('a'.repeat(4097)));
   });
 
   it('accepts an object variables map and rejects a non-object', async () => {
-    expect(await validateBulk(textItem('hi', { variables: { name: 'Alice' } }))).toHaveLength(0);
-    expect((await validateBulk(textItem('hi', { variables: 'oops' }))).length).toBeGreaterThan(0);
-    expect((await validateBulk(textItem('hi', { variables: [1, 2, 3] }))).length).toBeGreaterThan(0);
+    await accepts(textItem('hi', { variables: { name: 'Alice' } }));
+    await rejects(textItem('hi', { variables: 'oops' }));
+    await rejects(textItem('hi', { variables: [1, 2, 3] }));
   });
 });
 
 describe('SendBulkMessageDto recipient', () => {
   it('rejects an empty chatId', async () => {
-    expect((await validateBulk(textItem('hi'))).length).toBe(0);
-    const errors = await validateBulk({ messages: [{ chatId: '', type: 'text', content: { text: 'hi' } }] });
-    expect(errors.length).toBeGreaterThan(0);
+    await accepts(textItem('hi'));
+    await rejects({ messages: [{ chatId: '', type: 'text', content: { text: 'hi' } }] });
   });
 });
 
@@ -56,11 +64,31 @@ describe('SendBulkMessageDto recipient', () => {
 // stand for the whole URL; the DTO only requires a string.
 describe('SendBulkMessageDto media url', () => {
   it('leaves a templated url to the per-item check', async () => {
-    expect(await validateBulk(imageItem({ url: '{{imageUrl}}' }))).toHaveLength(0);
-    expect(await validateBulk(imageItem({ url: 'https://{{host}}/a.jpg' }))).toHaveLength(0);
+    await accepts(imageItem({ url: '{{imageUrl}}' }));
+    await accepts(imageItem({ url: 'https://{{host}}/a.jpg' }));
   });
 
-  it('rejects a non-string url even next to base64', async () => {
-    expect((await validateBulk(imageItem({ base64: 'AAAA', url: 123 }))).length).toBeGreaterThan(0);
+  // Converted like any string field; the per-item check then refuses '123' as not an http(s) URL.
+  it('converts a numeric url next to base64 to a string', async () => {
+    const dto = await validateBulk(imageItem({ base64: 'AAAA', url: 123 }));
+    expect(dto.messages[0].content.image?.url).toBe('123');
+  });
+});
+
+// @nestjs/swagger does not derive bounds from the validators, so the published schema has to declare
+// them itself, or a client generated from it accepts arrays the server answers with a 400.
+describe('SendBulkMessageDto published schema', () => {
+  const published = (dto: object, key: string): Record<string, unknown> | undefined =>
+    Reflect.getMetadata(DECORATORS.API_MODEL_PROPERTIES, dto, key) as Record<string, unknown> | undefined;
+
+  it('publishes the batch size cap', () => {
+    expect(published(SendBulkMessageDto.prototype, 'messages')?.maxItems).toBe(BULK_MESSAGES_MAX);
+  });
+
+  it('publishes the mention list bounds', () => {
+    expect(published(BulkMessageContentDto.prototype, 'mentions')).toMatchObject({
+      maxItems: MENTIONS_MAX,
+      items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+    });
   });
 });

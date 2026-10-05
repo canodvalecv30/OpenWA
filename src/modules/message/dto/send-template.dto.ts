@@ -4,7 +4,6 @@ import {
   IsNotEmpty,
   IsOptional,
   IsObject,
-  ValidateIf,
   IsArray,
   ArrayMaxSize,
   MaxLength,
@@ -31,7 +30,6 @@ export class SendTemplateMessageDto {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
-  @ValidateIf((o: SendTemplateMessageDto) => !o.templateName)
   templateId?: string;
 
   @ApiPropertyOptional({
@@ -41,7 +39,6 @@ export class SendTemplateMessageDto {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
-  @ValidateIf((o: SendTemplateMessageDto) => !o.templateId)
   templateName?: string;
 
   @ApiPropertyOptional({
@@ -55,7 +52,13 @@ export class SendTemplateMessageDto {
   // The rendered body is dispatched through the same path as send-text, so it carries the same two
   // optionals. `quotedMessageId` is deliberately NOT among them: docs/06 publishes this route as one
   // that rejects it.
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)

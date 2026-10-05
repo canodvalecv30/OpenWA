@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindManyOptions, In, LessThan, Repository } from 'typeorm';
+import { FindManyOptions, In, IsNull, LessThan, MoreThan, Not, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Webhook } from './entities/webhook.entity';
 import { WebhookDeliveryFailure } from './entities/webhook-delivery-failure.entity';
@@ -10,6 +10,7 @@ import { createLogger } from '../../common/services/logger.service';
 import { resolveSessionScope } from '../../common/security/session-scope';
 import { ListOptions, resolveListWindow } from '../../common/utils/paginate';
 import { generateDeliveryId } from './utils/idempotency.util';
+import { buildDeliveryHeaders } from './utils/deliver-once';
 import {
   assertSafeFetchUrl,
   withSafeFetch,
@@ -41,6 +42,7 @@ const DEFAULT_WEBHOOK_MAX_PER_SESSION = 16;
 export class WebhookService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = createLogger('WebhookService');
   private cleanupTimer?: ReturnType<typeof setInterval>;
+  private payloadCleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     @InjectRepository(Webhook, 'data')
@@ -55,11 +57,12 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Periodically prune webhook_delivery_failures older than WEBHOOK_FAILURE_RETENTION_DAYS
-   * (default 90; set <= 0 to disable). Runs once at startup, then daily. The table is an append-only
-   * log written on every terminally-failed delivery, so without this it grows without bound under a
-   * receiver outage. (Mirrors AuditService's audit-log retention.)
+   * (default 90; set <= 0 to disable). Runs once at startup, then daily. The table records every
+   * failed or unsent delivery (a later successful delivery removes its row), so without this it grows
+   * without bound under a receiver outage. (Mirrors AuditService's audit-log retention.)
    */
   onModuleInit(): void {
+    this.schedulePayloadPrune();
     const parsed = Number.parseInt(process.env.WEBHOOK_FAILURE_RETENTION_DAYS ?? '', 10);
     const retentionDays = Number.isInteger(parsed) ? Math.max(0, parsed) : 90;
     if (retentionDays <= 0) {
@@ -84,6 +87,9 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
     }
+    if (this.payloadCleanupTimer) {
+      clearInterval(this.payloadCleanupTimer);
+    }
   }
 
   /**
@@ -94,6 +100,47 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     cutoff.setDate(cutoff.getDate() - olderThanDays);
     const result = await this.failureRepository.delete({ createdAt: LessThan(cutoff) });
     return result.affected || 0;
+  }
+
+  /**
+   * Clear the replay payload of every failure row recorded more than `olderThanHours` ago; the row
+   * itself stays for WEBHOOK_FAILURE_RETENTION_DAYS. 0 clears every stored payload. Returns the
+   * number of rows cleared.
+   */
+  async pruneDeliveryFailurePayloads(olderThanHours: number): Promise<number> {
+    const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
+    const result = await this.failureRepository.update(
+      { payload: Not(IsNull()), createdAt: LessThan(cutoff) },
+      { payload: null },
+    );
+    return result.affected || 0;
+  }
+
+  /**
+   * WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS bounds how long a failure row holds a whole event body.
+   * With the knob on, expired payloads are cleared at startup and then hourly. With it off (0, the
+   * default) nothing new is stored, and one startup pass clears what an earlier setting left behind,
+   * so turning the feature off also stops keeping the bodies it already stored.
+   */
+  private schedulePayloadPrune(): void {
+    const hours = this.configService.get<number>('webhook.failurePayloadRetentionHours', 0);
+    const runPrune = (): void => {
+      this.pruneDeliveryFailurePayloads(hours)
+        .then(n => {
+          if (n > 0) this.logger.log(`Cleared the replay payload of ${n} webhook delivery-failure(s)`);
+        })
+        .catch(err =>
+          this.logger.error(
+            'Webhook delivery-failure payload cleanup failed',
+            err instanceof Error ? err.stack : String(err),
+          ),
+        );
+    };
+    runPrune();
+    if (hours > 0) {
+      this.payloadCleanupTimer = setInterval(runPrune, 60 * 60 * 1000);
+      this.payloadCleanupTimer.unref?.();
+    }
   }
 
   /**
@@ -194,17 +241,35 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
   async listDeliveryFailures(
     opts: ListOptions & { sessionId?: string } = {},
     allowedSessions?: string[] | null,
-  ): Promise<WebhookDeliveryFailure[]> {
+  ): Promise<Array<WebhookDeliveryFailure & { replayable: boolean }>> {
     const { limit, offset } = resolveListWindow(opts.limit, opts.offset);
     const sessionScope = resolveSessionScope(allowedSessions, opts.sessionId);
     if (sessionScope !== null && sessionScope.length === 0) return []; // requested session outside the key's scope
-    return this.failureRepository.find({
+    const rows = await this.failureRepository.find({
       where: sessionScope ? { sessionId: In(sessionScope) } : {},
       // A receiver outage writes a burst of failures inside one second; `id` keeps the page order total.
       order: { createdAt: 'DESC', id: 'DESC' },
       take: limit,
       skip: offset,
     });
+    // `payload` is select: false, so the page above never carries an event body. Which rows hold one
+    // is a second, id-only read; with payload retention off no row does and it matches nothing.
+    const replayable = new Set<string>();
+    const hours = this.configService.get<number>('webhook.failurePayloadRetentionHours', 0);
+    if (rows.length > 0 && hours > 0) {
+      const withPayload = await this.failureRepository.find({
+        select: { id: true },
+        where: {
+          id: In(rows.map(r => r.id)),
+          payload: Not(IsNull()),
+          attempts: MoreThan(0),
+          idempotencyKey: Not(IsNull()),
+          createdAt: MoreThan(new Date(Date.now() - hours * 60 * 60 * 1000)),
+        },
+      });
+      for (const r of withPayload) replayable.add(r.id);
+    }
+    return rows.map(r => Object.assign(r, { replayable: replayable.has(r.id) }));
   }
 
   async findOne(sessionId: string, id: string): Promise<Webhook> {
@@ -219,21 +284,32 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
 
   async update(sessionId: string, id: string, dto: UpdateWebhookDto): Promise<Webhook> {
     const webhook = await this.findOne(sessionId, id);
+    const patch: Partial<Pick<Webhook, 'url' | 'events' | 'secret' | 'headers' | 'filters' | 'active' | 'retryCount'>> =
+      {};
 
-    if (dto.url !== undefined) {
+    // An unchanged URL is not re-validated: every edit re-sends it, so a webhook whose host stopped
+    // resolving or became SSRF-blocked could not otherwise be deactivated or re-filtered. Delivery
+    // still checks the URL on every send.
+    if (dto.url !== undefined && dto.url !== webhook.url) {
       await this.validateWebhookUrl(dto.url);
-      webhook.url = dto.url;
+      patch.url = dto.url;
     }
-    if (dto.events !== undefined) webhook.events = dto.events;
+    if (dto.events !== undefined) patch.events = dto.events;
     // Normalize empty string to null (parity with create) — an empty secret means "no HMAC",
     // not a stored blank that silently disables signing while looking configured.
-    if (dto.secret !== undefined) webhook.secret = dto.secret || null;
-    if (dto.headers !== undefined) webhook.headers = dto.headers;
-    if (dto.filters !== undefined) webhook.filters = dto.filters;
-    if (dto.active !== undefined) webhook.active = dto.active;
-    if (dto.retryCount !== undefined) webhook.retryCount = dto.retryCount;
+    if (dto.secret !== undefined) patch.secret = dto.secret || null;
+    if (dto.headers !== undefined) patch.headers = dto.headers;
+    if (dto.filters !== undefined) patch.filters = dto.filters;
+    if (dto.active !== undefined) patch.active = dto.active;
+    if (dto.retryCount !== undefined) patch.retryCount = dto.retryCount;
+    if (Object.keys(patch).length === 0) return webhook;
 
-    return this.webhookRepository.save(webhook);
+    // A conditional UPDATE of the carried fields, not save() of the entity read above: save() would
+    // re-insert a row a concurrent DELETE removed during the URL check, and write back stale values
+    // of every column this request did not touch.
+    const result = await this.webhookRepository.update({ id, sessionId }, patch);
+    if (!result.affected) throw new NotFoundException(`Webhook with id '${id}' not found`);
+    return this.findOne(sessionId, id);
   }
 
   async delete(sessionId: string, id: string): Promise<void> {
@@ -261,20 +337,8 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     };
 
     const body = JSON.stringify(testPayload);
-    const headers: Record<string, string> = {
-      // Custom headers FIRST so the system headers below always win.
-      ...this.delivery.sanitizeCustomHeaders(webhook.headers),
-      'Content-Type': 'application/json',
-      'User-Agent': 'OpenWA-Webhook/1.0.0',
-      'X-OpenWA-Event': 'test',
-      'X-OpenWA-Idempotency-Key': testPayload.idempotencyKey,
-      'X-OpenWA-Delivery-Id': testPayload.deliveryId,
-      'X-OpenWA-Retry-Count': '0',
-    };
-
-    if (webhook.secret) {
-      headers['X-OpenWA-Signature'] = this.delivery.generateSignature(body, webhook.secret);
-    }
+    // The same header builder as a real delivery, so the probe tests what the receiver will get.
+    const headers = buildDeliveryHeaders(webhook, 'test', testPayload.idempotencyKey, deliveryId, body);
 
     try {
       return await withSafeFetch(

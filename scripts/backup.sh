@@ -49,6 +49,12 @@
 # sqlite3 CLI is unavailable the databases are plain-copied (possibly torn if the app is live) and
 # the archive carries a CONSISTENCY-WARNING marker that restore.sh surfaces.
 #
+# Engine authentication state (sessions/, baileys/) is copied, not snapshotted: the engines rewrite
+# it while they run, so an online backup can hold a copy torn mid-write. When a whatsapp-web.js
+# profile is open or Baileys state is present, the archive carries an ENGINE-STATE-NOTE that
+# restore.sh prints without refusing (--strict gates only the database marker). For a copy that is
+# consistent by construction, stop the sessions (or the container) first.
+#
 set -euo pipefail
 # The archive now contains bootstrap credentials and generated database secrets. Never inherit a
 # permissive operator umask for newly-created backup artifacts.
@@ -121,6 +127,46 @@ EOF
   echo "plain-copied: $1" >>"$CONSISTENCY_WARNING"
 }
 
+ENGINE_STATE_NOTE="$STAGE/ENGINE-STATE-NOTE"
+
+# Marker file shipped INSIDE the archive: engine auth state was copied while an engine may have been
+# writing it. Separate from the database marker so restore.sh --strict does not refuse every online
+# backup; a torn auth copy costs a re-pair, not data.
+record_engine_state_note() {
+  if [ ! -f "$ENGINE_STATE_NOTE" ]; then
+    cat >"$ENGINE_STATE_NOTE" <<'EOF'
+The engine authentication state listed below was copied while the app may have been writing it:
+these directories are plain copies. This note does not cover the databases; a CONSISTENCY-WARNING
+in the same archive does. If a restored session does not reconnect, pair it again, or re-take the
+backup with the sessions (or the container) stopped.
+EOF
+  fi
+  echo "$1" >>"$ENGINE_STATE_NOTE"
+  log "WARN: engine auth state may have been written during the copy; a restore may need re-pairing: $1"
+}
+
+# copy_live_tree <src> <dest> [label] - cp -pRH, except that a file the app deleted or renamed while
+# cp walked the tree (Chromium cache and LevelDB churn, the Baileys store's temp files and consumed
+# keys, media retention and plugin storage writes) is a torn copy, not a failed backup. With a label
+# the copy is engine auth state and goes in ENGINE-STATE-NOTE; without one it is only logged. Every
+# other cp error stays fatal. cp runs in the C locale so the error text matched here is the one it
+# prints, and grep reads a here-string: piped from printf, a grep -q that stops at the first fatal line
+# breaks the pipe once the errors outgrow its buffer, and pipefail then reads a failure as benign.
+copy_live_tree() {
+  local err
+  if ! err="$(LC_ALL=C cp -pRH "$1" "$2" 2>&1)"; then
+    if grep -qv 'No such file or directory' <<<"$err"; then
+      printf '%s\n' "$err" >&2
+      exit 1
+    fi
+    if [ -n "${3:-}" ]; then
+      record_engine_state_note "$3 (files changed during the copy)"
+    else
+      log "WARN: files under $1 changed during the copy"
+    fi
+  fi
+}
+
 # Online SQLite backup (consistent without stopping the app) when sqlite3 is present. A missing
 # source database is FATAL: an archive without the configured databases is not a backup, and a
 # silent skip is how an empty archive gets reported as "Backup complete".
@@ -133,7 +179,14 @@ backup_sqlite() {
     exit 1
   fi
   if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$src" ".backup '$dest'"
+    # The app writes in rollback-journal mode, and a bare .backup gave up on the first lock it met and
+    # restarted after every outside write, so a busy gateway never got a backup. The read transaction
+    # lets the copy finish in one pass, but it blocks every app write, and with it the app's event
+    # loop, until the copy ends, and a write that outlasts the app's SQLite busy timeout fails. The
+    # busy timeout here waits out a commit, and -init /dev/null keeps the operator's sqlite3 rc file
+    # out of the run.
+    sqlite3 -init /dev/null -cmd ".timeout 30000" "$src" \
+      "BEGIN" "SELECT count(*) FROM sqlite_master" ".backup '$dest'" "COMMIT" >/dev/null
   else
     log "WARN: sqlite3 not found — plain-copying live database $src (the snapshot may be torn)"
     cp "$src" "$dest"
@@ -178,28 +231,42 @@ fi
 # linked back is archived by its content. Without it the archive held only the link, with no data.
 if [ -d "$SESSIONS_DIR" ]; then
   log "Backing up whatsapp-web.js sessions"
-  cp -pRH "$SESSIONS_DIR" "$STAGE/sessions"
+  copy_live_tree "$SESSIONS_DIR" "$STAGE/sessions" sessions/
+  # Chromium holds a SingletonLock (a symlink, so not `-e`) in every profile it has open. A browser
+  # killed outright (force-kill, a stop that timed out) leaves its lock behind until the next launch
+  # or container start clears it, so a lock here means the profile is open or was last hard-killed.
+  OPEN_PROFILES="$({
+    find -H "$SESSIONS_DIR" -mindepth 2 -maxdepth 2 -name SingletonLock -exec dirname {} \; 2>/dev/null || true
+  } | sed 's|.*/||' | sort | tr '\n' ' ')"
+  if [ -n "$OPEN_PROFILES" ]; then
+    record_engine_state_note "sessions/ (whatsapp-web.js profiles holding a Chromium SingletonLock, open or left by a killed browser: ${OPEN_PROFILES% })"
+  fi
 else
   log "WARN: $SESSIONS_DIR not found — skipping sessions"
 fi
 
 if [ -d "$BAILEYS_DIR" ]; then
   log "Backing up Baileys authentication state"
-  cp -pRH "$BAILEYS_DIR" "$STAGE/baileys"
-elif [ "${ENGINE_TYPE:-}" = "baileys" ]; then
+  copy_live_tree "$BAILEYS_DIR" "$STAGE/baileys" baileys/
+  # Baileys rewrites creds.json and its key files during normal traffic and leaves no sign of being
+  # live, so any session's state counts, stopped or not.
+  if [ -n "$(find -H "$BAILEYS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; then
+    record_engine_state_note "baileys/ (recorded whenever Baileys state exists; it cannot show whether it was live)"
+  fi
+elif [ "$(openwa_resolve ENGINE_TYPE '')" = "baileys" ]; then
   log "WARN: ENGINE_TYPE=baileys but $BAILEYS_DIR was not found — restored sessions will require pairing"
 fi
 
 if [ -d "$MEDIA_DIR" ]; then
   log "Backing up local media"
-  cp -pRH "$MEDIA_DIR" "$STAGE/media"
+  copy_live_tree "$MEDIA_DIR" "$STAGE/media"
 else
   log "WARN: $MEDIA_DIR not found; skipping local media"
 fi
 
 if [ -d "$PLUGIN_PACKAGES_DIR" ]; then
   log "Backing up installed plugin packages"
-  cp -pRH "$PLUGIN_PACKAGES_DIR" "$STAGE/plugin-packages"
+  copy_live_tree "$PLUGIN_PACKAGES_DIR" "$STAGE/plugin-packages"
 fi
 
 # With PLUGINS_DIR unset the app also loads packages from ./plugins, its default up to 0.12.1 (see
@@ -212,7 +279,7 @@ fi
 
 if [ -d "$PLUGIN_STATE_DIR" ]; then
   log "Backing up plugin registry and persisted state"
-  cp -pRH "$PLUGIN_STATE_DIR" "$STAGE/plugin-state"
+  copy_live_tree "$PLUGIN_STATE_DIR" "$STAGE/plugin-state"
 fi
 
 if [ -f "$GENERATED_ENV" ]; then
@@ -232,10 +299,12 @@ ARCHIVE_LIST="$(tar -tzf "$ARCHIVE")"
 
 # Min-content check on the finished archive: every configured database must be present. If not,
 # delete the defective archive and fail — leaving it on disk invites a restore into a fresh-empty
-# install (new API keys, new master key) reported as success.
+# install (new API keys, new master key) reported as success. grep reads a here-string, not a pipe: a
+# grep -q that matches early stops reading, and on a listing larger than the pipe buffer the broken pipe
+# made pipefail report a member that is there as missing.
 MISSING_MEMBERS=""
 for member in "${REQUIRED_MEMBERS[@]}"; do
-  if ! printf '%s\n' "$ARCHIVE_LIST" | grep -qxF "$member"; then
+  if ! grep -qxF "$member" <<<"$ARCHIVE_LIST"; then
     MISSING_MEMBERS="$MISSING_MEMBERS $member"
   fi
 done

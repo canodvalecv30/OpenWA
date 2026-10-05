@@ -10,14 +10,16 @@ import { InstanceThrottlerGuard } from './instance-throttler.guard';
 // @Public so the global ApiKeyGuard early-returns (providers can't present an API key). The
 // controller-level @SkipThrottle below exempts the GLOBAL per-IP guard (see its comment).
 // The provider body is read as RAW bytes from req.rawBody (stashed by the json() verify callback in
-// main.ts) — it is intentionally NOT DTO-bound, so the global ValidationPipe never 400s on the
+// src/configure-app.ts) — it is intentionally NOT DTO-bound, so the global ValidationPipe never 400s on the
 // provider's unknown keys, and the exact signed bytes reach the HMAC verifier.
 @ApiTags('integration')
 @Public()
 // The global per-IP throttle SKIPS this route (its medium tier, 100/min by default, sits below the
 // per-instance limit's 120/min, so a provider delivering every tenant's webhooks from one shared
-// egress IP was 429'd at the IP tier before the instance bound ever fired). Fairness here is the
-// InstanceThrottlerGuard's job: keyed on (pluginId, instanceId), a noisy tenant sheds alone.
+// egress IP was 429'd at the IP tier before the instance bound ever fired). InstanceThrottlerGuard
+// bounds each client instead, and IngressService charges a per-(pluginId, instanceId) bucket once a
+// delivery's signature verifies. The client tier counts every request, including one the instance
+// bucket then sheds, so a tenant pushing one shared IP past INGRESS_IP_LIMIT sheds its neighbours too.
 @SkipThrottle()
 @Controller('ingress')
 export class IngressController {
@@ -26,17 +28,14 @@ export class IngressController {
   // Express 5 (path-to-regexp v8) has no bare `*` — Nest's route converter rewrites it to the named
   // wildcard `*path`, so the trailing segments land in req.params.path (an array), not req.params[0].
   //
-  // InstanceThrottlerGuard carries this route's rate bounds: the global per-IP guard skips this
-  // controller (@SkipThrottle above) because its medium tier (100/min) sits below this guard's
-  // per-instance default (120/min), which 429'd every tenant of a shared-egress-IP provider at
-  // the IP tier before the instance bound ever fired. This guard ignores the bare @SkipThrottle
-  // (see its shouldSkip) and enforces TWO buckets: one keyed on (pluginId, instanceId), so a noisy
-  // tenant sheds alone, and one keyed on the client IP, because the first key comes from the path
-  // the caller supplies and would otherwise leave this @Public route with no bound it cannot walk
-  // around. Their limits/ttl (INGRESS_INSTANCE_LIMIT / INGRESS_INSTANCE_TTL / INGRESS_IP_LIMIT) are
-  // read directly by the guard itself, NOT via @Throttle: @Throttle metadata is reflected on the
-  // route and read by every ThrottlerGuard subclass that walks a tier of that name. See
-  // InstanceThrottlerGuard's onModuleInit for how it keeps its tiers fully independent.
+  // Two rate bounds, neither from the global per-IP guard (skipped via @SkipThrottle above, because
+  // its medium tier of 100/min sits below the per-instance default of 120/min and 429'd every
+  // tenant of a shared-egress-IP provider). InstanceThrottlerGuard ignores the bare @SkipThrottle
+  // (see its shouldSkip) and bounds each client IP before anything else (INGRESS_IP_LIMIT). The
+  // per-(pluginId, instanceId) bucket (INGRESS_INSTANCE_LIMIT) is charged by IngressService only
+  // after the signature verifies. Both windows use INGRESS_INSTANCE_TTL. The limits are read from the
+  // environment, NOT via @Throttle: @Throttle metadata is reflected on the route and read by every
+  // ThrottlerGuard subclass that walks a tier of that name.
   @UseGuards(InstanceThrottlerGuard)
   @All(':pluginId/:instanceId/*path')
   // The wildcard segment is part of the published path template, so it needs a parameter of its own —
@@ -61,10 +60,18 @@ export class IngressController {
     status: 202,
     description: 'Webhook accepted and queued for async plugin processing (the primary success path).',
   })
+  @ApiResponse({
+    status: 400,
+    description: 'The path or query contains an encoded NUL (`%00`), or a JSON body does not parse.',
+  })
   @ApiResponse({ status: 401, description: 'Signature verification failed (missing, stale, or wrong secret).' })
   @ApiResponse({ status: 403, description: 'GET verification challenge failed (verifyToken mismatch).' })
   @ApiResponse({ status: 404, description: 'Unknown pluginId/instanceId, or no route claimed by the plugin.' })
   @ApiResponse({ status: 413, description: 'Request body exceeds the route maxBodyBytes limit.' })
+  @ApiResponse({
+    status: 415,
+    description: 'Request body is not `application/json` or `application/x-www-form-urlencoded`.',
+  })
   @ApiResponse({
     status: 429,
     description:
@@ -73,7 +80,7 @@ export class IngressController {
   @ApiResponse({
     status: 503,
     description:
-      "A route whose response contract declares a `session-alive` preflight, when the bound session's engine is not connected. The delivery is not persisted, so the provider's retry is treated as a new one; `Retry-After` carries the delay.",
+      "A route whose response contract declares a `session-alive` preflight, when the bound session has no running engine or its engine has failed (a starting, reconnecting or QR-pending session is answered with the route's ack). The delivery is not persisted, so the provider's retry is treated as a new one; `Retry-After` carries the delay.",
   })
   async receive(
     @Param('pluginId') pluginId: string,
@@ -106,6 +113,11 @@ export class IngressController {
       ]),
     );
     const rawBody = req.rawBody?.toString('utf8') ?? '';
+    // Only json() and urlencoded() capture req.rawBody, so a body in any other content type reaches
+    // here unread; the service refuses it rather than handling it as the empty body.
+    const unparsedBody =
+      req.rawBody === undefined &&
+      (Number(headers['content-length'] || 0) > 0 || headers['transfer-encoding'] !== undefined);
     const result = await this.ingress.handle({
       pluginId,
       instanceId,
@@ -114,6 +126,7 @@ export class IngressController {
       headers,
       query: flatQuery,
       rawBody,
+      unparsedBody,
     });
     if (result.headers) res.set(safeAckHeaders(result.headers));
     // Both reflections echo provider-controlled strings (hub.challenge, the ack template). Express

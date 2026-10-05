@@ -32,13 +32,8 @@ describe('SendImageStatusDto recipients validation', () => {
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 
-  it('rejects malformed JIDs', async () => {
-    const errors = await validate(
-      plainToInstance(SendImageStatusDto, {
-        image: valid.image,
-        recipients: ['not-a-jid', '123@g.us', '@c.us', 'abc@lid'],
-      }),
-    );
+  it.each(['not-a-jid', '123@g.us', '@c.us', 'abc@lid'])('rejects the malformed JID %s', async jid => {
+    const errors = await validate(plainToInstance(SendImageStatusDto, { image: valid.image, recipients: [jid] }));
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 
@@ -79,13 +74,8 @@ describe('SendVideoStatusDto recipients validation', () => {
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 
-  it('rejects malformed JIDs', async () => {
-    const errors = await validate(
-      plainToInstance(SendVideoStatusDto, {
-        video: valid.video,
-        recipients: ['not-a-jid', '123@g.us', '@c.us', 'abc@lid'],
-      }),
-    );
+  it.each(['not-a-jid', '123@g.us', '@c.us', 'abc@lid'])('rejects the malformed JID %s', async jid => {
+    const errors = await validate(plainToInstance(SendVideoStatusDto, { video: valid.video, recipients: [jid] }));
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 

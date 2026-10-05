@@ -178,22 +178,31 @@ export class InfraStorageController implements OnApplicationBootstrap {
     const writeStream = fs.createWriteStream(exportPath);
     stream.pipe(writeStream);
 
-    await new Promise<void>((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      // The archive is filled while it is written: destroying the source stops the export from
-      // opening further files once the sink has failed.
-      writeStream.on('error', (err: Error) => {
-        stream.destroy();
-        reject(err);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        writeStream.on('finish', resolve);
+        // The archive is filled while it is written: destroying the source stops the export from
+        // opening further files once the sink has failed.
+        writeStream.on('error', (err: Error) => {
+          stream.destroy();
+          reject(err);
+        });
+        // pipe() does NOT forward source errors: an archiver/gzip failure surfaces as an 'error' event on
+        // the source stream, which without a listener crashes the process. Fail the request instead and
+        // tear down the sink so its fd isn't held open waiting for a 'finish' that never comes.
+        stream.on('error', (err: Error) => {
+          writeStream.destroy();
+          reject(err);
+        });
       });
-      // pipe() does NOT forward source errors: an archiver/gzip failure surfaces as an 'error' event on
-      // the source stream, which without a listener crashes the process. Fail the request instead and
-      // tear down the sink so its fd isn't held open waiting for a 'finish' that never comes.
-      stream.on('error', (err: Error) => {
-        writeStream.destroy();
-        reject(err);
-      });
-    });
+    } catch (error) {
+      // The TTL sweep below only covers a finished archive; a failed one would otherwise stay on the
+      // data volume until a restart a day later. Wait for the sink to close so the unlink cannot race
+      // an open that is still pending.
+      if (!writeStream.closed) await new Promise<void>(resolve => writeStream.once('close', () => resolve()));
+      await fs.promises.unlink(exportPath).catch(() => undefined);
+      throw error;
+    }
 
     // Sweep the throwaway archive so repeated exports don't accumulate on the data volume.
     const ttlRaw = Number.parseInt(process.env.STORAGE_EXPORT_TTL_MS ?? '', 10);
@@ -225,6 +234,12 @@ export class InfraStorageController implements OnApplicationBootstrap {
   // string while the handler takes an object.
   @ApiBody({ type: ImportStorageDto, description: 'Path to tar.gz file to import' })
   @ApiResponse({ status: 200, description: 'Import result', type: StorageImportResponseDto })
+  @ApiResponse({
+    status: 400,
+    description:
+      '`filePath` is outside the data directory or does not exist, or the archive could not be read or ' +
+      'broke a resource cap. Entries written before an abort are kept.',
+  })
   @ApiResponse({ status: 503, description: S3_UNAVAILABLE_DESCRIPTION })
   async importStorage(
     @Body() body: ImportStorageDto,
@@ -257,7 +272,20 @@ export class InfraStorageController implements OnApplicationBootstrap {
     try {
       ({ imported: count, failed } = await this.storageService.importFromStream(readStream));
     } catch (error) {
-      throw new BadRequestException(`Storage import failed: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      // An abort keeps the entries written before it (there is no rollback), so it is audited too,
+      // with the partial counts when the import attaches them to its rejection, so the row says how much changed.
+      const partial = error as { imported?: number; failed?: number } | null | undefined;
+      await this.auditService?.logWarn(AuditAction.INFRA_STORAGE_IMPORTED, {
+        metadata: {
+          aborted: true,
+          error: message,
+          storageType: this.storageService.getCurrentStorageType(),
+          count: partial?.imported,
+          failed: partial?.failed,
+        },
+      });
+      throw new BadRequestException(`Storage import failed: ${message}`);
     }
     const storageType = this.storageService.getCurrentStorageType();
 

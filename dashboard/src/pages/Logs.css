@@ -85,7 +85,7 @@
 /* Unified row styling - same class for header and data */
 .logs-page .logs-table .table-row {
   display: grid;
-  grid-template-columns: 180px 200px 150px 150px 150px 1fr 120px;
+  grid-template-columns: 180px 200px 150px 150px 150px 1fr;
   gap: 1rem;
   padding: 1rem 1.5rem;
   align-items: center;
@@ -133,14 +133,6 @@
 .logs-page .ip {
   font-family: monospace;
   font-size: 0.8125rem;
-  white-space: nowrap;
-}
-
-.logs-page .details {
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

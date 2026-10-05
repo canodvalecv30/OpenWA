@@ -1,5 +1,7 @@
 import { randomBytes } from 'crypto';
 import { PassThrough, Readable } from 'stream';
+import * as tar from 'tar-stream';
+import { createGzip } from 'zlib';
 
 // archiver v8 is ESM-only and ts-jest cannot load it here. This stand-in keeps the parts of its
 // TarArchive contract the export relies on: a stream entry with a known size is piped straight into
@@ -57,10 +59,19 @@ const contentFor = (name: string): Buffer => {
 };
 
 /** An openFile that counts the file streams open at once and the files ever opened. */
-function trackingOpener(failing: Record<string, 'open' | 'read'> = {}, withSize = true) {
+function trackingOpener(failing: Record<string, 'gone' | 'bucket' | 'open' | 'read'> = {}, withSize = true) {
   const stats = { opened: 0, open: 0, maxOpen: 0 };
   const openFile = (name: string): Promise<ExportFileSource> => {
-    if (failing[name] === 'open') return Promise.reject(new Error(`ENOENT: ${name}`));
+    if (failing[name] === 'gone')
+      return Promise.reject(Object.assign(new Error(`ENOENT: ${name}`), { code: 'ENOENT' }));
+    if (failing[name] === 'bucket')
+      return Promise.reject(
+        Object.assign(new Error('The specified bucket does not exist'), {
+          name: 'NoSuchBucket',
+          $metadata: { httpStatusCode: 404 },
+        }),
+      );
+    if (failing[name] === 'open') return Promise.reject(new Error(`SlowDown: ${name}`));
     const data = contentFor(name);
     stats.opened++;
     stats.open++;
@@ -110,8 +121,8 @@ describe('createExportStream streams one file at a time', () => {
     output.destroy();
   });
 
-  it('holds one file stream open at a time, skips an unopenable file, and round-trips the rest', async () => {
-    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'open' });
+  it('holds one file stream open at a time, skips a file deleted since the listing, and round-trips the rest', async () => {
+    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'gone' });
     const logger = makeLogger();
     const output = await createExportStream(() => Promise.resolve(files), openFile, logger as never);
 
@@ -122,6 +133,36 @@ describe('createExportStream streams one file at a time', () => {
     expect(logger.warn).toHaveBeenCalledWith('Failed to export file: media/file-c.bin', expect.anything());
     expect([...imported.keys()].sort()).toEqual(files.filter(f => f !== 'media/file-c.bin'));
     for (const [name, data] of imported) expect(data.equals(contentFor(name))).toBe(true);
+  });
+
+  it('fails the output when a listed file cannot be opened for any other reason', async () => {
+    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'open' });
+    const output = await createExportStream(() => Promise.resolve(files), openFile, makeLogger() as never);
+
+    const error = await new Promise<Error>(resolve => {
+      output.on('error', resolve);
+      output.resume();
+    });
+    await settle(20);
+
+    expect(error.message).toBe('SlowDown: media/file-c.bin');
+    expect(stats.opened).toBe(2);
+  });
+
+  it('fails the output when the bucket itself is gone, not only one object', async () => {
+    const { stats, openFile } = trackingOpener({ 'media/file-c.bin': 'bucket' });
+    const logger = makeLogger();
+    const output = await createExportStream(() => Promise.resolve(files), openFile, logger as never);
+
+    const error = await new Promise<Error>(resolve => {
+      output.on('error', resolve);
+      output.resume();
+    });
+    await settle(20);
+
+    expect(error.name).toBe('NoSuchBucket');
+    expect(stats.opened).toBe(2);
+    expect(logger.warn).not.toHaveBeenCalledWith('Failed to export file: media/file-c.bin', expect.anything());
   });
 
   it('still exports a file whose size the backend did not report', async () => {
@@ -176,5 +217,60 @@ describe('importFromStream reports refused writes', () => {
     );
 
     expect(result).toEqual({ imported: 0, failed: names.length });
+  });
+});
+
+describe('importFromStream writes regular files only', () => {
+  it('skips directory and link entries and drops a leading ./ from the key', async () => {
+    const pack = tar.pack();
+    pack.entry({ name: './', type: 'directory' });
+    pack.entry({ name: './status/', type: 'directory' });
+    pack.entry({ name: './status/link.jpg', type: 'symlink', linkname: 'a.jpg' });
+    pack.entry({ name: './status/hard.jpg', type: 'link', linkname: './status/a.jpg' });
+    pack.entry({ name: './status/a.jpg' }, Buffer.from('jpeg!!'));
+    pack.finalize();
+    const written = new Map<string, Buffer>();
+
+    const result = await importFromStream(
+      pack.pipe(createGzip()),
+      (name, data) => {
+        written.set(name, data);
+        return Promise.resolve();
+      },
+      makeLogger() as never,
+    );
+
+    expect([...written.keys()]).toEqual(['status/a.jpg']);
+    expect(written.get('status/a.jpg')?.toString()).toBe('jpeg!!');
+    expect(result).toEqual({ imported: 1, failed: 0 });
+  });
+});
+
+describe('importFromStream reports partial counts on an abort', () => {
+  it('carries the entries already written on an entry-cap rejection', async () => {
+    const prev = process.env.STORAGE_IMPORT_MAX_ENTRIES;
+    process.env.STORAGE_IMPORT_MAX_ENTRIES = '2';
+    const pack = tar.pack();
+    for (const name of ['a.jpg', 'b.jpg', 'c.jpg']) pack.entry({ name }, Buffer.from(name));
+    pack.finalize();
+    const written: string[] = [];
+    try {
+      const rejection = await importFromStream(
+        pack.pipe(createGzip()),
+        name => {
+          written.push(name);
+          return Promise.resolve();
+        },
+        makeLogger() as never,
+      ).catch((err: unknown) => err);
+
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toMatch(/2-entry limit/);
+      expect(rejection).toMatchObject({ imported: 2, failed: 0 });
+      expect(written).toEqual(['a.jpg', 'b.jpg']);
+    } finally {
+      if (prev === undefined) delete process.env.STORAGE_IMPORT_MAX_ENTRIES;
+      else process.env.STORAGE_IMPORT_MAX_ENTRIES = prev;
+    }
   });
 });

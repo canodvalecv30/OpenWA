@@ -65,7 +65,8 @@ export function applyIncomingToChatList<T extends ChatListEntry>(
   target.lastMessage = msg.type === 'location' ? opts.locationLabel : msg.body;
   target.timestamp = msg.timestamp;
   if (!msg.fromMe && opts.activeChatId !== target.id) {
-    target.unreadCount = (target.unreadCount || 0) + 1;
+    // A chat marked unread carries -1; the first message into it counts as 1, not 0.
+    target.unreadCount = Math.max(target.unreadCount ?? 0, 0) + 1;
   }
   updated.splice(index, 1);
   updated.unshift(target);

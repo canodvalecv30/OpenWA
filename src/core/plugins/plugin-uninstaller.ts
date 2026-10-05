@@ -29,11 +29,13 @@ export class PluginUninstaller {
     private readonly pluginsDir: string,
     /** The lifecycle's unload — passed as a callback so this file never imports the lifecycle back. */
     private readonly unload: (pluginId: string) => Promise<void>,
+    /** The legacy plugin tree the boot scan also loads from, or null when PLUGINS_DIR is set. */
+    private readonly legacyPluginsDir: string | null = null,
   ) {}
 
-  /** <plugins.dir>/<id> for an id with no loaded package, or null if the id escapes that root. */
-  private resolveUninstallDir(pluginId: string): string | null {
-    const base = path.resolve(this.pluginsDir);
+  /** <root>/<id> for an id with no loaded package, or null if the id escapes that root. */
+  private resolveUninstallDir(root: string, pluginId: string): string | null {
+    const base = path.resolve(root);
     const dir = path.resolve(base, pluginId);
     return dir !== base && dir.startsWith(base + path.sep) ? dir : null;
   }
@@ -61,9 +63,20 @@ export class PluginUninstaller {
 
     // A recorded directory came from the boot scan and is already contained. Without one the id is
     // the only input, so it stays behind the traversal guard against the configured root.
-    const dir = recordedDir ?? this.resolveUninstallDir(pluginId);
+    const dir = recordedDir ?? this.resolveUninstallDir(this.pluginsDir, pluginId);
     if (dir && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+    // The legacy tree can still hold a copy the scan would load again on the next boot (as a new
+    // plugin, config lost): the package of a plugin that failed to load (its registry entry survives
+    // the boot scan but no runtime record does), or a copy the scan skipped as a duplicate because
+    // the same id loaded from the configured tree. When the recorded dir was the legacy copy it is
+    // already gone above, and this is a no-op.
+    if (this.legacyPluginsDir) {
+      const legacyDir = this.resolveUninstallDir(this.legacyPluginsDir, pluginId);
+      if (legacyDir && fs.existsSync(path.join(legacyDir, 'manifest.json'))) {
+        fs.rmSync(legacyDir, { recursive: true, force: true });
+      }
     }
 
     // Drop the plugin's ctx.storage data dir. Under shipped defaults it lives INSIDE the package

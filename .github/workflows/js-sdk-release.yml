@@ -27,6 +27,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: sdk/javascript
@@ -80,7 +81,7 @@ jobs:
         # the Dockerfile uses: this npm runs while the job can mint a publish credential, so it must
         # not float to whatever version is current when the tag is pushed.
         run: |
-          npm install -g npm@12.0.2
+          npm install -g npm@12.1.0
           npm --version
 
       - run: npm ci
@@ -95,4 +96,6 @@ jobs:
       - name: Publish to npm (trusted publishing, provenance automatic)
         # No --provenance flag: npm attaches provenance on its own for a trusted-publisher release, and
         # passing it is redundant. --access public is explicit because the package is scoped.
-        run: npm publish --access public
+        # --ignore-scripts skips prepublishOnly, which would rebuild dist/ after smoke: the dist/ that
+        # passed the gates above is the one that ships. prepublishOnly stays for a manual publish.
+        run: npm publish --access public --ignore-scripts

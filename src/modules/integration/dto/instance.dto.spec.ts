@@ -1,6 +1,6 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { DECORATORS } from '@nestjs/swagger';
-import { UpdateInstanceDto } from './instance.dto';
+import { CreateInstanceDto, UpdateInstanceDto } from './instance.dto';
 import { GLOBAL_VALIDATION_OPTIONS } from '../../../config/app-validation';
 
 describe('UpdateInstanceDto', () => {
@@ -33,5 +33,25 @@ describe('UpdateInstanceDto', () => {
     expect(property?.nullable).toBe(true);
     expect(property?.type).toBe(String);
     expect(property?.description).toMatch(/null/);
+  });
+});
+
+type PublishedProperty = { description?: string; pattern?: string; minLength?: number; maxLength?: number };
+const published = (dto: object, key: string): PublishedProperty | undefined =>
+  Reflect.getMetadata(DECORATORS.API_MODEL_PROPERTIES, dto, key) as PublishedProperty | undefined;
+
+describe('CreateInstanceDto published schema', () => {
+  // @nestjs/swagger does not derive bounds from the validators, so each one is declared explicitly.
+  it('publishes the bounds the validators enforce', () => {
+    const proto = CreateInstanceDto.prototype;
+    expect(published(proto, 'instanceId')?.pattern).toBe('^[a-zA-Z0-9_-]{1,64}$');
+    expect(published(proto, 'sessionScope')).toMatchObject({ minLength: 1, maxLength: 256 });
+    expect(published(proto, 'verifyToken')?.maxLength).toBe(512);
+    expect(published(proto, 'secret')).toMatchObject({ minLength: 16, maxLength: 512 });
+    expect(published(UpdateInstanceDto.prototype, 'sessionScope')).toMatchObject({ minLength: 1, maxLength: 256 });
+  });
+
+  it('describes the secret mask the API actually returns', () => {
+    expect(published(CreateInstanceDto.prototype, 'secret')?.description).toContain("Masked ('***')");
   });
 });

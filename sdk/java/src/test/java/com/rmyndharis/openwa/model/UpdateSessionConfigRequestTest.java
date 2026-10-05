@@ -4,6 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.rmyndharis.openwa.ClientConfig;
+import com.rmyndharis.openwa.OpenWAClient;
+import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.support.MockTransport;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -61,5 +65,29 @@ class UpdateSessionConfigRequestTest {
                         .autoRejectCalls(true)
                         .clearMaxReconnectAttempts()
                         .build()));
+    }
+
+    // The tests above use a copy of the client's Gson; these go through the client, so they also
+    // fail if it stops routing these bodies to that Gson.
+    @Test
+    void clientSendsTheConfigBodyThroughTheSerializer() {
+        MockTransport tx = new MockTransport().respond(200, "{}");
+        new OpenWAClient(ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build())
+                .sessions.updateConfig("s", UpdateSessionConfigRequest.builder()
+                        .autoRejectCalls(true)
+                        .clearMaxReconnectAttempts()
+                        .build());
+        assertEquals(HttpMethod.PATCH, tx.lastRequest().method());
+        assertEquals("http://h/api/sessions/s/config", tx.lastRequest().url());
+        assertEquals("{\"autoRejectCalls\":true,\"maxReconnectAttempts\":null}", tx.lastRequest().body());
+    }
+
+    @Test
+    void clientSendsANullProxyUrlToClearTheProxy() {
+        MockTransport tx = new MockTransport().respond(200, "{}");
+        new OpenWAClient(ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build())
+                .sessions.updateProxy("s", new UpdateSessionProxyRequest(null));
+        assertEquals("http://h/api/sessions/s/proxy", tx.lastRequest().url());
+        assertEquals("{\"proxyUrl\":null}", tx.lastRequest().body());
     }
 }

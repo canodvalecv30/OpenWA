@@ -6,6 +6,8 @@ import { contactApi, sessionApi } from '../../services/api';
 import { useRole } from '../../hooks/useRole';
 import { useToast } from '../../hooks/useToast';
 import { Modal } from '../Modal';
+import { MEDIA_UPLOAD_MAX_BYTES } from './ChatComposer';
+import { captionLength } from '../../utils/bulkMedia';
 
 // Mirrors @ArrayMaxSize(256) on the send-status DTOs — the picker caps selection client-side so the
 // user can't build a list the backend is guaranteed to reject.
@@ -58,6 +60,8 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
     queryKey: ['status-compose-contacts', sessionId],
     queryFn: () => contactApi.list(sessionId!),
     enabled: isBaileysEngine && Boolean(sessionId),
+    // contactApi.list already retried a throttled page; another attempt would walk every page again.
+    retry: false,
   });
   const composeContacts = composeContactsQuery.data ?? [];
   const composeRecipientSearchLower = composeRecipientSearch.toLowerCase();
@@ -103,7 +107,19 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
   const handleComposeImageFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Posted as base64 JSON, so an oversized image would only be refused after the whole inflated
+    // body went up. Rejected before it is read; an image URL stays in its own field, but an earlier pick
+    // is dropped (and a read of it cancelled), since the cleared input no longer shows it.
+    if (file.size > MEDIA_UPLOAD_MAX_BYTES) {
+      showErrorToast(t('chats.errors.fileTooLarge'));
+      composeImageReadSeq.current += 1;
+      setComposeImageBase64(null);
+      e.target.value = '';
+      return;
+    }
+    // The input already shows the new file, so the earlier pick must not stay postable while it is read.
     setComposeImageUrl('');
+    setComposeImageBase64(null);
     const myRead = ++composeImageReadSeq.current;
     const reader = new FileReader();
     reader.onload = event => {
@@ -116,6 +132,8 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
     reader.readAsDataURL(file);
   };
 
+  const composeTextLength = captionLength(composeText.trim());
+  const composeCaptionLength = captionLength(composeCaption.trim());
   const composeCanSubmit =
     Boolean(sessionId) &&
     !composePosting &&
@@ -123,6 +141,9 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
     // it's still unknown, a Baileys submit would go out with no recipients and 400.
     Boolean(engineType) &&
     (composeType === 'text' ? composeText.trim().length > 0 : Boolean(composeImageBase64 || composeImageUrl.trim())) &&
+    // Bounded here rather than by a native maxLength, which counts UTF-16 units and would cut pasted
+    // emoji the gateway accepts: it counts an astral character as one.
+    (composeType === 'text' ? composeTextLength <= 4096 : composeCaptionLength <= 1024) &&
     (!isBaileysEngine || composeRecipients.length > 0);
 
   const handleComposeSubmit = async () => {
@@ -139,7 +160,11 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
           font: composeFont === '' ? undefined : Number(composeFont),
         });
       } else {
-        const image = composeImageBase64 ? { base64: composeImageBase64 } : { url: composeImageUrl.trim() };
+        // The gateway drops the data URL's prefix and labels bare base64 image/jpeg unless told otherwise,
+        // so the picked file's type travels as `mimetype`. A file with no image type leaves the default.
+        const image = composeImageBase64
+          ? { base64: composeImageBase64, mimetype: /^data:(image\/[^;,]+)/.exec(composeImageBase64)?.[1] }
+          : { url: composeImageUrl.trim() };
         await sessionApi.postImageStatus(sessionId, image, recipients, composeCaption.trim() || undefined);
       }
       showSuccessToast(t('chats.status.posted'));
@@ -191,9 +216,12 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
               id="scm-1"
               value={composeText}
               onChange={e => setComposeText(e.target.value)}
-              maxLength={4096}
               placeholder={t('chats.status.composeText')}
             />
+            {/* Kept mounted, unstyled while empty: a live region inserted with its text is often not announced. */}
+            <span className={composeTextLength > 4096 ? 'input-hint' : undefined} role="status">
+              {composeTextLength > 4096 ? t('common.fieldTooLong', { max: 4096, count: composeTextLength }) : ''}
+            </span>
           </div>
           <div className="compose-row">
             <div className="compose-field">
@@ -250,8 +278,10 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
               placeholder={t('chats.captionPlaceholder')}
               value={composeCaption}
               onChange={e => setComposeCaption(e.target.value)}
-              maxLength={1024}
             />
+            <span className={composeCaptionLength > 1024 ? 'input-hint' : undefined} role="status">
+              {composeCaptionLength > 1024 ? t('common.fieldTooLong', { max: 1024, count: composeCaptionLength }) : ''}
+            </span>
           </div>
         </>
       )}
@@ -271,6 +301,8 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
               <div className="compose-recipients-empty">
                 <Loader2 className="animate-spin" size={16} />
               </div>
+            ) : composeContactsQuery.isError ? (
+              <div className="compose-recipients-empty">{t('dashboard.loadError')}</div>
             ) : filteredComposeContacts.length === 0 ? (
               <div className="compose-recipients-empty">{t('chats.status.noContacts')}</div>
             ) : (

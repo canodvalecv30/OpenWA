@@ -168,7 +168,7 @@ describe('conversation.send facade', () => {
     });
   });
 
-  it('rejects replyTo on a media envelope — media-reply is unsupported by the engine', async () => {
+  it('rejects replyTo on a media envelope: the plugin media port carries no quote', async () => {
     const sendMedia = jest.fn();
     const facade = buildConversationSendFacade({
       manifest: manifest(['conversation:send']) as never,
@@ -263,7 +263,7 @@ describe('conversation.send facade', () => {
     expect(sendLocation).not.toHaveBeenCalled();
   });
 
-  it('rejects replyTo on a location envelope — the engine location path cannot quote', async () => {
+  it('rejects replyTo on a location envelope: the plugin location port carries no quote', async () => {
     const sendLocation = jest.fn();
     const facade = buildConversationSendFacade({
       manifest: manifest(['conversation:send']) as never,

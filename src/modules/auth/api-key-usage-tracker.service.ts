@@ -58,14 +58,17 @@ export class ApiKeyUsageTracker {
       // time, so persisting it whole writes every column back as it was then — including isActive,
       // role, allowedSessions, allowedIps and expiresAt. An administrator change committed between
       // that load and this windowed write would be reverted by an advisory statistics update.
-      // Worse for a DELETED key: revocation is a hard `remove()`, so `save()` finds no row for the
+      // Worse for a DELETED key: deletion is a hard `remove()`, so `save()` finds no row for the
       // primary key and INSERTs it back, hash included — the credential authenticates again. An
       // `update()` by id affects zero rows instead. `forget()` closes the window for a key holding
       // only pending counters, but cannot reach an entity a request handler is already holding.
       // Same reasoning as flushPending() below, which writes one column for the same reason.
+      // The count is an increment, never the value this request loaded plus the delta: two requests
+      // that loaded the same stale row at a window boundary both write, and an absolute value from
+      // the second would overwrite the uses the first one persisted. `pending` is a local integer.
       await this.apiKeyRepository.update(
         { id: apiKey.id },
-        { lastUsedAt: apiKey.lastUsedAt, usageCount: apiKey.usageCount },
+        { lastUsedAt: apiKey.lastUsedAt, usageCount: () => `"usageCount" + ${pending}` },
       );
     } catch (error) {
       // Lost-update safe: a failed windowed write must not drop the accumulated increments —

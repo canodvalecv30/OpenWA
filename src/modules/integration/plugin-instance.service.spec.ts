@@ -147,15 +147,18 @@ describe('PluginInstanceService provisioning', () => {
   it('regenerateSecret replaces the secret with a new value', async () => {
     const created = await service.create('chatwoot', 'acct1', {});
     const rotated = await service.regenerateSecret('chatwoot', 'acct1');
-    expect(rotated.secret).toMatch(/^[0-9a-f]{64}$/);
-    expect(rotated.secret).not.toBe(created.secret);
+    expect(rotated?.secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(rotated?.secret).not.toBe(created.secret);
   });
 
-  it('update patches enabled/scope/config in one save; remove deletes', async () => {
+  it('update patches enabled/scope/config in one write; remove deletes', async () => {
     await service.create('chatwoot', 'acct1', { sessionScope: 'a' });
-    const save = jest.spyOn(ds.getRepository(PluginInstance), 'save');
+    const repo = ds.getRepository(PluginInstance);
+    const write = jest.spyOn(repo, 'update');
+    const save = jest.spyOn(repo, 'save');
     const patched = await service.update('chatwoot', 'acct1', { enabled: false, sessionScope: 'b', config: { k: 1 } });
-    expect(save).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
     expect(patched?.enabled).toBe(false);
     expect(patched?.sessionScope).toBe('b');
     expect(patched?.config).toEqual({ k: 1 });
@@ -163,6 +166,77 @@ describe('PluginInstanceService provisioning', () => {
     expect(await service.remove('chatwoot', 'acct1')).toBe(true);
     expect(await service.resolve('chatwoot', 'acct1')).toBeNull();
     expect(await service.remove('chatwoot', 'acct1')).toBe(false);
+  });
+
+  it('update and regenerateSecret return the stored updatedAt, not the one read before the write', async () => {
+    await service.create('chatwoot', 'acct1', {});
+    const backdate = () => ds.query(`UPDATE plugin_instances SET "updatedAt" = '2000-01-01 00:00:00'`);
+
+    await backdate();
+    const patched = await service.update('chatwoot', 'acct1', { enabled: false });
+    const afterPatch = await service.resolve('chatwoot', 'acct1');
+    expect(afterPatch?.updatedAt.getUTCFullYear()).not.toBe(2000);
+    expect(patched?.updatedAt).toEqual(afterPatch?.updatedAt);
+
+    await backdate();
+    const rotated = await service.regenerateSecret('chatwoot', 'acct1');
+    const afterRotate = await service.resolve('chatwoot', 'acct1');
+    expect(rotated?.updatedAt).toEqual(afterRotate?.updatedAt);
+    expect(rotated?.secret).toBe(afterRotate?.secret);
+  });
+
+  it('answers a concurrent duplicate create with InstanceExistsError and keeps the first secret', async () => {
+    const results = await Promise.allSettled([
+      service.create('chatwoot', 'acct1', { secret: 'first-secret-16chars' }),
+      service.create('chatwoot', 'acct1', { secret: 'second-secret-16chars' }),
+    ]);
+    const created = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
+    expect(created).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(InstanceExistsError);
+    const winner = created[0].value;
+    expect((await service.resolve('chatwoot', 'acct1'))?.secret).toBe(winner.secret);
+  });
+
+  it('mint returns the stored row when a concurrent mint inserted it first', async () => {
+    const [a, b] = await Promise.all([service.mint('chatwoot', 'acct1', {}), service.mint('chatwoot', 'acct1', {})]);
+    expect(a.secret).toBe(b.secret);
+    expect((await service.resolve('chatwoot', 'acct1'))?.secret).toBe(a.secret);
+  });
+
+  // update() reads the row before it writes; a DELETE or a secret rotation can land in between.
+  it('update does not re-insert a row deleted after it was read', async () => {
+    await service.create('chatwoot', 'acct1', {});
+    const stale = await service.resolve('chatwoot', 'acct1');
+    await service.remove('chatwoot', 'acct1');
+    jest.spyOn(service, 'resolve').mockResolvedValueOnce(stale);
+
+    expect(await service.update('chatwoot', 'acct1', { enabled: false })).toBeNull();
+    expect(await service.resolve('chatwoot', 'acct1')).toBeNull();
+  });
+
+  it('update does not revert a secret rotated after it was read', async () => {
+    await service.create('chatwoot', 'acct1', {});
+    const stale = await service.resolve('chatwoot', 'acct1');
+    const rotated = await service.regenerateSecret('chatwoot', 'acct1');
+    jest.spyOn(service, 'resolve').mockResolvedValueOnce(stale);
+
+    await service.update('chatwoot', 'acct1', { enabled: false });
+
+    const stored = await service.resolve('chatwoot', 'acct1');
+    expect(stored?.secret).toBe(rotated?.secret);
+    expect(stored?.enabled).toBe(false);
+  });
+
+  it('regenerateSecret answers null, without re-inserting, for a row deleted after it was read', async () => {
+    await service.create('chatwoot', 'acct1', {});
+    const stale = await service.resolve('chatwoot', 'acct1');
+    await service.remove('chatwoot', 'acct1');
+    jest.spyOn(service, 'resolve').mockResolvedValueOnce(stale);
+
+    await expect(service.regenerateSecret('chatwoot', 'acct1')).resolves.toBeNull();
+    expect(await service.resolve('chatwoot', 'acct1')).toBeNull();
   });
 
   it('normalizes an empty sessionScope to null (all-sessions) on mint/create/update, never a literal ""', async () => {

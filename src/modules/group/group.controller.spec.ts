@@ -139,3 +139,52 @@ describe('GroupController route ordering', () => {
     expect(path).toBe('join-info');
   });
 });
+
+describe('GroupController OpenAPI responses', () => {
+  // Every engine-backed route resolves the engine first, and a session with no engine answers 400
+  // there before the not-ready 409 can happen, so a route documenting the 409 owes the 400 too.
+  it('declares the 400 for an unstarted session wherever it declares the engine-not-ready 409', () => {
+    const missing = Object.getOwnPropertyNames(GroupController.prototype).filter(name => {
+      const handler = Object.getOwnPropertyDescriptor(GroupController.prototype, name)!.value as object;
+      const responses = (Reflect.getMetadata('swagger/apiResponse', handler) ?? {}) as Record<string, unknown>;
+      return '409' in responses && !('400' in responses);
+    });
+    expect(missing).toEqual([]);
+  });
+
+  const responsesOf = (name: string): Record<string, { description?: string }> =>
+    (Reflect.getMetadata(
+      'swagger/apiResponse',
+      Object.getOwnPropertyDescriptor(GroupController.prototype, name)!.value as object,
+    ) ?? {}) as Record<string, { description?: string }>;
+
+  // Baileys answers 503 for WhatsApp's own rate limit (429) as well as for an unanswered query, and a
+  // throttled caller should back off rather than retry at once, so every 503 has to say so.
+  it('names the WhatsApp rate limit on every 503 it declares', () => {
+    const silent = Object.getOwnPropertyNames(GroupController.prototype).filter(name => {
+      const description = responsesOf(name)['503']?.description;
+      return description !== undefined && !description.includes('429');
+    });
+    expect(silent).toEqual([]);
+  });
+
+  // On Baileys the picture lookup also maps a WhatsApp 5xx to 503; the metadata query behind the
+  // settings read does not, so a 5xx there answers 500 and its 503 must not promise otherwise.
+  it('names the WhatsApp 5xx on the picture 503 and not on the settings 503', () => {
+    expect(responsesOf('getPicture')['503']?.description).toContain('5xx');
+    expect(responsesOf('getSettings')['503']?.description).not.toContain('5xx');
+  });
+
+  it('declares the rate-limited 503 on group creation', () => {
+    expect(responsesOf('create')['503']?.description).toContain('429');
+  });
+
+  // A batch larger than a whole day's cold-reachout allowance is refused 400 without a retry hint.
+  it.each(['create', 'addParticipants'])('%s describes the over-allowance 400', name => {
+    expect(responsesOf(name)['400']?.description).toContain('cold-reachout allowance');
+  });
+
+  it.each(['removeParticipants', 'promoteParticipants', 'demoteParticipants'])('%s keeps the unpaced 400', name => {
+    expect(responsesOf(name)['400']?.description).not.toContain('cold-reachout');
+  });
+});

@@ -10,7 +10,8 @@ import { parseWaId } from './wa-id';
  *   deliberately does NOT mint `<lid-digits>@c.us`: a lid's digits are not a phone number, and
  *   treating them as one would let `555000111@lid` match a `555000111@c.us` chat.
  * - a group / status / newsletter / broadcast id has exactly one stored form, so it yields only the
- *   literal (expanding a group's digits into the user dialects could match an unrelated person).
+ *   literal (expanding a group's digits into the user dialects could match an unrelated person), and
+ *   so does an id under an unrecognised domain; only a bare number is qualified as a phone.
  *
  * The last rule is why a non-user kind returns just the input: it fails closed on the literal id.
  */
@@ -26,7 +27,8 @@ export async function resolveJidCandidates(value: string, directory?: ContactDir
   // Group ids are stored in the neutral `<id>@g.us` form, so normalize rather than echo the input:
   // an upper-case domain must not make the guard's answer disagree with the list filter's.
   if (parsed.kind === 'group') return [`${parsed.userPart}@g.us`];
-  if (parsed.kind !== 'user' && parsed.kind !== 'lid' && parsed.kind !== 'unknown') {
+  // Only a bare number is qualified into the user dialects; an unrecognised domain is not a phone.
+  if (parsed.kind !== 'user' && parsed.kind !== 'lid' && (parsed.kind !== 'unknown' || value.includes('@'))) {
     return [value];
   }
   if (parsed.kind === 'lid') {

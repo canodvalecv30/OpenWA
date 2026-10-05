@@ -19,7 +19,7 @@ An interface implementation that provides a specific capability. In OpenWA, adap
 
 - **Database Adapter**: SQLite, PostgreSQL
 - **Storage Adapter**: Local, S3
-- **Cache**: Redis (optional — `CacheService` is Redis-only; with Redis disabled it no-ops and callers fall through to the database)
+- **Cache**: Redis (optional — `CacheService` is Redis-only; with Redis disabled it no-ops)
 - **Engine Adapter**: whatsapp-web.js (default), Baileys
 
 ### API Key
@@ -73,7 +73,7 @@ Web interface to manage OpenWA without using the API directly. Built with React 
 
 ### Dead Letter Queue (DLQ)
 
-The durable record of deliveries abandoned after every retry. In OpenWA it is a **database table**, not a Redis queue: `webhook_delivery_failures` for outbound webhooks and `integration_delivery_failures` for plugin ingress. Used for debugging; **redrive exists for plugin ingress only** (`POST /api/integration/instances/:pluginId/:instanceId/redrive`); an outbound-webhook failure row is a record, not a replay source, so recovery means the provider or your own tooling re-sending the event.
+The durable record of deliveries abandoned after every retry; an outbound-webhook row with `attempts: 0` was instead shed, oversize, failed preflight or refused at shutdown, and a later successful delivery of the event removes its row. In OpenWA it is a **database table**, not a Redis queue: `webhook_delivery_failures` for outbound webhooks and `integration_delivery_failures` for plugin ingress. Used for debugging; **redrive exists for plugin ingress only** (`POST /api/integration/instances/:pluginId/:instanceId/redrive`); an outbound-webhook failure row is a record, not a replay source. The gateway replays a shed or shutdown-refused delivery from its outbox on its own; any other recovery means the provider or your own tooling re-sending the event.
 
 ### Docker
 

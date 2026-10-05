@@ -10,9 +10,12 @@
 # The per-arch runtime deps are installed natively in the target-platform production stage below.
 # NOTE: $BUILDPLATFORM requires BuildKit (CI uses buildx; modern `docker build`/compose default to it).
 # The digest pins the multi-arch node:22-slim index, so every build starts from the same immutable
-# base; dependabot's docker ecosystem proposes the new digest when the tag moves. Update tag and
-# digest together.
-FROM --platform=$BUILDPLATFORM docker.io/node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS builder
+# base. Dependabot proposes a refreshed digest when the tag moves; if none has arrived, refresh by
+# hand (`docker buildx imagetools inspect docker.io/node:22-slim`). The base-image-drift job in
+# security-scan.yml fails once the pin differs from what the tag serves and either the tag has
+# served that image for 7 or more days, or for 3 or more days with the pin last changed 28 or more
+# days ago. Update both stages together.
+FROM --platform=$BUILDPLATFORM docker.io/node:22-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS builder
 
 WORKDIR /app
 
@@ -38,7 +41,8 @@ COPY scripts/postinstall.js ./scripts/
 # Coolify (and similar PaaS) promote every ${VAR} referenced in the compose file to a build-time
 # variable, so docker-compose.yml's `NODE_ENV=${NODE_ENV:-production}` leaks NODE_ENV=production
 # into this stage and a bare `npm ci` would skip @nestjs/cli → `sh: 1: nest: not found` (exit 127).
-# (docker-compose.dev.yml hardcodes NODE_ENV=development, which is why the dev build never hit this.)
+# (docker-compose.dev.yml forwards `NODE_ENV=${NODE_ENV:-development}`, so the dev build only sees
+# production when the host sets it.)
 # This stage only builds dist/ and the dashboard SPA and never launches a browser; the production
 # stage downloads Chrome explicitly. Skip the Puppeteer postinstall download so @puppeteer/browsers 3
 # does not try to extract a zip here, where no archiver is installed.
@@ -59,7 +63,7 @@ RUN npm run build && npm run dashboard:ci -- --include=dev && npm run dashboard:
 
 # ===== Stage 2: Production =====
 # Same digest-pinned node:22-slim base as the builder stage.
-FROM docker.io/node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS production
+FROM docker.io/node:22-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS production
 
 # Run the app with production defaults from the first boot: an unset NODE_ENV selects the
 # development branch of the CORS/Swagger/DTO-error-detail/default-secret hardening (main.ts
@@ -167,11 +171,14 @@ http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.l
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Puppeteer to skip automatic download during npm install (we download it explicitly below)
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Keep puppeteer's postinstall from downloading a browser (the --ignore-scripts install below
+# already skips it; amd64 downloads its pinned build explicitly further down)
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 
-# Create app user for security
-RUN groupadd -r openwa && useradd -r -g openwa openwa
+# Create app user for security. The ids are pinned (997 is what `-r` assigned on both arches) so a
+# Kubernetes runAsUser/fsGroup or a `docker run --user` can name the runtime user; the root start
+# re-owns /app/data by name either way.
+RUN groupadd -r -g 997 openwa && useradd -r -u 997 -g openwa openwa
 
 WORKDIR /app
 
@@ -184,7 +191,7 @@ COPY package*.json ./
 # scripts/postinstall.js rides along so a bare local `npm ci` keeps working, but the
 # --ignore-scripts install below skips the hook here: the explicit fatal run right
 # after is the sole (and stricter) applier for the image.
-COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-wwebjs-media-id.js scripts/patch-wwebjs-send-error.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js ./scripts/
+COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-wwebjs-participant-arity.js scripts/patch-wwebjs-block.js scripts/patch-wwebjs-group-description.js scripts/patch-wwebjs-media-id.js scripts/patch-wwebjs-send-error.js scripts/patch-wwebjs-download-mimetype.js scripts/patch-baileys-appstate.js scripts/patch-baileys-newsletter-create.js ./scripts/
 
 # Install production dependencies only, then apply the backports. The status patcher runs after
 # the two patchers it depends on: its transforms were written against the tree they leave behind.
@@ -212,19 +219,21 @@ RUN npm ci --omit=dev --ignore-scripts \
     && node scripts/patch-wwebjs-group-description.js \
     && node scripts/patch-wwebjs-media-id.js \
     && node scripts/patch-wwebjs-send-error.js \
+    && node scripts/patch-wwebjs-download-mimetype.js \
     && node scripts/patch-baileys-appstate.js \
     && node scripts/patch-baileys-newsletter-create.js \
     && npm cache clean --force
 
 # Replace the npm the base image bundles. npm is not on the request path — the entrypoint runs
 # `node dist/main` — but it stays in the image because the operator runbooks drive it
-# (`docker exec openwa npm run cli …`, `npm run export`), and its own bundled dependency tree is
-# what the release image scan reports. node:22-slim currently ships npm 10.9.8, whose bundle
-# carries a critical node-tar advisory plus sigstore/picomatch ones; npm 12 fixes all three.
+# (`docker compose run --rm openwa-api npm run migration:run:prod`), and its own bundled dependency
+# tree is what the release image scan reports. node:22-slim ships npm 10.9 (10.9.9 at the pinned digest),
+# whose bundle has carried a critical node-tar advisory plus sigstore/picomatch ones; npm 12 fixes
+# all three.
 # Deliberately AFTER `npm ci`, so the application tree is still resolved by the npm the lockfile
 # was generated with and only the global CLI is swapped. Pinned to the exact patch release —
 # a floating npm@12 would make the image's bundled npm tree depend on when the build happened.
-RUN npm install -g npm@12.0.2 && npm cache clean --force
+RUN npm install -g npm@12.1.0 && npm cache clean --force
 
 # amd64: download Chrome for Testing via Puppeteer and symlink it.
 # arm64: use Debian's chromium installed above (a choice; see the note at that install).
@@ -262,9 +271,9 @@ COPY --from=builder /app/dashboard/dist ./dashboard/dist
 
 # Create data directories with correct ownership. Only ./data is chowned, NOT all of /app: the app
 # tree (node_modules, dist) only needs read access, which root-owned files already grant, and the
-# entrypoint re-chowns /app/data at every container start for the mounted-volume case. A full
-# /app chown walks every production dependency file (issue #1045: ~35 minutes on a small VPS) and
-# duplicates their metadata into a new image layer.
+# entrypoint re-owns any wrong-owned path under /app/data at every start for the mounted-volume
+# case. A full /app chown walks every production dependency file (issue #1045: ~35 minutes on a
+# small VPS) and duplicates their metadata into a new image layer.
 RUN mkdir -p ./data/sessions ./data/media ./data/plugins && \
     chown -R openwa:openwa ./data
 
@@ -306,6 +315,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # `exec gosu openwa "$@"`, after it chowns /app/data and the Chromium XDG
 # dirs. Adding `USER openwa` here would run the entrypoint as openwa and break
 # the chown-before-drop pattern that makes named-volume mounts work on first
-# boot (#254, #259).
+# boot (#254, #259). Starting it as a non-root uid on purpose (`--user 997:997`,
+# a Kubernetes runAsUser) is supported: the entrypoint skips the chown and the
+# drop, and needs /app/data to be writable by that uid.
 ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/main"]

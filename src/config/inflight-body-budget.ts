@@ -11,7 +11,8 @@
  * This middleware closes the gap. It tracks the aggregate body bytes currently in flight across
  * ALL connections — the declared Content-Length where present, one budget slot otherwise — and
  * refuses NEW requests with 503 + Retry-After once the budget is exhausted, without reading a
- * single byte of the rejected body.
+ * single byte of the rejected body. A declared body too large to fit even on an idle server gets
+ * 413 instead, since retrying it cannot help.
  *
  * The bound is on WIRE bytes, and it holds as heap only while a body is stored as it arrives.
  * A compressed body would break that — admitted at its compressed length, then inflated by the
@@ -23,9 +24,12 @@
  * multiple of its wire size once parsed (the raw Buffer pinned on rawBody, plus the decoded string
  * and the parsed object) — the budget bounds the input, not the parse.
  *
- * A stalled sender (headers, then silence) holds its
- * reservation only until the stall reaper drops the socket after STALL_TIMEOUT_MS without any
- * new body bytes, so a handful of silent connections cannot pin the whole budget. The request
+ * A stalled sender (headers, then silence) holds its reservation only until the stall reaper drops
+ * the socket after STALL_TIMEOUT_MS without any new body bytes. A body that keeps trickling is
+ * dropped once it falls behind the pace needed to deliver its reservation (the declared size, or a
+ * chunked body's placeholder) within Node's request timeout, after the same STALL_TIMEOUT_MS grace. The reservation is never lowered mid-stream,
+ * only released with the request, so declared bodies that complete together stay within the
+ * budget, and the per-client share bounds what one slow source can hold. The request
  * stream itself is never tapped — no 'data' listener — so downstream consumers (the body
  * parser, busboy) see every chunk exactly as it arrives, even when they attach late.
  *
@@ -62,16 +66,20 @@ const FALLBACK_LIMIT_BYTES = 25 * UNIT_BYTES.mb;
  * such connections at the per-request cap would pin the entire default budget, renewable forever.
  * Any admitted request expecting a body is therefore polled: if no new body bytes arrive for
  * STALL_TIMEOUT_MS the socket is destroyed and the reservation released. Polling (rather than one
- * fixed deadline) lets any progress reset the clock, so slow-but-moving uploads are untouched.
+ * fixed deadline) lets any progress reset the clock, so slow-but-moving uploads are not dropped.
  */
 const STALL_TIMEOUT_MS = 15_000;
 const STALL_POLL_MS = 5_000;
 
+/** Node's default server.requestTimeout, used when the caller does not pass REQUEST_TIMEOUT_MS. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
 /**
- * What a chunked (undeclared-length) body reserves before any of it has arrived. The same poll that
- * watches for a stall also reconciles this against `socket.bytesRead`, so the reservation converges
- * on the real size within one interval — this only has to be big enough that admission control is
- * not a free-for-all, not big enough to price a small upload out of the budget.
+ * What a chunked (undeclared-length) body reserves at admission. It is a floor: the same poll that
+ * watches for a stall raises the reservation to the bytes received (`socket.bytesRead`) once they
+ * exceed it, and a smaller body keeps this placeholder until the request is released. It only has to
+ * be big enough that admission control is not a free-for-all, not big enough to price a small upload
+ * out of the budget.
  */
 const UNDECLARED_OPENING_RESERVATION_BYTES = 1024 * 1024;
 
@@ -115,18 +123,45 @@ export interface InflightBodyBudgetOptions {
   /**
    * Per-client share of the aggregate budget as a fraction in (0, 1]. Default 0.5: no single
    * client can pin more than half the budget, so two independent heavy uploaders still coexist;
-   * a legitimate bulk uploader above the share gets 503 + Retry-After, not a hang.
+   * a legitimate bulk uploader above the share gets 503 + Retry-After, not a hang (a single declared
+   * body larger than the share gets 413).
    */
   perClientShare?: number;
+  /**
+   * Turns on the anonymous tier. Returns a stable id (the stored key hash) when the request carries
+   * an API key known to be active, undefined otherwise. Unrecognised requests share a pool of
+   * ANONYMOUS_POOL_FRACTION of the budget (at least two body caps), so they can never take the rest
+   * away from keyed traffic; a recognised key draws on the whole budget with its own per-key share, wherever it
+   * connects from. Without this option every request draws on the whole budget with a per-IP share.
+   */
+  classify?: (req: Request, clientIp: string) => string | undefined;
+  /**
+   * The per-request body cap (BODY_SIZE_LIMIT) in bytes. An anonymous request is never charged
+   * more: the parser refuses a longer declared body with 413 without buffering it. Default 25 MiB,
+   * the parser's own default.
+   */
+  bodyLimitBytes?: number;
+  /**
+   * Node's request timeout (REQUEST_TIMEOUT_MS) in milliseconds. A body that falls behind the pace
+   * needed to deliver its reservation within it (the declared size, or a chunked body's
+   * placeholder) is dropped. Default 300 000, Node's own default; 0 or less
+   * turns the pace check off.
+   */
+  requestTimeoutMs?: number;
 }
 
 export interface InflightBodyBudget {
   middleware: (req: Request, res: Response, next: NextFunction) => void;
   /** Aggregate bytes currently attributed to in-flight request bodies (observability/tests). */
   currentBytes: () => number;
-  /** Bytes currently attributed to one client's in-flight bodies (observability/tests). */
+  /** Bytes currently attributed to one client IP's in-flight bodies (observability/tests). */
   clientBytes: (req: Request) => number;
+  /** Bytes currently charged to the anonymous tier (observability/tests). */
+  anonymousBytes: () => number;
 }
+
+/** Share of the budget open to requests without a recognised API key (see the classify option). */
+const ANONYMOUS_POOL_FRACTION = 0.25;
 
 export function createInflightBodyBudget(budgetBytes: number, options?: InflightBodyBudgetOptions): InflightBodyBudget {
   let inFlightBytes = 0;
@@ -134,17 +169,31 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
   const trustedProxies = options?.trustedProxies ?? [];
   const share = Math.min(1, Math.max(Number.EPSILON, options?.perClientShare ?? 0.5));
   const perClientCap = Math.max(1, Math.floor(budgetBytes * share));
+  const classify = options?.classify;
+  const bodyLimitBytes = options?.bodyLimitBytes ?? FALLBACK_LIMIT_BYTES;
+  const requestTimeoutMs = options?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  // The anonymous pool holds at least two full-size bodies, so with the default half share one
+  // client never fills it and other unkeyed senders, ingress deliveries among them, keep room. A
+  // budget below three body caps leaves keyed traffic less than a full-size body, which the docs
+  // call out.
+  const anonPool = Math.min(
+    budgetBytes,
+    Math.max(2 * bodyLimitBytes, Math.floor(budgetBytes * ANONYMOUS_POOL_FRACTION)),
+  );
+  const anonClientCap = Math.max(Math.min(bodyLimitBytes, anonPool), Math.floor(anonPool * share));
+  let anonInFlight = 0;
   // Per-client in-flight bytes, keyed on the resolved client IP (an IPv6 client on its /64).
   // Entries are created lazily and deleted by the same exactly-once release that decrements the
-  // aggregate, so the map cannot
-  // leak a client that finished. A cap on the MAP itself guards the pathological many-spoofed-IPs
-  // case: past it, a NEW client key is treated as busiest (refused) rather than evicting a live
-  // one - refusing beats corrupting another client's accounting.
+  // aggregate, so the map cannot leak a client that finished. Only body-carrying requests are
+  // tracked. A cap on the MAP itself guards the pathological many-spoofed-IPs case: past it, a NEW
+  // client key sending a body is treated as busiest (refused) rather than evicting a live one -
+  // refusing beats corrupting another client's accounting. Bodyless requests (GETs, health
+  // probes) never touch the map, so a full map cannot refuse them.
   const clientInFlight = new Map<string, number>();
   const MAX_TRACKED_CLIENTS = 10_000;
-  // Opening reservation for a body with no declared length (chunked). It is only a placeholder:
-  // the poller below reconciles it against the bytes that actually arrive, so a small chunked
-  // request ends up costing what it really weighs. Reserving a whole per-request cap up front
+  // Opening reservation for a body with no declared length (chunked). It is only a floor: the
+  // poller below raises it to the bytes that actually arrive, so a small chunked request costs this
+  // placeholder rather than a whole per-request slot. Reserving a whole per-request cap up front
   // instead would make the budget a concurrency limit of DEFAULT_BUDGET_MULTIPLIER for chunked
   // senders — four 6-byte uploads would refuse every further body-carrying request.
   const undeclaredReservation = Math.max(1, Math.min(UNDECLARED_OPENING_RESERVATION_BYTES, budgetBytes));
@@ -160,11 +209,11 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
       req.destroy();
       return;
     }
-    res
-      .status(503)
-      .set('Retry-After', retryAfter)
-      .set('Connection', 'close')
-      .json({ statusCode: 503, message: 'Too much request body data in flight; retry later' });
+    res.status(503).set('Retry-After', retryAfter).set('Connection', 'close').json({
+      statusCode: 503,
+      message: 'Too much request body data in flight; retry later',
+      error: 'Service Unavailable',
+    });
   };
 
   /** Same never-read-the-body disposal as rejectBusy; only the reason and status differ. */
@@ -180,11 +229,25 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
     });
   };
 
+  /** Same disposal again, for a body that could not be admitted even with nothing else in flight. */
+  const rejectTooLarge = (req: Request, res: Response): void => {
+    if (res.headersSent || res.writableEnded) {
+      req.destroy();
+      return;
+    }
+    res.status(413).set('Connection', 'close').json({
+      statusCode: 413,
+      message: 'Request body exceeds what this server can accept',
+      error: 'Payload Too Large',
+    });
+  };
+
   const middleware = (req: Request, res: Response, next: NextFunction): void => {
     const declared = parseDeclaredLength(req.headers['content-length']);
     // A body with no declared length is expected only when the request is chunk-encoded (Node
     // ignores close-delimited request bodies on keep-alive HTTP/1.1). Anything else — GETs,
     // health checks, Content-Length: 0 — reserves nothing and is never reaped.
+    // It is never refused or tracked either: see the early return below the encoding guard.
     let reserved = declared ?? (req.headers['transfer-encoding'] !== undefined ? undeclaredReservation : 0);
 
     // Every quantity this budget works with — the declared length, and socket.bytesRead in the
@@ -212,21 +275,50 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
       return;
     }
 
+    // Nothing to reserve, so nothing to refuse, track or reap. This must stay BELOW the encoding
+    // guard: a compressed body with a zero or unusable Content-Length reserves 0 yet still gets 415.
+    if (reserved === 0) {
+      next();
+      return;
+    }
+
     // Admission control on the RESERVED size: a request that would push the aggregate OR ITS
     // CLIENT'S SHARE past the budget is refused before a single byte of its body is buffered.
-    // The per-client check is what makes the DoS bounded per attacker rather than per deployment:
-    // four trickle connections from one source exhaust only that source's share, and every other
-    // client's uploads still land.
-    const clientKey = limiterKeyForIp(resolveClientIp(req, trustedProxies));
+    // The per-client share bounds what one source can hold.
+    // A recognised key is shared per key (its entries are bounded by the key count, so they are
+    // exempt from the map cap); anything else per client IP.
+    const clientIp = resolveClientIp(req, trustedProxies);
+    const keyId = classify?.(req, clientIp);
+    const anonymous = classify !== undefined && keyId === undefined;
+    const clientKey = keyId !== undefined ? `key:${keyId}` : limiterKeyForIp(clientIp);
+    const shareCap = anonymous ? anonClientCap : perClientCap;
+    const ceiling = anonymous ? bodyLimitBytes : Infinity;
     const clientBusy = clientInFlight.get(clientKey) ?? 0;
-    const mapAtCapacity = clientInFlight.size >= MAX_TRACKED_CLIENTS && !clientInFlight.has(clientKey);
-    if (inFlightBytes + reserved > budgetBytes || clientBusy + reserved > perClientCap || mapAtCapacity) {
+    const mapAtCapacity =
+      keyId === undefined && clientInFlight.size >= MAX_TRACKED_CLIENTS && !clientInFlight.has(clientKey);
+    // The aggregate check uses the full declared size; the tier and share checks the charged size.
+    const charge = Math.min(reserved, ceiling);
+    // A declared body that would be refused on an idle server can never be admitted, so a retryable
+    // 503 would only invite the client (and the SDKs, which retry a 503) to send it again. A chunked
+    // body is refused on its placeholder, not its size, so it keeps the 503.
+    if (declared !== undefined && (declared > budgetBytes || charge > shareCap || (anonymous && charge > anonPool))) {
+      rejectTooLarge(req, res);
+      return;
+    }
+    if (
+      inFlightBytes + reserved > budgetBytes ||
+      clientBusy + charge > shareCap ||
+      (anonymous && anonInFlight + charge > anonPool) ||
+      mapAtCapacity
+    ) {
       rejectBusy(req, res);
       return;
     }
 
+    reserved = charge;
     inFlightBytes += reserved;
-    if (!mapAtCapacity) clientInFlight.set(clientKey, clientBusy + reserved);
+    if (anonymous) anonInFlight += reserved;
+    clientInFlight.set(clientKey, clientBusy + reserved);
 
     let released = false;
     let stallTimer: ReturnType<typeof setInterval> | undefined;
@@ -236,7 +328,7 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
       stallTimer = undefined;
     };
 
-    // Exactly-once release: the first terminal event wins — normal completion (res 'finish'),
+    // Exactly-once release: the first terminal event wins: normal completion (res 'finish'),
     // client/socket abort (req/res 'close'), stream failure (req/res 'error'). An aborted upload
     // typically fires several of these; the flag guarantees the aggregate is decremented once.
     const release = (): void => {
@@ -244,11 +336,10 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
       released = true;
       disarmStallReaper();
       inFlightBytes -= reserved;
-      if (!mapAtCapacity) {
-        const busy = (clientInFlight.get(clientKey) ?? reserved) - reserved;
-        if (busy > 0) clientInFlight.set(clientKey, busy);
-        else clientInFlight.delete(clientKey);
-      }
+      if (anonymous) anonInFlight -= reserved;
+      const busy = (clientInFlight.get(clientKey) ?? reserved) - reserved;
+      if (busy > 0) clientInFlight.set(clientKey, busy);
+      else clientInFlight.delete(clientKey);
     };
     res.on('finish', release);
     res.on('close', release);
@@ -256,71 +347,90 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
     req.on('close', release);
     req.on('error', release);
 
-    if (reserved > 0) {
-      // Stall reaper (see STALL_TIMEOUT_MS above). Progress is measured on the SOCKET byte
-      // counter, never on the request stream: attaching a 'data' listener would switch the
-      // stream to flowing mode and eat chunks before a late consumer (the async guards run
-      // before busboy/body-parser attach) ever sees them. 'end' is safe to observe — it does
-      // not start the flow — and disarms the reaper once the real consumer finished reading.
-      const socket = req.socket;
-      const startBytes = socket.bytesRead;
-      let lastBytes = startBytes;
-      let lastProgress = Date.now();
+    // Stall reaper (see STALL_TIMEOUT_MS above). Progress is measured on the SOCKET byte counter,
+    // never on the request stream: attaching a 'data' listener would switch the stream to flowing
+    // mode and eat chunks before a late consumer (the async guards run before busboy/body-parser
+    // attach) ever sees them. 'end' is safe to observe (it does not start the flow) and disarms
+    // the reaper once the real consumer finished reading.
+    const socket = req.socket;
+    const startBytes = socket.bytesRead;
+    let lastBytes = startBytes;
+    const admittedAt = Date.now();
+    let lastProgress = admittedAt;
 
-      // Undeclared length: replace the opening placeholder with what has actually arrived, so a
-      // small chunked upload stops holding a big reservation and a large one is accounted honestly.
-      // Crossing the budget mid-stream aborts the request — the same bound a declared length gets
-      // at admission, applied to a sender that declined to declare one.
-      const reconcileUndeclared = (readNow: number): void => {
-        const actual = Math.max(undeclaredReservation, readNow - startBytes);
-        if (actual === reserved) return;
-        const delta = actual - reserved;
-        inFlightBytes += delta;
-        reserved = actual;
-        if (!mapAtCapacity) {
-          // Crossing the per-client cap mid-stream aborts too: the share bound applies to what is
-          // actually arriving, not only to what was declared. reserved is updated BEFORE release()
-          // so the exactly-once decrement subtracts the reconciled size, not the placeholder.
-          const busy = (clientInFlight.get(clientKey) ?? 0) + delta;
-          clientInFlight.set(clientKey, busy);
-          if (busy > perClientCap) {
-            release();
-            req.destroy();
-            return;
-          }
-        }
-        if (inFlightBytes > budgetBytes) {
+    // A declared body keeps its declared size until it is released. A chunked body is re-priced at
+    // the bytes that have arrived, never below its opening placeholder: budget handed back mid-stream
+    // would be taken back, unchecked, by a body that then completes between polls. The floor holds
+    // after completion too, because bytes that arrived in the same read as the headers were already
+    // counted in startBytes, so a small body sent with its headers measures as 0 while the handler
+    // still holds it. Growth that crosses the aggregate, the client share or the anonymous pool
+    // aborts the request mid-stream, the same bound a declared length gets at admission. A complete
+    // body is never aborted: it is already buffered. reserved is updated BEFORE release() so the
+    // exactly-once decrement subtracts the reconciled size.
+    const reconcile = (complete: boolean): void => {
+      if (released || declared !== undefined) return;
+      const actual = Math.min(Math.max(undeclaredReservation, socket.bytesRead - startBytes), ceiling);
+      const delta = actual - reserved;
+      if (delta === 0) return;
+      inFlightBytes += delta;
+      if (anonymous) anonInFlight += delta;
+      reserved = actual;
+      const busy = (clientInFlight.get(clientKey) ?? 0) + delta;
+      clientInFlight.set(clientKey, busy);
+      const overTier = anonymous && anonInFlight > anonPool;
+      if (!complete && delta > 0 && (busy > shareCap || inFlightBytes > budgetBytes || overTier)) {
+        release();
+        req.destroy();
+      }
+    };
+    const settle = (): void => {
+      reconcile(true);
+      disarmStallReaper();
+    };
+
+    stallTimer = setInterval(() => {
+      // The whole message is in (Node parsed it to the end), so there is nothing left to stall on,
+      // whether or not any consumer has read it. Without this a body that arrived in one segment
+      // before this middleware ran would keep the reaper armed on a byte counter that can no
+      // longer move, and a handler slower than STALL_TIMEOUT_MS would be killed mid-work.
+      if (req.complete) {
+        settle();
+        return;
+      }
+      reconcile(false);
+      if (released) return;
+      const readNow = socket.bytesRead;
+      // Pace reap. A body must keep up with the rate that lands what it holds inside the request
+      // timeout, measured from admission after a STALL_TIMEOUT_MS grace: its declared size, or for
+      // a chunked body its current reservation (the placeholder until more than that has arrived,
+      // then the arrived bytes, which always meet the target). A steady sender that falls behind
+      // would be cut off by the timeout anyway. One that starts slow and speeds up can be dropped
+      // even though it would have finished in time; that is the accepted cost of not letting a
+      // trickle hold its reservation for the whole timeout. A fully-arrived body always meets the
+      // target.
+      if (requestTimeoutMs > 0) {
+        const target = declared ?? reserved;
+        const paced = (target * (Date.now() - admittedAt - STALL_TIMEOUT_MS)) / requestTimeoutMs;
+        if (readNow - startBytes < Math.min(target, paced)) {
           release();
           req.destroy();
-        }
-      };
-
-      stallTimer = setInterval(() => {
-        // The whole message is in (Node parsed it to the end) — there is nothing left to stall on,
-        // whether or not any consumer has read it. Without this a body that arrived in one segment
-        // before this middleware ran would keep the reaper armed on a byte counter that can no
-        // longer move, and a handler slower than STALL_TIMEOUT_MS would be killed mid-work.
-        if (req.complete) {
-          disarmStallReaper();
           return;
         }
-        const readNow = socket.bytesRead;
-        if (readNow !== lastBytes) {
-          if (declared === undefined) reconcileUndeclared(readNow);
-          lastBytes = readNow;
-          lastProgress = Date.now();
-          // The whole declared body has arrived; nothing left to stall on.
-          if (declared !== undefined && readNow - startBytes >= declared) disarmStallReaper();
-          return;
-        }
-        if (Date.now() - lastProgress >= STALL_TIMEOUT_MS) {
-          release();
-          req.destroy();
-        }
-      }, STALL_POLL_MS);
-      stallTimer.unref();
-      req.on('end', disarmStallReaper);
-    }
+      }
+      if (readNow !== lastBytes) {
+        lastBytes = readNow;
+        lastProgress = Date.now();
+        // The whole declared body has arrived; nothing left to stall on.
+        if (declared !== undefined && readNow - startBytes >= declared) disarmStallReaper();
+        return;
+      }
+      if (Date.now() - lastProgress >= STALL_TIMEOUT_MS) {
+        release();
+        req.destroy();
+      }
+    }, STALL_POLL_MS);
+    stallTimer.unref();
+    req.on('end', settle);
 
     next();
   };
@@ -329,6 +439,7 @@ export function createInflightBodyBudget(budgetBytes: number, options?: Inflight
     middleware,
     currentBytes: () => inFlightBytes,
     clientBytes: req => clientInFlight.get(limiterKeyForIp(resolveClientIp(req, trustedProxies))) ?? 0,
+    anonymousBytes: () => anonInFlight,
   };
 }
 

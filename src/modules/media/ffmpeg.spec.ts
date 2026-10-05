@@ -5,10 +5,11 @@ import { buildFfmpegArgs, voiceEncodeArgs, videoEncodeArgs } from './ffmpeg';
  * "tidying": the quoting inside the scale filter, and the codec choices WhatsApp actually requires.
  *
  * The scale quoting is not cosmetic. ffmpeg splits a filter description on commas, so the comma
- * inside `min(1280,iw)` terminates the filter unless the expression is quoted — the unquoted form
- * fails with `Invalid size 'min(1280'`. Because these arguments are passed through spawn rather than
- * a shell, the quotes have to be part of the string itself; a reviewer removing them as redundant
- * shell syntax would break every video conversion, and nothing else here would notice.
+ * inside `if()` or `min()` terminates the filter unless the expression is quoted — the unquoted form
+ * fails to parse (`scale=min(1280,iw)` gave `Invalid size 'min(1280'`). Because these arguments
+ * are passed through spawn rather than a shell, the quotes have to be part of the string itself; a
+ * reviewer removing them as redundant shell syntax would break every video conversion, and nothing
+ * else here would notice.
  */
 describe('ffmpeg encoder arguments', () => {
   /** Read `-flag value` out of an argv array, so assertions do not depend on argument order. */
@@ -51,14 +52,22 @@ describe('ffmpeg encoder arguments', () => {
       expect(valueOf(args, '-movflags')).toBe('+faststart');
     });
 
-    // The regression this exists for: unquoted, ffmpeg reads the filter as `scale=min(1280`.
-    it('quotes the scale expression so its comma stays inside min()', () => {
-      expect(valueOf(args, '-vf')).toBe("scale='min(1280,iw)':-2");
+    // Unquoted, ffmpeg reads the filter as `scale=min(iw`. The frame is fitted inside 1280x720 (or
+    // 720x1280), which keeps every aspect ratio within the Baseline 3.1 frame size the stream declares:
+    // capping only the longer edge left a square 1080x1080 or a 4:3 1280x960 frame above it. Both
+    // edges are kept even, which H.264 requires (an odd 499x281 GIF is refused by libx264).
+    it('quotes the scale expressions, fits the frame within level 3.1 and keeps both edges even', () => {
+      expect(valueOf(args, '-level')).toBe('3.1');
+      expect(valueOf(args, '-vf')).toBe(
+        "scale='min(iw,if(gte(iw,ih),1280,720))':'min(ih,if(gte(iw,ih),720,1280))'" +
+          ':force_original_aspect_ratio=decrease:force_divisible_by=2',
+      );
     });
 
-    // -2 keeps the computed edge even, which H.264 requires; -1 would produce odd heights and fail.
-    it('keeps the derived edge even', () => {
-      expect(valueOf(args, '-vf')).toMatch(/:-2$/);
+    // Level 3.1 also caps the macroblock rate, which is 1280x720 at 30 fps: a 60 fps phone clip kept
+    // its rate and declared a level it exceeded. `-fpsmax` lowers a faster rate and leaves a slower one.
+    it('caps the frame rate at the 30 fps level 3.1 allows for a 720p frame', () => {
+      expect(valueOf(args, '-fpsmax')).toBe('30');
     });
   });
 });
@@ -71,7 +80,31 @@ describe('ffmpeg encoder arguments', () => {
  * every conversion would still succeed — which is exactly why it is pinned here.
  */
 describe('ffmpeg invocation shape', () => {
-  const args = buildFfmpegArgs('/tmp/openwa-convert-x/in.bin', '/tmp/openwa-convert-x/out.ogg', ['-c:a', 'libopus']);
+  const args = buildFfmpegArgs(
+    '/tmp/openwa-convert-x/in.bin',
+    '/tmp/openwa-convert-x/out.ogg',
+    ['-c:a', 'libopus'],
+    1000,
+  );
+
+  // Without it the size cap is only checked after ffmpeg exits, and until then the output can grow
+  // without bound in the temp directory. It must be an output option: before -i it would apply to the
+  // input, after the output path ffmpeg ignores it.
+  it('caps the output size one byte above the limit, as an output option', () => {
+    const at = args.indexOf('-fs');
+    expect(args[at + 1]).toBe('1001');
+    expect(at).toBeGreaterThan(args.indexOf('libopus'));
+    expect(at).toBe(args.length - 3);
+  });
+
+  // ffmpeg parses -fs as a signed 64-bit integer and exits 1 on anything wider, so a row-of-nines cap
+  // meant as "unlimited" would fail every conversion instead.
+  it('keeps the size cap within what ffmpeg accepts, however large the configured limit', () => {
+    for (const limit of [Number('99999999999999999999'), 1e21]) {
+      const huge = buildFfmpegArgs('/in', '/out', [], limit);
+      expect(huge[huge.indexOf('-fs') + 1]).toBe(String(Number.MAX_SAFE_INTEGER));
+    }
+  });
 
   it('confines ffmpeg to the file protocol', () => {
     expect(args[args.indexOf('-protocol_whitelist') + 1]).toBe('file');

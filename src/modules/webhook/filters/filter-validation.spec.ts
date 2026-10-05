@@ -25,3 +25,24 @@ describe('collectFilterErrors (empty conditions)', () => {
     expect(collectFilterErrors({ conditions: [] })).toEqual([]);
   });
 });
+
+describe('collectFilterErrors (unknown keys)', () => {
+  const condition = { field: 'type', operator: 'is', value: ['text'] };
+
+  it('rejects a key beside conditions, which evaluation would ignore', () => {
+    expect(collectFilterErrors({ conditions: [condition], match: 'any' })).toEqual([
+      'filters has unknown key(s): match',
+    ]);
+  });
+
+  it('rejects a condition key evaluation would ignore', () => {
+    expect(collectFilterErrors({ conditions: [{ ...condition, negate: true }] })).toEqual([
+      'conditions[0] has unknown key(s): negate',
+    ]);
+  });
+
+  it('accepts every key a condition declares', () => {
+    const text = { field: 'body', operator: 'contains', value: 'hi', caseSensitive: true };
+    expect(collectFilterErrors({ conditions: [condition, text] })).toEqual([]);
+  });
+});

@@ -16,9 +16,11 @@ export class WorkerCapabilityClient {
   call(verb: string, args: unknown[]): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
       const inFlight = hookConfigStore.getStore()?.inFlight;
+      // Post before registering: an uncloneable arg throws here (rejecting this promise), and an entry
+      // registered first would never be removed, since no cap-result can come back for it.
       this.post(inFlight ? { kind: 'cap', id, verb, args, inFlight } : { kind: 'cap', id, verb, args });
+      this.pending.set(id, { resolve, reject });
     });
   }
 

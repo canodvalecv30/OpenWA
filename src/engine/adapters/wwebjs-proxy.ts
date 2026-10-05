@@ -31,8 +31,15 @@ export interface ProxyLaunchConfig {
 export function buildProxyLaunchConfig(url: string): ProxyLaunchConfig {
   const parsed = new URL(url);
   const serverArg = `${parsed.protocol}//${parsed.host}`;
-  const username = decodeURIComponent(parsed.username);
-  const password = decodeURIComponent(parsed.password);
+  let username: string;
+  let password: string;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    // A lone `%` in a stored URL that bypassed DTO validation; the bare `URI malformed` names nothing.
+    throw new Error('The session proxy URL has malformed percent-encoded credentials');
+  }
   const hasCredentials = username !== '' || password !== '';
   const isSocks = parsed.protocol === 'socks4:' || parsed.protocol === 'socks5:';
   if (hasCredentials && !isSocks) {

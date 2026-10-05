@@ -67,6 +67,15 @@ test('unread increments only for an incoming message in a chat that is not open'
   assert.equal(ownSend.chats[0].unreadCount, 2);
 });
 
+test('a message into a chat marked unread counts as one unread, not zero', () => {
+  const { chats } = applyIncomingToChatList(
+    [chat('a@c.us', { unreadCount: -1 })],
+    { chatId: 'a@c.us', body: 'hi', timestamp: 200 },
+    { activeChatId: 'b@c.us', locationLabel: LOCATION },
+  );
+  assert.equal(chats[0].unreadCount, 1);
+});
+
 test('an unknown chat asks for a refetch, and leaves the list alone', () => {
   const before = [chat('a@c.us')];
 

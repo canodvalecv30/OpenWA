@@ -14,10 +14,14 @@ import {
 } from './filter-types';
 
 const OPERATORS: FilterOperator[] = ['is', 'isNot', 'contains', 'equals'];
+const CONDITION_KEYS = ['field', 'operator', 'value', 'caseSensitive'];
 
 function validateCondition(condition: unknown, index: number): string | null {
   const where = `conditions[${index}]`;
   if (typeof condition !== 'object' || condition === null) return `${where} must be an object`;
+  // Evaluation reads only these keys, so anything else (a `negate`, a typo) would be stored and ignored.
+  const unknown = Object.keys(condition).filter(k => !CONDITION_KEYS.includes(k));
+  if (unknown.length) return `${where} has unknown key(s): ${unknown.join(', ')}`;
   const { field, operator, value, caseSensitive } = condition as Record<string, unknown>;
 
   if (typeof field !== 'string') return `${where}.field must be a string`;
@@ -72,6 +76,8 @@ function validateCondition(condition: unknown, index: number): string | null {
 export function collectFilterErrors(value: unknown): string[] {
   if (value === null || value === undefined) return [];
   if (typeof value !== 'object') return ['filters must be an object'];
+  const extra = Object.keys(value).filter(k => k !== 'conditions');
+  if (extra.length) return [`filters has unknown key(s): ${extra.join(', ')}`];
   const conditions = (value as Record<string, unknown>).conditions;
   if (!Array.isArray(conditions)) return ['filters.conditions must be an array'];
   if (conditions.length > MAX_CONDITIONS) return [`filters.conditions exceeds ${MAX_CONDITIONS} entries`];

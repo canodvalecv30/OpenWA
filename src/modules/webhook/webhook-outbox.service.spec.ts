@@ -1,3 +1,4 @@
+import { In } from 'typeorm';
 import { WebhookOutboxService } from './webhook-outbox.service';
 import { WebhookOutboxEvent } from './entities/webhook-outbox-event.entity';
 
@@ -58,6 +59,15 @@ describe('WebhookOutboxService', () => {
     );
   });
 
+  it('keeps payload when marking queued and excludes already settled rows', async () => {
+    await service.markQueued('wh-1', 'key_wh-1', 'job-1');
+    expect(repo.update).toHaveBeenCalledWith(
+      expect.objectContaining({ state: In(['pending', 'queued']) }),
+      expect.objectContaining({ state: 'queued', deliveryId: 'job-1' }),
+    );
+    expect((repo.update.mock.calls as unknown[][])[0][1]).not.toHaveProperty('payload');
+  });
+
   it('returns only rows that still carry a payload: a retired row is not replayable', async () => {
     const row = (over: Partial<WebhookOutboxEvent>): WebhookOutboxEvent => ({
       id: 'r',
@@ -81,7 +91,7 @@ describe('WebhookOutboxService', () => {
     await expect(service.countAttempt('row-1', 2)).resolves.toBe(true);
 
     expect(repo.update).toHaveBeenCalledWith(
-      { id: 'row-1', state: 'pending' },
+      { id: 'row-1', state: In(['pending', 'queued']) },
       expect.objectContaining({ attempts: 3 }),
     );
   });
@@ -111,7 +121,7 @@ describe('WebhookOutboxService retention', () => {
     ];
     // Deleting a 'pending' row on age would discard the delivery this table exists to protect.
     expect(where.state.type).toBe('not');
-    expect(where.state.value).toBe('pending');
+    expect(where.state.value).toEqual(['pending', 'queued']);
     expect(where.createdAt.type).toBe('lessThan');
   });
 

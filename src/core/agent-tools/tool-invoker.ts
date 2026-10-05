@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { ZodError } from 'zod';
+import { containsNul } from '../../common/validation/no-nul-character';
 import type { AuthService } from '../../modules/auth/auth.service';
 import type { AnyToolDescriptor } from './tool-descriptor';
 
@@ -55,9 +56,9 @@ export async function invokeTool(
       throw new ForbiddenException('API key lacks the required role');
     }
 
-    // A chat-restricted key cannot be filtered on the tool surface yet (chat-scoped tool arguments
-    // are handled in the follow-up slice), so refuse it outright rather than let a tool act on any
-    // chat. Mirrors the REST guard's default-deny for unmarked routes.
+    // Tools carry no chat-scope marks, so a chat-restricted key cannot be confined to its chats here:
+    // refuse it outright rather than let a tool act on any chat. Mirrors the REST guard's
+    // default-deny for routes with no chat dimension.
     if ((apiKey.allowedChats?.length ?? 0) > 0) {
       throw new ForbiddenException('API key is restricted to selected chats');
     }
@@ -78,6 +79,8 @@ export async function invokeTool(
     }
     throw e;
   }
+  // PostgreSQL rejects U+0000 in every text parameter; REST refuses the same input in NulBodyPipe.
+  if (containsNul(input)) throw new BadRequestException('Tool input must not contain a NUL character');
   // The single cast the erasure needs, placed next to the parse that justifies it: `input` is
   // whatever this tool's own `inputSchema` just accepted, which is exactly what its handler declares.
   return tool.handler(input as never, apiKey);

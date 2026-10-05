@@ -33,6 +33,12 @@ describe('resolveJidCandidates', () => {
     expect(await resolveJidCandidates('123@newsletter', directory)).toEqual(['123@newsletter']);
   });
 
+  // An unrecognised domain (a Baileys `@bot` chat, say) is not a phone: minting `@c.us` from its digits
+  // would let the chat-scope guard admit an id the list filter refuses, and widen the chat filter.
+  it('keeps an id with an unrecognised domain literal', async () => {
+    expect(await resolveJidCandidates(`${PHONE}@bot`, directory)).toEqual([`${PHONE}@bot`]);
+  });
+
   it('qualifies a bare number', async () => {
     const out = await resolveJidCandidates(PHONE, directory);
     expect(out).toContain(`${PHONE}@c.us`);

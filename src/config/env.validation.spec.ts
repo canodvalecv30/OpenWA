@@ -67,6 +67,13 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ MEDIA_DOWNLOAD_TIMEOUT_MS: '30000' })).not.toThrow();
   });
 
+  it('accepts 0 for INBOUND_MEDIA_GLOBAL_CONCURRENCY (off) and rejects a negative or suffixed value', () => {
+    expect(() => validateEnv({ INBOUND_MEDIA_GLOBAL_CONCURRENCY: '0' })).not.toThrow();
+    expect(() => validateEnv({ INBOUND_MEDIA_GLOBAL_CONCURRENCY: '16' })).not.toThrow();
+    expect(() => validateEnv({ INBOUND_MEDIA_GLOBAL_CONCURRENCY: '-1' })).toThrow(/INBOUND_MEDIA_GLOBAL_CONCURRENCY/);
+    expect(() => validateEnv({ INBOUND_MEDIA_GLOBAL_CONCURRENCY: '4x' })).toThrow(/INBOUND_MEDIA_GLOBAL_CONCURRENCY/);
+  });
+
   // Unset and empty stay the operator's way of taking the default; compose forwards a blank.
   it('leaves an unset or blank media knob alone', () => {
     expect(() => validateEnv({})).not.toThrow();
@@ -95,6 +102,21 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ STORAGE_TYPE: 'ss' })).toThrow(/STORAGE_TYPE/);
     expect(() => validateEnv({ STORAGE_TYPE: 'local' })).not.toThrow();
     expect(() => validateEnv({ STORAGE_TYPE: 's3' })).not.toThrow();
+  });
+
+  it('accepts MESSAGE_INLINE_MEDIA inline or archive, and refuses a typo', () => {
+    expect(() => validateEnv({ MESSAGE_INLINE_MEDIA: 'inline' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_INLINE_MEDIA: 'archive', CHAT_MEDIA_ARCHIVE_ENABLED: 'true' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_INLINE_MEDIA: 'archived' })).toThrow(/MESSAGE_INLINE_MEDIA must be one of/);
+  });
+
+  it('refuses MESSAGE_INLINE_MEDIA=archive without the archiver, which would silently do nothing', () => {
+    expect(() => validateEnv({ MESSAGE_INLINE_MEDIA: 'archive' })).toThrow(
+      /MESSAGE_INLINE_MEDIA=archive needs CHAT_MEDIA_ARCHIVE_ENABLED=true/,
+    );
+    expect(() => validateEnv({ MESSAGE_INLINE_MEDIA: 'archive', CHAT_MEDIA_ARCHIVE_ENABLED: 'false' })).toThrow(
+      /needs CHAT_MEDIA_ARCHIVE_ENABLED=true/,
+    );
   });
 
   // The runtime compares these raw (`=== 'postgres'`, the engine plugin lookup, `=== 's3'`), so a
@@ -164,13 +186,22 @@ describe('validateEnv', () => {
     expect(() => validateEnv({})).not.toThrow();
   });
 
-  it('rejects 0 for a rate-limit limit or the webhook timeout (self-DoS), but allows 0 where it is meaningful', () => {
+  it('rejects 0 for a rate-limit limit or window or the webhook timeout (self-DoS), but allows 0 where it is meaningful', () => {
     expect(() => validateEnv({ RATE_LIMIT_SHORT_LIMIT: '0' })).toThrow(/RATE_LIMIT_SHORT_LIMIT/);
     expect(() => validateEnv({ RATE_LIMIT_MEDIUM_LIMIT: '0' })).toThrow(/RATE_LIMIT_MEDIUM_LIMIT/);
     expect(() => validateEnv({ RATE_LIMIT_LONG_LIMIT: '0' })).toThrow(/RATE_LIMIT_LONG_LIMIT/);
     expect(() => validateEnv({ WEBHOOK_TIMEOUT: '0' })).toThrow(/WEBHOOK_TIMEOUT/);
-    // 0 stays valid where it has a real meaning: unlimited sessions, no webhook retries, a TTL.
-    expect(() => validateEnv({ MAX_CONCURRENT_SESSIONS: '0', RATE_LIMIT_SHORT_TTL: '0' })).not.toThrow();
+    // A 0 window expires every hit as it lands, which switches that tier off just as a 0 limit would.
+    for (const key of [
+      'RATE_LIMIT_SHORT_TTL',
+      'RATE_LIMIT_MEDIUM_TTL',
+      'RATE_LIMIT_LONG_TTL',
+      'INGRESS_INSTANCE_TTL',
+    ]) {
+      expect(() => validateEnv({ [key]: '0' })).toThrow(new RegExp(`${key} must be a positive integer`));
+    }
+    // 0 stays valid where it has a real meaning: unlimited sessions, no webhook retry backoff.
+    expect(() => validateEnv({ MAX_CONCURRENT_SESSIONS: '0', WEBHOOK_RETRY_DELAY: '0' })).not.toThrow();
     // a positive value still passes
     expect(() => validateEnv({ RATE_LIMIT_SHORT_LIMIT: '10', WEBHOOK_TIMEOUT: '10000' })).not.toThrow();
   });
@@ -180,6 +211,15 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ INFLIGHT_BODY_BUDGET_BYTES: '100mb' })).toThrow(/INFLIGHT_BODY_BUDGET_BYTES/);
     expect(() => validateEnv({ INFLIGHT_BODY_BUDGET_BYTES: '-5' })).toThrow(/INFLIGHT_BODY_BUDGET_BYTES/);
     expect(() => validateEnv({ INFLIGHT_BODY_BUDGET_BYTES: '104857600' })).not.toThrow();
+  });
+
+  it('rejects a BODY_SIZE_LIMIT that refuses every body or would silently fall back to the default', () => {
+    for (const value of ['0', '0kb', '0.5', '50M', '50MiB', '50 MiB', 'abc']) {
+      expect(() => validateEnv({ BODY_SIZE_LIMIT: value })).toThrow(/BODY_SIZE_LIMIT must be a positive size/);
+    }
+    for (const value of ['25mb', '1.5gb', '1048576', '50 MB']) {
+      expect(() => validateEnv({ BODY_SIZE_LIMIT: value })).not.toThrow();
+    }
   });
 
   it('rejects a negative/non-integer webhook fan-out knob (0 is a documented escape hatch)', () => {
@@ -199,6 +239,30 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ AUDIT_RETENTION_DAYS: '0' })).not.toThrow();
     expect(() => validateEnv({ AUDIT_RETENTION_DAYS: '-1' })).not.toThrow();
     expect(() => validateEnv({ AUDIT_RETENTION_DAYS: '90' })).not.toThrow();
+  });
+
+  it('rejects a non-integer message retention and accepts 0 and negatives as "keep forever"', () => {
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '30d' })).toThrow(/MESSAGE_RETENTION_DAYS/);
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '0' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '-1' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '30' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '36500' })).not.toThrow();
+    expect(() => validateEnv({ MESSAGE_RETENTION_DAYS: '36501' })).toThrow(/MESSAGE_RETENTION_DAYS.*36500/);
+  });
+
+  // A "keep forever" row of nines binds on SQLite as a truncated year that sorts after today, so the
+  // prune would delete every row. Each retention window shares the message-retention cap.
+  it.each([
+    'AUDIT_RETENTION_DAYS',
+    'CHAT_MEDIA_ARCHIVE_TTL_DAYS',
+    'WEBHOOK_FAILURE_RETENTION_DAYS',
+    'WEBHOOK_OUTBOX_RETENTION_DAYS',
+    'INGRESS_RETENTION_DAYS',
+    'INGRESS_DEDUP_RETENTION_DAYS',
+  ])('rejects a %s above 36500 days', key => {
+    expect(() => validateEnv({ [key]: '9999999' })).toThrow(new RegExp(`${key} must be at most 36500`));
+    expect(() => validateEnv({ [key]: '36501' })).toThrow(new RegExp(`${key} must be at most 36500`));
+    expect(() => validateEnv({ [key]: '36500' })).not.toThrow();
   });
 
   it('rejects a non-positive / non-integer WEBHOOK_MAX_PAYLOAD_BYTES (0 would reject every dispatch)', () => {
@@ -535,15 +599,94 @@ describe('validateEnv', () => {
     'S3_REPROBE_INTERVAL_MS',
     'STORAGE_EXPORT_TTL_MS',
     'STORAGE_EXPORT_SWEEP_MAX_AGE_MS',
+    'WEBHOOK_DEGRADED_SESSION_CONCURRENCY',
   ])('rejects a unit-suffixed or non-positive %s and accepts a plain count', key => {
     expect(() => validateEnv({ [key]: '1h' })).toThrow(new RegExp(`${key} must be a positive integer`));
     expect(() => validateEnv({ [key]: '0' })).toThrow(new RegExp(`${key} must be a positive integer`));
     expect(() => validateEnv({ [key]: '3600000' })).not.toThrow();
   });
 
+  // Each read fell back to the default on 0 or garbage, or passed a negative or fractional value on.
+  it.each(['SEARCH_LIMIT_MAX', 'INGRESS_MAX_ATTEMPTS', 'WEBHOOK_WORKER_CONCURRENCY', 'INGRESS_WORKER_CONCURRENCY'])(
+    'rejects a non-positive or non-integer %s and accepts a plain count',
+    key => {
+      for (const bad of ['0', '-5', '2.5', 'abc', '5x']) {
+        expect(() => validateEnv({ [key]: bad })).toThrow(new RegExp(`${key} must be a positive integer`));
+      }
+      expect(() => validateEnv({ [key]: '7' })).not.toThrow();
+      expect(() => validateEnv({ [key]: '' })).not.toThrow();
+      expect(() => validateEnv({ [key]: '  ' })).not.toThrow();
+    },
+  );
+
+  // Read as an exact 'true'/'false' override; anything else falls back to the NODE_ENV default, so
+  // CSP_UPGRADE_INSECURE_REQUESTS=False kept the blank-dashboard trap on in production.
+  it.each([
+    'CSP_UPGRADE_INSECURE_REQUESTS',
+    'ENABLE_SWAGGER',
+    'VALIDATION_ERROR_DETAIL',
+    'PLUGIN_INSTALL_REQUIRE_PIN',
+    'WEBHOOK_SSRF_REDIRECTS',
+  ])('accepts only an exact true or false for %s', key => {
+    for (const bad of ['False', 'TRUE', '0', 'false\r']) {
+      expect(() => validateEnv({ [key]: bad })).toThrow(new RegExp(`${key} must be "true" or "false"`));
+    }
+    for (const ok of ['true', 'false', '']) {
+      expect(() => validateEnv({ [key]: ok })).not.toThrow();
+    }
+  });
+
+  it('accepts only an exact true or false for REDIS_TLS', () => {
+    expect(() => validateEnv({ REDIS_TLS: 'yes' })).toThrow(/REDIS_TLS must be "true" or "false"/);
+    expect(() => validateEnv({ REDIS_TLS: 'true ' })).toThrow(/REDIS_TLS/);
+    expect(() => validateEnv({ REDIS_TLS: 'true' })).not.toThrow();
+    expect(() => validateEnv({ REDIS_TLS: '' })).not.toThrow();
+  });
+
+  it.each(['INGRESS_RETRY_DELAY_MS', 'REDIS_CACHE_DB'])('rejects a negative or non-integer %s and keeps 0', key => {
+    for (const bad of ['-1', '1.5', 'abc']) {
+      expect(() => validateEnv({ [key]: bad })).toThrow(new RegExp(`${key} must be a non-negative integer`));
+    }
+    expect(() => validateEnv({ [key]: '0' })).not.toThrow();
+    expect(() => validateEnv({ [key]: '' })).not.toThrow();
+  });
+
   it('rejects a unit-suffixed CHAT_MEDIA_ARCHIVE_TTL_DAYS but keeps 0 (keep forever)', () => {
     expect(() => validateEnv({ CHAT_MEDIA_ARCHIVE_TTL_DAYS: '30d' })).toThrow(/CHAT_MEDIA_ARCHIVE_TTL_DAYS/);
     expect(() => validateEnv({ CHAT_MEDIA_ARCHIVE_TTL_DAYS: '0' })).not.toThrow();
+  });
+
+  // parseInt reads a unit-suffixed value as its leading digits: `5mb` became a 5-byte plugin download cap.
+  it.each([
+    ['PLUGIN_DOWNLOAD_MAX_BYTES', '5mb'],
+    ['PLUGIN_STORAGE_MAX_BYTES', '50mb'],
+    ['PLUGIN_CAP_TIMEOUT_MS', '30s'],
+    ['TEMPLATE_RENDER_MAX_CHARS', '64k'],
+    ['STORAGE_IMPORT_MAX_BYTES', '200mb'],
+    ['STORAGE_IMPORT_MAX_ENTRIES', '1e5'],
+    ['STORAGE_LIST_MAX_FILES', '100k'],
+    ['BAILEYS_MESSAGE_STORE_LIMIT', '5k'],
+  ])('rejects a unit-suffixed or zero %s', (key, bad) => {
+    expect(() => validateEnv({ [key]: bad })).toThrow(new RegExp(`${key} must be a positive integer`));
+    expect(() => validateEnv({ [key]: '0' })).toThrow(new RegExp(`${key} must be a positive integer`));
+    expect(() => validateEnv({ [key]: '1000' })).not.toThrow();
+  });
+
+  it('rejects a unit-suffixed SHUTDOWN_DELAY_MS but keeps 0 (no drain)', () => {
+    expect(() => validateEnv({ SHUTDOWN_DELAY_MS: '3s' })).toThrow(/SHUTDOWN_DELAY_MS must be a non-negative integer/);
+    expect(() => validateEnv({ SHUTDOWN_DELAY_MS: '0' })).not.toThrow();
+  });
+
+  it.each([
+    'WEBHOOK_FAILURE_RETENTION_DAYS',
+    'WEBHOOK_OUTBOX_RETENTION_DAYS',
+    'INGRESS_RETENTION_DAYS',
+    'INGRESS_DEDUP_RETENTION_DAYS',
+  ])('rejects a non-integer %s and keeps 0 and negatives', key => {
+    expect(() => validateEnv({ [key]: 'ninety' })).toThrow(new RegExp(`${key} must be an integer`));
+    expect(() => validateEnv({ [key]: '30d' })).toThrow(new RegExp(`${key} must be an integer`));
+    expect(() => validateEnv({ [key]: '0' })).not.toThrow();
+    expect(() => validateEnv({ [key]: '-1' })).not.toThrow();
   });
 
   // Node fires a timer delay above 2^31-1 ms after 1 ms, so these would spin instead of waiting.
@@ -556,8 +699,82 @@ describe('validateEnv', () => {
     'MESSAGE_REAPER_INTERVAL_MS',
     'WEBHOOK_RECONCILE_INTERVAL_MS',
     'INGRESS_RECONCILE_INTERVAL_MS',
+    'SESSION_TAKEOVER_SWEEP_MS',
+    'SESSION_PROXY_TIMEOUT_MS',
+    'MEDIA_DOWNLOAD_TIMEOUT_MS',
+    'WEBHOOK_TIMEOUT',
+    'RATE_LIMIT_SHORT_TTL',
+    'RATE_LIMIT_MEDIUM_TTL',
+    'RATE_LIMIT_LONG_TTL',
+    'INGRESS_INSTANCE_TTL',
   ])('rejects a %s above the Node timer ceiling', key => {
     expect(() => validateEnv({ [key]: '2147483648' })).toThrow(new RegExp(`${key} must not exceed 2147483647 ms`));
     expect(() => validateEnv({ [key]: '2147483647' })).not.toThrow();
+  });
+
+  // 0 disables each sweep; a negative value used to boot clean and keep the sweep running.
+  it.each(['MESSAGE_REAPER_INTERVAL_MS', 'WEBHOOK_RECONCILE_INTERVAL_MS', 'INGRESS_RECONCILE_INTERVAL_MS'])(
+    'rejects a negative %s and keeps 0 as the off switch',
+    key => {
+      expect(() => validateEnv({ [key]: '-1' })).toThrow(new RegExp(`${key} must be a non-negative integer`));
+      expect(() => validateEnv({ [key]: '0' })).not.toThrow();
+    },
+  );
+
+  // A huge grace builds a cutoff whose year SQLite binds in wrapped form, matching fresh rows.
+  it.each(['MESSAGE_REAPER_GRACE_MS', 'WEBHOOK_RECONCILE_GRACE_MS', 'INGRESS_RECONCILE_GRACE_MS'])(
+    'rejects a malformed or oversized %s',
+    key => {
+      expect(() => validateEnv({ [key]: '1h' })).toThrow(new RegExp(`${key} must be a non-negative integer`));
+      expect(() => validateEnv({ [key]: '-1' })).toThrow(new RegExp(`${key} must be a non-negative integer`));
+      expect(() => validateEnv({ [key]: '999999999999999' })).toThrow(
+        new RegExp(`${key} must be at most 3153600000000`),
+      );
+      expect(() => validateEnv({ [key]: '3153600000000' })).not.toThrow();
+      expect(() => validateEnv({ [key]: '0' })).not.toThrow();
+    },
+  );
+
+  it('rejects a non-positive or overflowing SSRF_DNS_TIMEOUT_MS', () => {
+    expect(() => validateEnv({ SSRF_DNS_TIMEOUT_MS: '0' })).toThrow(/SSRF_DNS_TIMEOUT_MS must be a positive integer/);
+    expect(() => validateEnv({ SSRF_DNS_TIMEOUT_MS: '10s' })).toThrow(/SSRF_DNS_TIMEOUT_MS must be a positive integer/);
+    expect(() => validateEnv({ SSRF_DNS_TIMEOUT_MS: '2147483648' })).toThrow(
+      /SSRF_DNS_TIMEOUT_MS must not exceed 2147483647 ms/,
+    );
+    expect(() => validateEnv({ SSRF_DNS_TIMEOUT_MS: '2147483647' })).not.toThrow();
+  });
+
+  // pg arms these with setTimeout and sends statement_timeout to a server capped at INT_MAX; 0 still disables.
+  it.each(['DATABASE_CONNECTION_TIMEOUT_MS', 'DATABASE_IDLE_TIMEOUT_MS', 'DATABASE_STATEMENT_TIMEOUT_MS'])(
+    'rejects a %s above 2147483647 ms and keeps 0',
+    key => {
+      expect(() => validateEnv({ [key]: '99999999999' })).toThrow(new RegExp(`${key} must not exceed 2147483647 ms`));
+      expect(() => validateEnv({ [key]: '2147483647' })).not.toThrow();
+      expect(() => validateEnv({ [key]: '0' })).not.toThrow();
+    },
+  );
+
+  it('rejects a SESSION_LEASE_HEARTBEAT_MS above the Node timer ceiling even inside a longer lease', () => {
+    const lease = { SESSION_LEASE_TTL_MS: '5000000000' };
+    expect(() => validateEnv({ ...lease, SESSION_LEASE_HEARTBEAT_MS: '2147483648' })).toThrow(
+      /SESSION_LEASE_HEARTBEAT_MS must not exceed 2147483647 ms/,
+    );
+    expect(() => validateEnv({ ...lease, SESSION_LEASE_HEARTBEAT_MS: '2147483647' })).not.toThrow();
+  });
+
+  // Send verbs arm four times this budget, so its ceiling is a quarter of the timer ceiling.
+  it('rejects a PLUGIN_CAP_TIMEOUT_MS whose send-verb budget overflows the Node timer ceiling', () => {
+    expect(() => validateEnv({ PLUGIN_CAP_TIMEOUT_MS: '536870912' })).toThrow(
+      /PLUGIN_CAP_TIMEOUT_MS must not exceed 536870911 ms/,
+    );
+    expect(() => validateEnv({ PLUGIN_CAP_TIMEOUT_MS: '536870911' })).not.toThrow();
+  });
+
+  // A direct (queue-off) delivery doubles the delay on each retry, up to 2^3 for the maximum retryCount of 5.
+  it('rejects a WEBHOOK_RETRY_DELAY whose last direct-delivery backoff overflows the Node timer ceiling', () => {
+    expect(() => validateEnv({ WEBHOOK_RETRY_DELAY: '268435456' })).toThrow(
+      /WEBHOOK_RETRY_DELAY must not exceed 268435455 ms/,
+    );
+    expect(() => validateEnv({ WEBHOOK_RETRY_DELAY: '268435455' })).not.toThrow();
   });
 });

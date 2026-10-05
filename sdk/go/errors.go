@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -22,7 +23,9 @@ var (
 	ErrBadRequest = errors.New("openwa: bad request")
 	// ErrUnauthorized is returned for a 401 (missing or invalid API key).
 	ErrUnauthorized = errors.New("openwa: unauthorized")
-	// ErrForbidden is returned for a 403 (insufficient role).
+	// ErrForbidden is returned for a 403: the API key's role or scope (session,
+	// IP or chat allow-list) refuses the call, or WhatsApp itself refused the
+	// operation (for example, missing group admin rights).
 	ErrForbidden = errors.New("openwa: forbidden")
 	// ErrNotFound is returned for a 404.
 	ErrNotFound = errors.New("openwa: not found")
@@ -30,11 +33,13 @@ var (
 	ErrConflict = errors.New("openwa: conflict")
 	// ErrRateLimited is returned for a 429 (too many requests). The global rate
 	// limiter's 429 lifts when its window expires (seconds for the per-second
-	// tier, up to an hour for the hourly tier by default); its delay is only in
-	// the Retry-After response header, which APIError does not carry but
-	// WithRetry honors. A 429 whose Body has code "SEND_PACING_LIMITED" is not
-	// transient: do not retry it before the body's retryAfterSeconds, which can
-	// be hours.
+	// tier, up to an hour for the hourly tier by default); APIError.RetryAfter
+	// carries its Retry-After header, which WithRetry also honors. A 429 whose
+	// Code is "SEND_PACING_LIMITED" is usually not transient: do not retry it
+	// before RetryAfter, which then comes from the body: a few seconds when
+	// only sends still in flight caused it, the rest of the failure breaker's
+	// cooldown (SEND_PACING_BREAKER_COOLDOWN_MS, 15 minutes by default) after a
+	// run of send failures, otherwise up to the next UTC day.
 	ErrRateLimited = errors.New("openwa: rate limited")
 	// ErrNotImplemented is returned for a 501 (the active engine does not
 	// support this operation).
@@ -45,10 +50,12 @@ var (
 	// because WhatsApp may never answer that query, so bound any retry. The
 	// non-idempotent sends are deliberately left unbounded by the gateway so a
 	// slow WhatsApp reply never answers one, and in a multi-node deployment a
-	// forwarded request answers 503 only when the owner node was never reached.
-	// A forward that fails after the request was sent answers 502 or 504
-	// instead: the owner may already have carried it out, so do not repeat a
-	// non-idempotent send on those unchecked.
+	// forward that fails before reaching the owner node answers 503. A 503 from
+	// the owner itself is relayed unchanged and means the engine did not
+	// confirm in time, so a bounded write may still have been applied; re-read
+	// the state before repeating it. A forward that fails after the request was
+	// sent answers 502 or 504 instead: the owner may already have carried it
+	// out, so do not repeat a non-idempotent send on those unchecked.
 	ErrServiceUnavailable = errors.New("openwa: service unavailable")
 )
 
@@ -69,6 +76,15 @@ type APIError struct {
 	Body any
 	// Context is the "METHOD /path" that produced the error.
 	Context string
+	// Code is the body's machine-readable "code" (e.g. "SEND_PACING_LIMITED"),
+	// when the body carries one.
+	Code string
+	// RetryAfter is how long to wait before retrying: the body's
+	// retryAfterSeconds when present, else the Retry-After header (seconds or
+	// an HTTP date). Zero when the response names no delay.
+	RetryAfter time.Duration
+	// Header is the response header.
+	Header http.Header
 }
 
 func (e *APIError) Error() string {
@@ -100,8 +116,10 @@ func (e *APIError) Is(target error) bool {
 }
 
 // TimeoutError is returned when a request exceeds the configured timeout (or the
-// caller's context deadline).
+// caller's context deadline), whether waiting for the response or reading its body.
 type TimeoutError struct {
+	// Timeout is the client timeout that ran out, or zero when the caller's
+	// context deadline fired first.
 	Timeout time.Duration
 	// Err is the underlying cause (context.DeadlineExceeded or a net timeout).
 	Err error
@@ -126,7 +144,7 @@ type nestEnvelope struct {
 
 // parseAPIError builds an *APIError from a raw response body, extracting a
 // readable message from the NestJS envelope when the body matches that shape.
-func parseAPIError(status int, raw []byte, context string) *APIError {
+func parseAPIError(status int, raw []byte, context string, header http.Header) *APIError {
 	var body any
 	var envelope *nestEnvelope
 
@@ -146,13 +164,24 @@ func parseAPIError(status int, raw []byte, context string) *APIError {
 		kind = envelope.Error
 	}
 
-	return &APIError{
+	apiErr := &APIError{
 		StatusCode: status,
 		Message:    message,
 		Kind:       kind,
 		Body:       body,
 		Context:    context,
+		Header:     header,
 	}
+	fields, _ := body.(map[string]any)
+	apiErr.Code, _ = fields["code"].(string)
+	// The body's retryAfterSeconds wins: send pacing puts its wait (possibly
+	// hours) only there, and a header added by a proxy must not shorten it.
+	if secs, ok := fields["retryAfterSeconds"].(float64); ok && secs >= 0 {
+		apiErr.RetryAfter = time.Duration(secs * float64(time.Second))
+	} else if d, ok := retryAfterHeader(header); ok {
+		apiErr.RetryAfter = d
+	}
+	return apiErr
 }
 
 func messageFromEnvelope(envelope *nestEnvelope, body any) string {

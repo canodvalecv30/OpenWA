@@ -1,5 +1,5 @@
 import { EXPORT_TABLES } from './export-tables';
-import type { SessionRow, WebhookRow } from './migration-tables.types';
+import type { SessionRow, WebhookDeliveryFailureRow, WebhookRow } from './migration-tables.types';
 
 /**
  * The credentials a backup payload must not carry.
@@ -90,6 +90,17 @@ describe('export redaction', () => {
       expect(rows[0]).not.toHaveProperty('secret');
       expect(rows[0]).not.toHaveProperty('headers');
       expect(rows[0].url).toBe('https://example.com/hook');
+    });
+  });
+
+  describe('webhook delivery-failure replay payload', () => {
+    it('drops the replay copy of the event and keeps the record', () => {
+      const rows = runAfterRead('webhookDeliveryFailures', [
+        { id: 'f1', webhookId: 'w1', lastError: 'HTTP 503: x', payload: '{"body":"private"}' },
+      ] as unknown as WebhookDeliveryFailureRow[]);
+
+      expect(rows[0]).not.toHaveProperty('payload');
+      expect(rows[0].lastError).toBe('HTTP 503: x');
     });
   });
 });

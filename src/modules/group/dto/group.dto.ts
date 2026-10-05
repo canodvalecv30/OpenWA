@@ -115,12 +115,6 @@ export class JoinGroupDto {
 }
 
 /**
- * All fields optional, but at least one must be present — enforced in GroupService.updateGroupSettings
- * (a class-validator "at least one of" idiom does not exist; an empty body is a client error, 400).
- * ValidateIf (not @IsOptional) so an explicit `null` fails validation (400) instead of being applied
- * as a value; only `undefined` (absent) skips the field.
- */
-/**
  * Group picture payload. Mirrors SetProfilePictureDto: provide exactly one of `url` or `base64`
  * (base64 wins when both are present), and a `mimetype` when using base64.
  */
@@ -135,7 +129,6 @@ export class SetGroupPictureDto {
   @ApiPropertyOptional({ description: 'Base64 encoded image data' })
   @IsOptional()
   @IsString()
-  @ValidateIf((o: SetGroupPictureDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({ description: 'Image MIME type (required when using base64)', example: 'image/jpeg' })
@@ -147,6 +140,12 @@ export class SetGroupPictureDto {
   mimetype?: string;
 }
 
+/**
+ * All fields optional, but at least one must be present — enforced in GroupService.updateGroupSettings
+ * (a class-validator "at least one of" idiom does not exist; an empty body is a client error, 400).
+ * ValidateIf (not @IsOptional) so an explicit `null` fails validation (400) instead of being applied
+ * as a value; only `undefined` (absent) skips the field.
+ */
 export class GroupSettingsDto {
   @ApiPropertyOptional({ description: 'Only admins can send messages (announce group)' })
   @ToStrictBoolean()

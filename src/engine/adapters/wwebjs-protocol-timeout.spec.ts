@@ -220,15 +220,35 @@ describe('a protocol timeout is a 503, never a not-found verdict', () => {
     expect(reportIfPageTransportError).not.toHaveBeenCalled();
   });
 
-  // The two list reads walk the whole store in one command, so they are the ones a large account
-  // pushes past the budget; neither has a not-found verdict, but a raw rethrow would answer 500.
+  // Mute and pin resolve the chat first, so the write itself is where a slow renderer runs out the budget.
   it.each([
-    ['getContacts', (host: WwebjsEngineHost) => new WwebjsContacts(host).getContacts(), 'pupPage'],
-    ['getChats', (host: WwebjsEngineHost) => chats(host).getChats(), 'getChats'],
-  ] as const)('%s answers an expired protocolTimeout with a 503 and reports no death', async (_op, call, via) => {
+    ['muteChat', (host: WwebjsEngineHost) => chats(host).muteChat(CHAT, Date.now() + 60_000)],
+    ['unmuteChat', (host: WwebjsEngineHost) => chats(host).muteChat(CHAT, null)],
+    ['pinChat', (host: WwebjsEngineHost) => chats(host).pinChat(CHAT, true)],
+    ['unpinChat', (host: WwebjsEngineHost) => chats(host).pinChat(CHAT, false)],
+  ] as const)('%s answers a protocolTimeout on its write with a 503 and reports no death', async (method, call) => {
+    const timeout = new Error(await puppeteerProtocolTimeoutMessage());
+    const { host, reportIfPageTransportError } = makeHost({
+      getChatById: jest.fn().mockResolvedValue({ id: { _serialized: CHAT } }),
+      [method]: jest.fn().mockRejectedValue(timeout),
+    });
+
+    await expect(call(host)).rejects.toBeInstanceOf(EngineTransportError);
+    expect(reportIfPageTransportError).not.toHaveBeenCalled();
+  });
+
+  // The list reads walk the whole store in one command, so they are the ones a large account
+  // pushes past the budget; none has a not-found verdict, but a raw rethrow would answer 500.
+  it.each([
+    ['getContacts', (host: WwebjsEngineHost) => new WwebjsContacts(host).getContacts()],
+    ['getChats', (host: WwebjsEngineHost) => chats(host).getChats()],
+    ['getGroups', (host: WwebjsEngineHost) => new WwebjsGroups(host).getGroups()],
+  ] as const)('%s answers an expired protocolTimeout with a 503 and reports no death', async (_op, call) => {
     const timeout = jest.fn().mockRejectedValue(new Error(await puppeteerProtocolTimeoutMessage()));
-    const client = via === 'pupPage' ? { pupPage: { evaluate: timeout } } : { getChats: timeout };
-    const { host, reportIfPageTransportError } = makeHost(client as unknown as Record<string, jest.Mock>);
+    const { host, reportIfPageTransportError } = makeHost({ pupPage: { evaluate: timeout } } as unknown as Record<
+      string,
+      jest.Mock
+    >);
 
     await expect(call(host)).rejects.toBeInstanceOf(EngineTransportError);
     expect(timeout).toHaveBeenCalledTimes(1);

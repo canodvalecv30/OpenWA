@@ -1,9 +1,9 @@
 import type { Client } from 'whatsapp-web.js';
-import { HttpException } from '@nestjs/common';
 import { WwebjsContacts } from './wwebjs-contacts';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { createLogger } from '../../common/services/logger.service';
 import { type WwebjsEngineHost } from './wwebjs-host';
+import { WwebjsLifecycle } from './wwebjs-lifecycle';
 
 /**
  * A failed lookup must not be reported as a negative result.
@@ -17,29 +17,23 @@ import { type WwebjsEngineHost } from './wwebjs-host';
  * That is the inverse of Baileys, where a no-picture verdict *does* arrive as a throw and swallowing
  * it is correct — which is why the two adapters deliberately do not share a shape here.
  *
- * `getContactById` is a different case and is left alone: `window.WWebJS.getContact` has no
- * try/catch and reads `contact.isBusiness` straight off `Contact.find`, so an unknown contact throws
- * a TypeError on null. There a throw genuinely can mean not-found, and folding it to `null` (→ 404)
- * is defensible. What it lacks entirely, unlike its siblings, is the transport branch: a dead page
- * during a contact lookup currently reads as a clean 404.
+ * `getContactById` is a different case: `window.WWebJS.getContact` has no try/catch and reads
+ * `contact.isBusiness` straight off `Contact.find`, so an unknown contact throws a TypeError on null.
+ * There a throw genuinely can mean not-found, and folding it to `null` (→ 404) is defensible. A dead
+ * page is not a missing contact, though: it answers 503 and is reported as a death signal, and a
+ * protocol timeout answers 503 without one.
  */
 
 const logger = createLogger('wwebjs-lookup-failure.spec');
-
-const PAGE_TRANSPORT_ERROR_PATTERN =
-  /protocol error|target closed|targetclosederror|detached frame|session closed|connection closed/i;
 
 function makeContacts(client: Partial<Record<string, jest.Mock>>): {
   contacts: WwebjsContacts;
   reported: string[];
 } {
   const reported: string[] = [];
-  // Mirrors WwebjsLifecycle.isPageTransportError, including its HttpException exclusion: an error
-  // this application built is never a dead page, and without the guard here the stub would classify
-  // a domain 404 the real adapter no longer does.
+  // The real classifier, so these cases follow its exclusions instead of a copy that drifts from them.
   const isPageTransportError = (error: unknown): boolean =>
-    !(error instanceof HttpException) &&
-    PAGE_TRANSPORT_ERROR_PATTERN.test(error instanceof Error ? error.message : String(error));
+    WwebjsLifecycle.prototype.isPageTransportError.call({}, error);
   const host = {
     ensureReady: jest.fn(),
     getClient: () => client as unknown as Client,

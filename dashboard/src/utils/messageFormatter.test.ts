@@ -103,6 +103,21 @@ test('hostile input: a flood of formatted segments parses iteratively', () => {
   assert.deepEqual(nodes[1], text(' '));
 });
 
+test('hostile input: openers with no closer do not rescan the rest of the message each time', () => {
+  // Every `*` below follows a space, so none can close, and each opener used to scan to the end of
+  // the body: about 3 s of main thread for one 64k message. The second body adds a valid span per
+  // repetition, which used to rescan the dead `_` openers after every split.
+  for (const evil of ['*a '.repeat(21_000), '_a *b* '.repeat(9_000)]) {
+    const started = performance.now();
+    const nodes = parseMessageBody(evil);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 500, `parsing ${evil.length} chars took ${Math.round(elapsed)} ms`);
+    assert.ok(nodes.length > 0);
+  }
+  assert.deepEqual(parseMessageBody('*a '.repeat(3)), [text('*a *a *a ')]);
+  assert.deepEqual(parseMessageBody('_a *b* _a'), [text('_a '), { type: 'bold', children: [text('b')] }, text(' _a')]);
+});
+
 test('a MENTION_OPEN/MENTION_CLOSE span becomes its own mention node, not text', () => {
   assert.deepEqual(parseMessageBody(`hi ${wrap('@Ravi')} there`), [
     text('hi '),

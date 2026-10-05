@@ -3,6 +3,8 @@ import { buildVCard } from './vcard';
 describe('buildVCard', () => {
   it('strips CR/LF from name and number so extra vCard lines cannot be injected', () => {
     const vcard = buildVCard({ name: 'Alice\r\nEMAIL:attacker@evil.com', number: '+1 234\r\nNOTE:x' });
+    // A bare CR left behind would still read as a line break to some vCard consumers.
+    expect(vcard).not.toMatch(/\r/);
     const lines = vcard.split('\n');
     // No injected lines — exactly the five canonical vCard lines. The crafted text is folded into the
     // FN/TEL values as inline text rather than becoming a standalone EMAIL/NOTE property line.

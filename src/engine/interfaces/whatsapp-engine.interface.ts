@@ -114,7 +114,12 @@ export interface IncomingMessage {
    *  in the raw payload. 0 or undefined = no disappearing timer.
    *  Known values: 86400 (24h), 604800 (7d), 7776000 (90d). */
   ephemeralDuration?: number;
-  /** For group, status and broadcast-list messages, the WID of the sender (`from` is the group or `@broadcast` id). */
+  /**
+   * For group, status and broadcast-list messages, the WID of the sender, where `from` is the group or
+   * `status@broadcast`. A broadcast-list message the account received is filed under the sender's own
+   * chat on Baileys, as WhatsApp lists it, so there `chatId` and `from` name the sender and `author`
+   * repeats it.
+   */
   author?: string;
   /** WIDs @mentioned in the message (empty/absent when none). Surfaced for command targeting. */
   mentionedIds?: string[];
@@ -652,7 +657,7 @@ export interface ReactionEvent {
  *    surfaced), `groups.update` (subject/desc/announce/restrict), `groups.upsert` (this
  *    session added to or joining a group; participantIds is the session's own id) and `group.join-request`
  *    (action 'created' only — the wwebjs event has no revoke/reject counterpart, so only
- *    the shared signal is surfaced; rc13 itself emits the event only for non-admin-add
+ *    the shared signal is surfaced; rc14 itself emits the event only for non-admin-add
  *    requests — the direct self-request stub 144 is unhandled upstream, marked TODO at
  *    Utils/process-message.js:569 — so an invite-link self-request may not fire on Baileys).
  * All ids are in the neutral dialect (`@g.us` / `@c.us`; a lid stays `<id>@lid` when the
@@ -1133,9 +1138,11 @@ export interface ContactCapability {
   getNumberId(number: string): Promise<string | null>;
 
   /**
-   * Best-effort resolution of a contact id to a phone number (MSISDN digits), or `null` when the
-   * engine cannot map it (e.g. a privacy `@lid` the account has never seen). The contact id is the
-   * engine's native scheme; the adapter decides how to resolve it.
+   * Best-effort resolution of a contact id to a phone number (MSISDN digits). `null` is a definitive
+   * "no phone for this id"; a lookup that could not decide (a failed page read, or a lid no cache,
+   * table or key store maps) rejects instead, so a caller that stores the answer never overwrites a
+   * known mapping with a null. The contact id is the engine's native scheme; the adapter decides how
+   * to resolve it.
    */
   resolveContactPhone(contactId: string): Promise<string | null>;
 

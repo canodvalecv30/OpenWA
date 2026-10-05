@@ -15,6 +15,18 @@ describe('WorkerCapabilityClient', () => {
     await expect(pending).resolves.toEqual({ messageId: 'm' });
   });
 
+  it('rejects without keeping a pending entry when the call cannot be posted', async () => {
+    // postMessage throws DataCloneError synchronously for an uncloneable arg (a Promise, a function).
+    const client = new WorkerCapabilityClient(() => {
+      throw new Error('could not be cloned');
+    });
+
+    await expect(client.call('messages.sendText', ['s', 'c', Promise.resolve('x')])).rejects.toThrow(
+      'could not be cloned',
+    );
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0);
+  });
+
   it('rejects on an error cap-result', async () => {
     const sent: WorkerToHostMessage[] = [];
     const client = new WorkerCapabilityClient(m => sent.push(m));

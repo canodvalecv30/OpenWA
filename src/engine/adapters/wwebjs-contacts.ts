@@ -1,4 +1,5 @@
 import { type Client } from 'whatsapp-web.js';
+import { InternalServerErrorException } from '@nestjs/common';
 import { Contact } from '../interfaces/whatsapp-engine.interface';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { userPart } from '../identity/wa-id';
@@ -55,7 +56,9 @@ export async function readLeanContacts(): Promise<LeanContactRead> {
       };
     };
   };
-  const models = w.require('WAWebCollections').Contact.getModelsArray();
+  // A copy: getModelsArray() is the collection's live array, which grows when a new contact writes,
+  // so indexing it across the yields below would read one contact twice and skip another.
+  const models = w.require('WAWebCollections').Contact.getModelsArray().slice();
   const rows: LeanContact[] = [];
   let failed = 0;
   let firstError: string | undefined;
@@ -167,10 +170,13 @@ export class WwebjsContacts {
     // contacts: getContactModel skips getAlternateUserWid for a blocked contact, so a blocked row
     // still reads when that call is broken for everyone else.
     if ((unreadable > 0 && !contacts.some(c => !c.isBlocked)) || (contacts.length === 0 && skipped > 0)) {
-      throw new Error(
+      const reason =
         `WhatsApp Web could not read any unblocked contact (${unreadable} failed, ${skipped} without an id, ` +
-          `${contacts.length} blocked read)${firstError ? `: ${firstError}` : ''}`,
-      );
+        `${contacts.length} blocked read)${firstError ? `: ${firstError}` : ''}`;
+      // Nest does not log an HttpException and the contact service logs nothing, so this line is the
+      // only server-side trace of a page-wide failure.
+      this.host.logger.error(reason);
+      throw new InternalServerErrorException(reason);
     }
     if (skipped > 0) {
       this.host.logger.warn(`Skipped ${skipped} contact(s) without a serialized id`);
@@ -241,13 +247,13 @@ export class WwebjsContacts {
     await withPage(this.host, 'upsertContact', () =>
       this.client().saveOrEditAddressbookContact(userPart(contactId), firstName, lastName),
     );
-    this.host.logger.log(`Saved addressbook contact ${contactId}`);
+    this.host.logger.debug('Saved addressbook contact', { contactId });
   }
 
   async deleteContact(contactId: string): Promise<void> {
     this.host.ensureReady();
     await withPage(this.host, 'deleteContact', () => this.client().deleteAddressbookContact(userPart(contactId)));
-    this.host.logger.log(`Deleted addressbook contact ${contactId}`);
+    this.host.logger.debug('Deleted addressbook contact', { contactId });
   }
 
   async blockContact(contactId: string): Promise<void> {
@@ -256,7 +262,7 @@ export class WwebjsContacts {
       const contact = await this.client().getContactById(contactId);
       await contact.block();
     });
-    this.host.logger.log(`Blocked contact ${contactId}`);
+    this.host.logger.debug('Blocked contact', { contactId });
   }
 
   /**
@@ -276,7 +282,7 @@ export class WwebjsContacts {
       const contact = await this.client().getContactById(contactId);
       await contact.unblock();
     });
-    this.host.logger.log(`Unblocked contact ${contactId}`);
+    this.host.logger.debug('Unblocked contact', { contactId });
   }
 
   async getProfilePicture(contactId: string): Promise<string | null> {

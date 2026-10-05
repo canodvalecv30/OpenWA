@@ -45,15 +45,19 @@ export class WhatsAppWebJsPlugin implements IEnginePlugin {
 
     // Browser config is this engine's OWN namespace, read from the opaque per-engine blob the
     // factory supplies via context.config (the `engine` sub-tree in configuration.ts). The
-    // per-call config carries only engine-neutral fields (sessionId, proxy).
+    // per-call config carries engine-neutral fields (sessionId, proxy) plus sessionDataPath, the base
+    // the factory hardens and purges, which wins over context.config.
     const engineConfig = (this.context?.config ?? this.registeredConfig ?? {}) as {
       sessionDataPath?: string;
       puppeteer?: { headless?: boolean; args?: string[]; executablePath?: string; protocolTimeoutMs?: number };
     };
     const puppeteer = engineConfig.puppeteer ?? {};
-    const sessionDataPath = engineConfig.sessionDataPath ?? './data/sessions';
+    const sessionDataPath =
+      (config.sessionDataPath as string | undefined) ?? engineConfig.sessionDataPath ?? './data/sessions';
     const headless = puppeteer.headless ?? true;
-    const puppeteerArgs = puppeteer.args ?? ['--no-sandbox', '--disable-setuid-sandbox'];
+    // No default here: the adapter owns the fallback flag list (DEFAULT_PUPPETEER_ARGS), so a persisted
+    // plugin config whose `puppeteer` object has no `args` still launches with the documented flags.
+    const puppeteerArgs = puppeteer.args;
     const executablePath = puppeteer.executablePath;
     const protocolTimeoutMs = puppeteer.protocolTimeoutMs;
 

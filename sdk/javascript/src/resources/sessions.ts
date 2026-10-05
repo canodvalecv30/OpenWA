@@ -47,8 +47,9 @@ export class SessionsResource {
   }
 
   /**
-   * Update a running session's configuration. Takes effect without re-linking the account — all three
-   * fields were fixed at creation before this route existed.
+   * Update a session's configuration, in any state, without a restart or re-linking the account (all
+   * three fields were fixed at creation before this route existed). `autoRejectCalls` applies
+   * immediately; `maxReconnectAttempts` and `reconnectBaseDelay` apply on the next start.
    */
   updateConfig(id: string, body: UpdateSessionConfigRequest): Promise<SessionConfig> {
     return this.client.request<SessionConfig>({
@@ -68,7 +69,7 @@ export class SessionsResource {
 
   /**
    * Update per-session proxy settings. No restart is performed — changes apply on the next start.
-   * Send `proxyUrl: null` to clear the proxy. **OPERATOR**
+   * Send `proxyUrl: null` to clear the proxy. **ADMIN** (unscoped key)
    */
   updateProxy(id: string, body: UpdateSessionProxyRequest): Promise<SessionProxy> {
     return this.client.request<SessionProxy>({
@@ -83,7 +84,7 @@ export class SessionsResource {
     return this.client.request<SessionResponse>({ method: 'GET', path: `/api/sessions/${encodeSegment(id)}` });
   }
 
-  /** Create a new session. Requires an OPERATOR-level key. */
+  /** Create a new session. Requires an OPERATOR-level key; setting proxyUrl requires an ADMIN key. */
   create(body: CreateSessionRequest): Promise<SessionResponse> {
     return this.client.request<SessionResponse>({ method: 'POST', path: '/api/sessions', body });
   }
@@ -126,7 +127,13 @@ export class SessionsResource {
     return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/logout` });
   }
 
-  /** Force-kill a stuck session (SIGKILL + teardown). */
+  /**
+   * Force-kill a stuck session (SIGKILL + teardown). Rejects with HTTP `502` and
+   * `code: 'SESSION_FORCE_KILL_INCOMPLETE'` when the session was stopped locally but the
+   * force-destroy threw or timed out, so the engine process may still be running; the status is
+   * settled to `disconnected`, no success audit is written, and a retry answers `400` because no
+   * engine is left to kill. Restart the node to reap a leaked process.
+   */
   forceKill(id: string): Promise<SessionResponse> {
     return this.client.request<SessionResponse>({
       method: 'POST',

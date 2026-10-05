@@ -1,6 +1,8 @@
 import type { WASocket } from '@whiskeysockets/baileys';
 import { BaileysCatalog, BaileysCatalogHost } from './baileys-catalog';
+import { Boom } from '@hapi/boom';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 
 /**
  * Baileys' query() resolves `undefined` when WhatsApp never answers (it catches its own 60s
@@ -117,5 +119,43 @@ describe('BaileysCatalog answers within the deadline', () => {
       productCount: 2,
       url: 'https://wa.me/c/628177',
     });
+  });
+});
+
+describe('BaileysCatalog server refusals', () => {
+  // assertNodeErrorFree turns an <error code="..."> answer into a Boom carrying the numeric code.
+  const refusal = (code: number) => new Boom('refused', { data: code });
+
+  it('maps a refused collections query to EngineRefusedError instead of a raw Boom', async () => {
+    const { catalog } = build({ getCollections: jest.fn().mockRejectedValue(refusal(403)) }, 500);
+    await expect(catalog.getCatalog()).rejects.toBeInstanceOf(EngineRefusedError);
+  });
+
+  it('reads item-not-found as an account with no catalog, as the routes document', async () => {
+    const { catalog } = build(
+      {
+        getCollections: jest.fn().mockRejectedValue(refusal(404)),
+        getCatalog: jest.fn().mockRejectedValue(refusal(404)),
+      },
+      500,
+    );
+    await expect(catalog.getCatalog()).resolves.toBeNull();
+    await expect(catalog.getProduct('a')).resolves.toBeNull();
+    await expect(catalog.getProducts()).resolves.toMatchObject({ products: [], pagination: { total: 0 } });
+  });
+
+  it('fails a walk that hits item-not-found after the first page instead of truncating it', async () => {
+    const getCatalog = jest
+      .fn()
+      .mockResolvedValueOnce({ products: [product('a')], nextPageCursor: 'c1' })
+      .mockRejectedValueOnce(refusal(404));
+    const { catalog } = build({ getCatalog }, 500);
+    await expect(catalog.getProducts()).rejects.toBeInstanceOf(EngineRefusedError);
+  });
+
+  it('leaves a dropped connection unmapped', async () => {
+    const closed = new Boom('Connection Closed', { statusCode: 428 });
+    const { catalog } = build({ getCatalog: jest.fn().mockRejectedValue(closed) }, 500);
+    await expect(catalog.getProducts()).rejects.toBe(closed);
   });
 });

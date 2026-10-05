@@ -46,4 +46,19 @@ describe('annotateCatalog', () => {
     const out = annotateCatalog(entries, [{ id: 'faq-bot', version: '2.0.0' }]);
     expect(out.find(e => e.id === 'faq-bot')!.updateAvailable).toBe(false);
   });
+
+  it('flags the final release as an update over its own installed prerelease', () => {
+    const rc = annotateCatalog(entries, [{ id: 'faq-bot', version: '1.0.0-rc.1' }]);
+    expect(rc.find(e => e.id === 'faq-bot')!.updateAvailable).toBe(true);
+    const prerelease = annotateCatalog(
+      [{ id: 'faq-bot', name: 'FAQ', version: '1.0.0-rc.2' }],
+      [{ id: 'faq-bot', version: '1.0.0' }],
+    );
+    expect(prerelease[0].updateAvailable).toBe(false);
+    const rcToRc = annotateCatalog(
+      [{ id: 'faq-bot', name: 'FAQ', version: '1.0.0-rc.2' }],
+      [{ id: 'faq-bot', version: '1.0.0-rc.1' }],
+    );
+    expect(rcToRc[0].updateAvailable).toBe(false);
+  });
 });

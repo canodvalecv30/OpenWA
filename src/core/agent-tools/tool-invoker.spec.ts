@@ -47,6 +47,21 @@ describe('invokeTool', () => {
     );
   });
 
+  // PostgreSQL rejects U+0000 in every text parameter, so an argument holding one failed the tool's
+  // query or write as an internal error.
+  it('refuses a NUL character anywhere in the input before the handler runs', async () => {
+    const handler = jest.fn();
+    const tool: ToolDescriptor = {
+      ...readTool,
+      inputSchema: z.object({ chatId: z.string(), vars: z.record(z.string(), z.string()) }),
+      handler,
+    };
+    await expect(
+      invokeTool(tool, { chatId: 'a@c.us', vars: { name: 'x\u0000' } }, 'rawkey', auth() as unknown as AuthService),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('passes sessionId from input to validateApiKey when sessionScoped', async () => {
     const a = auth();
     const scoped: ToolDescriptor = {
@@ -78,7 +93,7 @@ describe('invokeTool', () => {
   it('rejects when validateApiKey throws for an out-of-scope session', async () => {
     const a = auth();
     (a.validateApiKey as jest.Mock).mockRejectedValueOnce(
-      new UnauthorizedException('API key not authorized for this session'),
+      new ForbiddenException('API key not authorized for this session'),
     );
     const scoped: ToolDescriptor = {
       ...readTool,
@@ -88,7 +103,7 @@ describe('invokeTool', () => {
     };
     await expect(
       invokeTool(scoped, { sessionId: 'other-session' }, 'rawkey', a as unknown as AuthService),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('enforces requiredRole via hasPermission', async () => {
@@ -150,11 +165,11 @@ describe('invokeTool', () => {
 
     it('is invoked when validateApiKey rejects (IP/revoked/expired/session-not-allowed)', async () => {
       const a = auth();
-      (a.validateApiKey as jest.Mock).mockRejectedValueOnce(new UnauthorizedException('IP address not allowed'));
+      (a.validateApiKey as jest.Mock).mockRejectedValueOnce(new ForbiddenException('IP address not allowed'));
       const onAuthFailure = jest.fn();
       await expect(
         invokeTool(readTool, { n: 1 }, 'rawkey', a as unknown as AuthService, undefined, onAuthFailure),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(onAuthFailure).toHaveBeenCalledTimes(1);
     });
 

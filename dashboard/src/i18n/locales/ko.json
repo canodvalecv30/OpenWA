@@ -36,6 +36,7 @@
     "hoursAgo": "{{count}}시간 전",
     "hoursAgo_other": "{{count}}시간 전",
     "optional": "선택 사항",
+    "fieldTooLong": "최대 {{max}}자입니다(현재 {{count}}자).",
     "language": "언어",
     "back": "뒤로",
     "next": "다음",
@@ -90,6 +91,7 @@
     "noMessageYet": "아직 메시지 없음",
     "unreadBadge": "읽지 않은 메시지 {{count}}개",
     "unreadBadge_other": "읽지 않은 메시지 {{count}}개",
+    "markedUnread": "읽지 않음으로 표시됨",
     "loadingMessages": "메시지 불러오는 중...",
     "loadingOlderMessages": "이전 메시지 불러오는 중...",
     "loadOlderMessagesError": "이전 메시지를 불러오지 못했습니다. 위로 스크롤하여 다시 시도하세요.",
@@ -121,7 +123,6 @@
       "unknownType": "알 수 없는 유형"
     },
     "you": "나",
-    "youPrefix": "나: ",
     "yesterday": "어제",
     "attachTitle": "파일 / 이미지 보내기",
     "emojiTitle": "이모지 선택",
@@ -347,7 +348,7 @@
       "configured": "{{host}} ({{type}})",
       "noProxy": "구성된 프록시 없음",
       "hasCredentials": "자격 증명이 저장되어 있지만 표시되지 않습니다. 변경하려면 전체 URL을 입력하세요.",
-      "hint": "변경 사항은 실행 중인 연결이 아니라 다음 세션 시작 시 적용됩니다. 프록시는 실제로 존재하고 연결 가능해야 합니다. 연결할 수 없는 값이면 QR이 전달되지 않고 시작 요청이 504를 반환합니다.",
+      "hint": "변경 사항은 실행 중인 연결이 아니라 다음 세션 시작 시 적용됩니다. 프록시는 실제로 존재하고 연결 가능해야 합니다. 연결할 수 없는 값이면 QR이 전달되지 않습니다. whatsapp-web.js에서는 시작 요청이 504를 반환하고, Baileys에서는 시작은 성공하지만 세션이 계속 재시도합니다.",
       "createHint": "네트워크에서 WhatsApp에 직접 연결할 수 없을 때만 필요합니다. 실제로 연결 가능한 프록시여야 합니다.",
       "invalidUrl": "유효한 http, https, socks4 또는 socks5 프록시 URL을 입력하세요.",
       "saveSuccessTitle": "프록시 저장 완료",
@@ -446,11 +447,13 @@
     "selectSession": "세션 선택...",
     "session": "세션",
     "events": "이벤트",
+    "noEvents": "이벤트를 하나 이상 선택하세요.",
     "available": "사용 가능한 이벤트",
     "saveChanges": "변경 사항 저장",
     "filters": {
       "title": "필터 (선택 사항)",
       "hint": "모든 조건이 일치할 때만 실행됩니다. 메시지 이벤트에 적용됩니다.",
+      "incomplete": "모든 필터 조건에 값을 지정하고, 조건은 최대 20개, 조건당 값은 최대 100개, 텍스트는 최대 1000자까지 사용하세요.",
       "badge": "필터 {{count}}개",
       "badge_other": "필터 {{count}}개",
       "addCondition": "조건 추가",
@@ -484,11 +487,9 @@
       "valueLabel": "필터 값"
     },
     "columns": {
-      "url": "URL",
       "events": "이벤트",
       "session": "세션",
-      "status": "상태",
-      "actions": "작업"
+      "status": "상태"
     },
     "empty": {
       "title": "설정된 웹훅이 없습니다",
@@ -538,6 +539,33 @@
       "call.missed": "통화에 응답하지 않았을 때",
       "status.received": "연락처가 상태를 게시했을 때",
       "all": "모든 이벤트"
+    },
+    "auth": {
+      "title": "전송 인증",
+      "hint": "선택 사항입니다. 저장된 값은 저장 후 다시 표시되지 않습니다.",
+      "editHint": "저장된 시크릿과 헤더는 표시되지 않습니다. 유지하려면 이 섹션을 변경하지 마세요.",
+      "secret": "서명 시크릿",
+      "secretHint": "16~255자. 모든 전송에는 X-OpenWA-Signature 헤더에 HMAC-SHA256 서명이 포함됩니다.",
+      "secretKeepPlaceholder": "현재 시크릿을 유지하려면 비워 두세요",
+      "generateSecret": "생성",
+      "copySecret": "복사",
+      "secretCopied": "서명 시크릿이 복사되었습니다",
+      "removeSecret": "전송 서명 중지 (시크릿 제거)",
+      "headers": "사용자 지정 헤더",
+      "headerName": "헤더 이름",
+      "headerValue": "헤더 값",
+      "addHeader": "헤더 추가",
+      "removeHeader": "헤더 제거",
+      "replaceHeaders": "사용자 지정 헤더 교체",
+      "replaceHint": "이 행들이 저장된 모든 헤더를 대체합니다. 행이 없으면 저장된 헤더가 제거됩니다.",
+      "errors": {
+        "headerName": "헤더 이름에는 문자, 숫자, 하이픈만 사용할 수 있습니다.",
+        "headerValue": "헤더 값은 최대 1024자이며 제어 문자나 Latin-1 범위 밖의 문자를 사용할 수 없습니다.",
+        "headerReserved": "Content-Type, User-Agent, X-OpenWA-* 및 연결 헤더는 게이트웨이가 설정하므로 사용할 수 없습니다.",
+        "headerDuplicate": "각 헤더 이름은 한 번만 사용할 수 있습니다.",
+        "tooMany": "사용자 지정 헤더는 최대 50개까지 허용됩니다.",
+        "secretLength": "서명 시크릿은 16~255자여야 합니다."
+      }
     }
   },
   "templates": {
@@ -571,6 +599,7 @@
     },
     "empty": {
       "title": "저장된 템플릿이 없습니다",
+      "noMatch": "검색과 일치하는 템플릿이 없습니다.",
       "description": "자주 쓰는 답장이나 알림을 빠르게 보내려면 재사용 가능한 템플릿을 만드세요.",
       "noSessionsTitle": "사용 가능한 세션이 없습니다",
       "noSessionsDesc": "템플릿을 추가하기 전에 WhatsApp 세션을 만드세요.",
@@ -597,6 +626,7 @@
     "createdTitle": "API 키 생성 완료",
     "createdHint": "지금 이 키를 복사해 두세요. 다시 확인할 수 없습니다.",
     "namePlaceholder": "예: Production Key",
+    "nameTooShort": "3자 이상 입력하세요.",
     "rolesTitle": "역할 안내",
     "roles": {
       "admin": "관리자",
@@ -615,11 +645,13 @@
       "status": "상태",
       "lastUsed": "마지막 사용",
       "actions": "작업",
-      "sessions": "세션"
+      "sessions": "세션",
+      "restrictions": "제한"
     },
     "statuses": {
       "active": "활성",
-      "revoked": "폐기됨"
+      "revoked": "폐기됨",
+      "expired": "만료됨"
     },
     "empty": {
       "title": "생성된 API 키가 없습니다",
@@ -637,10 +669,9 @@
       "revoke": "폐기"
     },
     "actions": {
-      "copy": "복사",
       "revoke": "폐기",
       "delete": "삭제",
-      "editSessions": "세션 편집"
+      "edit": "접근 편집"
     },
     "sessions": {
       "label": "세션 접근",
@@ -648,10 +679,36 @@
       "all": "모든 세션",
       "empty": "아직 세션이 없습니다. 세션이 생기면 이 키는 모두에 접근할 수 있습니다.",
       "restricted": "{{count}}개 선택됨",
-      "editTitle": "세션 접근 편집",
       "save": "저장",
       "choose": "세션 선택",
       "leaveAll": "모든 세션에 두기"
+    },
+    "edit": {
+      "title": "키 접근 편집",
+      "signedIn": "이 대시보드는 이 키로 로그인되어 있습니다. 역할, IP 주소, 채팅 또는 만료를 변경하면 로그아웃될 수 있습니다."
+    },
+    "restrictions": {
+      "none": "없음",
+      "ips": "IP: {{count}}",
+      "chats": "채팅: {{count}}",
+      "expires": "{{date}}에 만료",
+      "expired": "{{date}}에 만료됨"
+    },
+    "ips": {
+      "label": "허용된 IP 주소 (선택)",
+      "hint": "한 줄에 IP 주소 또는 CIDR 범위 하나. 모든 주소를 허용하려면 비워 두세요.",
+      "invalid": "IPv4 주소 또는 CIDR 범위가 아닙니다: {{value}}"
+    },
+    "chats": {
+      "label": "채팅 접근 (선택)",
+      "hint": "한 줄에 채팅 하나: @g.us로 끝나는 그룹 ID, @c.us 또는 @lid로 끝나는 연락처 ID, 또는 전화번호. 모든 채팅을 허용하려면 비워 두세요. 채팅이 제한된 키는 해당 키에 열린 경로만 사용할 수 있으며, 이벤트 WebSocket과 MCP는 이를 거부합니다.",
+      "invalid": "채팅 ID 또는 전화번호가 아닙니다: {{value}}"
+    },
+    "expiry": {
+      "label": "만료 시각 (선택)",
+      "hint": "이 브라우저의 시간대 기준입니다. 만료되지 않는 키는 비워 두세요.",
+      "clear": "만료 제거",
+      "invalid": "9999년까지의 날짜와 시간을 모두 입력하거나, 만료되지 않는 키는 필드를 비우세요."
     }
   },
   "logs": {
@@ -826,7 +883,7 @@
       "sslRejectUnauthorized": "SSL 인증서 확인",
       "sslRejectUnauthorizedDesc": "자체 서명되었거나 유효하지 않은 인증서를 거부합니다. 자체 서명 인증서를 사용하는 관리형 Postgres(Supabase, Heroku, Render, Railway)에서는 꺼 두세요.",
       "migrationsTitle": "데이터베이스 마이그레이션",
-      "migrationsStatus": "스키마는 TypeORM으로 자동 동기화됩니다",
+      "migrationsStatus": "대기 중인 마이그레이션은 시작 시 자동으로 적용됩니다",
       "migrationsHint": "마이그레이션은 자동으로 관리됩니다. 수동 마이그레이션은 CLI를 사용하세요."
     },
     "engine": {
@@ -849,7 +906,7 @@
     "redis": {
       "title": "Redis",
       "enable": "Redis 사용",
-      "enableDesc": "캐싱, 세션 저장, BullMQ 큐에 필요합니다",
+      "enableDesc": "캐싱, BullMQ 큐, 속도 제한 카운터, 멀티 노드 WebSocket 팬아웃에 사용됩니다",
       "useBuiltIn": "내장 Redis 컨테이너 사용",
       "builtInDesc": "OpenWA가 Redis 컨테이너를 관리합니다",
       "queueTitle": "BullMQ 큐 시스템 사용",
@@ -861,7 +918,7 @@
       "failed": "실패",
       "viewBullMq": "Bull MQ 대시보드 보기",
       "disabledTitle": "Redis 사용 안 함",
-      "disabledDesc": "캐싱, 세션 저장, BullMQ 메시지 큐를 사용하려면 Redis를 활성화하세요.",
+      "disabledDesc": "캐싱, BullMQ 메시지 큐, 속도 제한 카운터, 멀티 노드 WebSocket 팬아웃을 사용하려면 Redis를 활성화하세요.",
       "passwordOptional": "(선택 사항)",
       "bullMqUrlCopied": "Bull MQ 대시보드 URL이 복사되었습니다",
       "bullMqUrlHint": "ADMIN API 키로 열어 주세요 — 브라우저 탭은 인증할 수 없습니다."
@@ -896,7 +953,7 @@
       "storageWarning": "기존 미디어 파일은 새 스토리지 백엔드로 자동 이동되지 않으며 기존 위치에 그대로 남습니다.",
       "downloadBackup": "먼저 백업 다운로드",
       "backupTitle": "데이터 백업 및 복원",
-      "backupHint": "데이터베이스를 전환하기 전에 모든 데이터를 JSON으로 내보낸 후 전환이 끝나면 가져오세요. 백업에는 웹훅 시크릿과 프록시 자격 증명이 평문으로 포함되어 있으니 안전하게 보관하고 복원 후 삭제하세요.",
+      "backupHint": "데이터베이스를 전환하기 전에 모든 데이터를 JSON으로 내보낸 후 전환이 끝나면 가져오세요. 웹훅 서명 시크릿, 웹훅 사용자 지정 헤더, 프록시 자격 증명은 포함되지 않으므로 복원 후 다시 입력하세요. 통합 인스턴스의 시크릿과 설정은 평문으로 포함되니 파일을 안전하게 보관하고 복원 후 삭제하세요.",
       "export": "데이터 내보내기",
       "import": "데이터 가져오기",
       "exportFailed": "데이터를 내보내지 못했습니다",
@@ -921,8 +978,8 @@
       "checking": "서버 상태를 확인하는 중...",
       "dontClose": "이 창을 닫지 마세요",
       "successMsg": "서버가 다시 온라인 상태입니다! 페이지가 자동으로 새로고침됩니다.",
-      "errorMsg": "서버가 30초 동안 응답하지 않았습니다. Docker 로그를 확인하고 수동으로 재시작하세요.",
-      "outcomeUnknown": "서버가 응답하기 전에 프록시 시간이 초과되었습니다. 재시작이 아직 진행 중일 수 있으니 1분 후 페이지를 새로고침하여 확인하세요.",
+      "errorMsg": "서버가 응답하지 않았습니다. Docker 로그를 확인하고 수동으로 재시작하세요.",
+      "outcomeUnknown": "서버가 응답하기 전에 프록시가 오류를 반환하여 재시작이 진행 중인지 알 수 없습니다. 1분 후 페이지를 새로고침하여 확인하세요.",
       "reload": "페이지 새로고침"
     },
     "toasts": {
@@ -964,7 +1021,7 @@
     "config": {
       "title": "{{name}} 구성",
       "noOptions": "이 플러그인에 사용할 수 있는 구성 옵션이 없습니다",
-      "uiHandshakeError": "플러그인 설정 UI가 초기화되지 않았습니다. 사용 가능한 경우 아래 스키마 양식을 이용하세요.",
+      "uiHandshakeError": "플러그인 설정 UI가 초기화되지 않았습니다.",
       "save": "설정 저장",
       "addItem": "추가",
       "tabConfig": "설정",
@@ -995,7 +1052,7 @@
       "healthFail": "상태 확인 실패",
       "healthError": "상태 확인 오류",
       "savedTitle": "설정 저장 완료",
-      "savedDesc": "변경 사항을 적용하려면 서버를 재시작해야 합니다.",
+      "savedDesc": "변경 사항은 서버를 재시작하지 않아도 적용됩니다.",
       "saveFailed": "저장 실패",
       "installed": "플러그인이 설치되었습니다",
       "installFailed": "설치 실패",
@@ -1100,7 +1157,7 @@
   },
   "search": {
     "placeholder": "메시지 검색…",
-    "results": "결과 {{count}}개",
+    "loadMore": "더 보기 ({{total}}개 중 {{shown}}개)",
     "empty": "메시지를 찾을 수 없습니다.",
     "error": "검색에 실패했습니다. 다시 시도하세요.",
     "unavailable": "검색이 설정되어 있지 않습니다.",

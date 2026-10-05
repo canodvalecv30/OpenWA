@@ -437,10 +437,6 @@
   left: -14px;
 }
 
-[dir='rtl'] .collapse-toggle svg {
-  transform: scaleX(-1);
-}
-
 [dir='rtl'] .language-menu-item {
   text-align: right;
 }
@@ -462,9 +458,18 @@
   margin-right: 72px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   [dir='rtl'] .main-content,
   [dir='rtl'] .main-content.mobile {
     margin-right: 0;
+  }
+
+  [dir='rtl'] .sidebar.mobile {
+    transform: translateX(100%);
+    box-shadow: -2px 0 20px rgba(0, 0, 0, 0.1);
+  }
+
+  [dir='rtl'] .sidebar.mobile.open {
+    transform: translateX(0);
   }
 }

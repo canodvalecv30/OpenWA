@@ -5,6 +5,7 @@ export class RequestPairingCodeDto {
   @ApiProperty({
     description: 'Phone number to link, digits only in international format (country code + number).',
     example: '628123456789',
+    pattern: '^[0-9]{6,15}$',
   })
   @IsString()
   @IsNotEmpty()

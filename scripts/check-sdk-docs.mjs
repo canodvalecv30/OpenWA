@@ -31,8 +31,8 @@
  *
  * Run locally: `npm run check:sdk-docs`.
  */
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -222,6 +222,6 @@ function main() {
   );
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main();
 }

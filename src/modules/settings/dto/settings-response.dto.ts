@@ -17,7 +17,9 @@ export class SettingsGeneralDto {
     description:
       'Always true: the engine auto-reconnects on a transient disconnect and there is no global off ' +
       'switch. Attempts are unlimited by default; cap them per session with config.maxReconnectAttempts ' +
-      '(0-20, PATCH /api/sessions/{sessionId}/config).',
+      '(0-20, PATCH /api/sessions/{sessionId}/config). The cap bounds every reconnect on whatsapp-web.js; ' +
+      'on Baileys it bounds only the reconnect after a logged-out close, and the engine retries a transient ' +
+      'drop itself with no cap.',
     example: true,
   })
   autoReconnect!: boolean;
@@ -37,10 +39,13 @@ export class SettingsApiDto {
   enableDocs!: boolean;
 }
 
+const NOTIFICATION_PLACEHOLDER =
+  'Fixed placeholder: no notification feature exists, and the value is not configurable.';
+
 export class SettingsNotificationsDto {
-  @ApiProperty({ example: false }) emailEnabled!: boolean;
-  @ApiProperty({ example: '' }) notificationEmail!: string;
-  @ApiProperty({ example: true }) webhookAlerts!: boolean;
+  @ApiProperty({ description: `Always false. ${NOTIFICATION_PLACEHOLDER}`, example: false }) emailEnabled!: boolean;
+  @ApiProperty({ description: `Always empty. ${NOTIFICATION_PLACEHOLDER}`, example: '' }) notificationEmail!: string;
+  @ApiProperty({ description: `Always false. ${NOTIFICATION_PLACEHOLDER}`, example: false }) webhookAlerts!: boolean;
 }
 
 export class SettingsResponseDto {

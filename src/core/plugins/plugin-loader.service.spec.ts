@@ -252,6 +252,27 @@ describe('PluginLoaderService — enable/config persistence', () => {
     loader2.registerBuiltInPlugin(manifest, {}, { apiKey: 'default' });
     expect(loader2.getPlugin('persist-test')?.config).toEqual({ apiKey: 'operator-secret' });
   });
+
+  it('persists only the keys a config update set, so other env-derived keys stay live', () => {
+    loader.registerBuiltInPlugin(manifest, {}, { execPath: '/old/chromium', headless: true });
+    loader.updatePluginConfig('persist-test', { apiKey: 'operator-secret' });
+    expect(loader.getPlugin('persist-test')?.config).toEqual({
+      execPath: '/old/chromium',
+      headless: true,
+      apiKey: 'operator-secret',
+    });
+    expect(storage.getPluginConfig('persist-test')).toEqual({ apiKey: 'operator-secret' });
+
+    // Restart with a changed env value: it wins, and the operator's key is still applied.
+    const storage2 = new PluginStorageService(config);
+    const loader2 = new PluginLoaderService(config, new HookManager(), storage2, {} as unknown as ModuleRef);
+    loader2.registerBuiltInPlugin(manifest, {}, { execPath: '/new/chromium', headless: true });
+    expect(loader2.getPlugin('persist-test')?.config).toEqual({
+      execPath: '/new/chromium',
+      headless: true,
+      apiKey: 'operator-secret',
+    });
+  });
 });
 
 describe('PluginLoaderService — engine mutual exclusion', () => {

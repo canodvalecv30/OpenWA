@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Trans, useTranslation } from 'react-i18next';
 import {
   Database,
@@ -13,7 +14,7 @@ import {
   Download,
   Upload,
 } from 'lucide-react';
-import { API_BASE_URL } from '../services/api';
+import { API_BASE_URL, type SavedConfig } from '../services/api';
 import { copyToClipboard } from '../utils/clipboard';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useInfraStatusQuery, useInfraConfigQuery, useEnginesQuery, useCurrentEngineQuery } from '../hooks/queries';
@@ -48,6 +49,13 @@ export function Infrastructure() {
   const currentEngine = currentEngineData?.engineType ?? '';
 
   const configForm = useInfraConfigForm(infraStatus, savedConfig);
+  const queryClient = useQueryClient();
+  // The saved config as the page first read it. A save refetches the saved config (so the pending-restart
+  // notes see it), but until a restart the database still running is the one read here.
+  const loadedConfig = useRef<SavedConfig | undefined>(undefined);
+  useEffect(() => {
+    if (savedConfig && !loadedConfig.current) loadedConfig.current = savedConfig;
+  }, [savedConfig]);
   const restartFlow = useRestartFlow();
   const dataBackup = useDataBackup();
 
@@ -61,14 +69,16 @@ export function Infrastructure() {
       // empty-database / orphaned-media data move before it happens. A switch is: changing type;
       // flipping built-in↔external (different physical backend); OR retargeting an external Postgres
       // to a different host/port/database (also a different, empty DB). Host/port/db aren't all in
-      // /status, so compare the edited form against the still-cached saved config.
+      // /status, so compare the edited form against the saved config as the page loaded it. A key with
+      // nothing saved reads '', and runs on the same fallback the form was seeded with.
+      const loaded = loadedConfig.current;
       const dbExternalRetarget =
         configForm.dbConfig.type === 'postgres' &&
         !configForm.dbConfig.builtIn &&
-        !!savedConfig &&
-        (configForm.dbConfig.host !== savedConfig.database.host ||
-          configForm.dbConfig.port !== savedConfig.database.port ||
-          configForm.dbConfig.database !== savedConfig.database.database);
+        !!loaded &&
+        (configForm.dbConfig.host !== (loaded.database.host || infraStatus?.database.host || 'localhost') ||
+          configForm.dbConfig.port !== (loaded.database.port || '5432') ||
+          configForm.dbConfig.database !== (loaded.database.database || 'openwa'));
       const dbSwitch =
         !!infraStatus &&
         (configForm.dbConfig.type !== infraStatus.database.type ||
@@ -89,6 +99,8 @@ export function Infrastructure() {
         infraStatus?.storage.type === 's3' && infraStatus.storage.builtIn && 'minio',
       ].filter((p): p is string => typeof p === 'string');
       restartFlow.open({ profiles, running, dbSwitch, storageSwitch });
+      // The form is seeded once, so the refetch keeps any edit in progress.
+      void queryClient.invalidateQueries({ queryKey: ['infra', 'config'] });
     },
   });
 
@@ -147,7 +159,7 @@ export function Infrastructure() {
 
   // If the live infrastructure status can't be loaded, do NOT render the editable form: it would seed
   // from component defaults (sqlite/local/built-in:false) and a Save could flip a running backend to
-  // external+empty. Show an error + retry instead. (#488 review)
+  // external+empty. Show an error + retry instead. (#488)
   // Likewise without the saved config: the database, storage and engine detail fields hydrate only
   // from it, and a Save sends every one of them.
   // Keyed on missing data, not on the query's error flag: a failed background refetch keeps the last
@@ -177,18 +189,18 @@ export function Infrastructure() {
   //   - the value WAS saved and the server has not been restarted yet — a restart applies it.
   // Both look identical as "running differs from saved", which is why drift alone used to be reported
   // as an environment pin even on a stock stack with no variable set anywhere (#1082).
+  // Pin-only: PUPPETEER_ARGS cannot go through settingNote, because the running list is re-tokenized and
+  // gains the pinned `--lang` flag, so it never string-compares equal to the saved value. The headless
+  // flag and the two paths do have a running and a saved value, but show only a reported pin as well.
+  const pinNote = (envKey: string) =>
+    infraStatus?.envPinned?.includes(envKey) ? (
+      <p className="env-pin-note">
+        <AlertTriangle size={14} /> {t('infrastructure.envPinNote', { name: envKey })}
+      </p>
+    ) : null;
   const settingNote = (envKey: string, running: unknown, saved: unknown) => {
-    if (infraStatus?.envPinned?.includes(envKey)) {
-      return (
-        <p className="env-pin-note">
-          <AlertTriangle size={14} /> {t('infrastructure.envPinNote', { name: envKey })}
-        </p>
-      );
-    }
-    // Suppressed only while the request is actually in flight. `saving` is that flag; `savePending` is
-    // a latch set once a save SUCCEEDS and cleared only by a restart's page reload, so gating on it
-    // hid this note for the whole life of the page from the first successful save — which is exactly
-    // the state it exists to report, and exactly what the operator who chose "Restart Later" is in.
+    if (infraStatus?.envPinned?.includes(envKey)) return pinNote(envKey);
+    // Hidden only while the save request is in flight (`configSave.saving`).
     const pendingRestart = !configSave.saving && !!infraStatus && !!savedConfig && running !== saved;
     return pendingRestart ? (
       <p className="env-pin-note">
@@ -466,6 +478,7 @@ export function Infrastructure() {
                   <span className="toggle-slider"></span>
                 </label>
               </div>
+              {pinNote('PUPPETEER_HEADLESS')}
               <div className="form-group">
                 <label htmlFor="infra-8">{t('infrastructure.engine.sessionDataPath')}</label>
                 <input
@@ -474,6 +487,7 @@ export function Infrastructure() {
                   value={configForm.engineConfig.sessionDataPath}
                   onChange={e => configForm.updateEngineConfig('sessionDataPath', e.target.value)}
                 />
+                {pinNote('SESSION_DATA_PATH')}
               </div>
               <div className="form-group">
                 <label htmlFor="infra-9">{t('infrastructure.engine.browserArgs')}</label>
@@ -482,8 +496,9 @@ export function Infrastructure() {
                   type="text"
                   value={configForm.engineConfig.browserArgs}
                   onChange={e => configForm.updateEngineConfig('browserArgs', e.target.value)}
-                  placeholder="--no-sandbox --disable-gpu"
+                  placeholder="--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu"
                 />
+                {pinNote('PUPPETEER_ARGS')}
               </div>
             </div>
           ) : (
@@ -727,6 +742,7 @@ export function Infrastructure() {
                   value={configForm.storageConfig.localPath}
                   onChange={e => configForm.updateStorageConfig('localPath', e.target.value)}
                 />
+                {pinNote('STORAGE_LOCAL_PATH')}
               </div>
             )}
 
@@ -878,7 +894,7 @@ export function Infrastructure() {
                   style={{
                     width:
                       restartFlow.restartCountdown > 0
-                        ? `${((30 - restartFlow.restartCountdown) / 30) * 100}%`
+                        ? `${((restartFlow.restartTotal - restartFlow.restartCountdown) / restartFlow.restartTotal) * 100}%`
                         : '100%',
                   }}
                 />

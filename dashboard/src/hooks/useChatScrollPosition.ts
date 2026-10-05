@@ -137,6 +137,10 @@ export function useChatScrollPosition(
   const scrollMap = useRef<Map<string, number>>(new Map());
   const prevChatIdRef = useRef<string | null>(null);
   const pinnedRef = useRef<boolean>(true);
+  // Whether the visible chat's messages have rendered. While a chat loads, the container shows only a
+  // spinner and the browser clamps scrollTop to it; that clamp arrives as a scroll event and is not a
+  // position to remember.
+  const loadedRef = useRef<boolean>(false);
   // A 'saved' restore writes scrollTop BEFORE media decodes — the browser clamps the write to the
   // still-short scrollHeight and the thread lands at the top. The saved value lives here and is
   // re-applied on every media decode until the user scrolls (any genuine scroll cancels it).
@@ -188,7 +192,7 @@ export function useChatScrollPosition(
       pendingRestoreRef.current = null;
       pinnedRef.current = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
       const visibleChatId = prevChatIdRef.current;
-      if (visibleChatId) scrollMap.current.set(visibleChatId, el.scrollTop);
+      if (visibleChatId && loadedRef.current) scrollMap.current.set(visibleChatId, el.scrollTop);
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -219,6 +223,7 @@ export function useChatScrollPosition(
     }
 
     prevChatIdRef.current = next;
+    loadedRef.current = isLoaded;
   }, [activeChatId, isLoaded, pinToBottom, writeScrollTop]);
 
   // Older messages are prepended ABOVE the viewport, so the thread grows upward and what the user

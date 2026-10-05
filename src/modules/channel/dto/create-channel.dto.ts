@@ -10,7 +10,11 @@ export class CreateChannelDto {
   @MaxLength(100)
   name!: string;
 
-  @ApiPropertyOptional({ description: 'Channel description', example: 'Release notes and downtime notices' })
+  @ApiPropertyOptional({
+    description: 'Channel description',
+    example: 'Release notes and downtime notices',
+    maxLength: 2048,
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2048)

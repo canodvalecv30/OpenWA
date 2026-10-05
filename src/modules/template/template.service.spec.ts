@@ -158,6 +158,20 @@ describe('TemplateService', () => {
       await expect(service.resolve('sess-1', { templateName: 'nope' })).rejects.toThrow(NotFoundException);
     });
 
+    // PostgreSQL refuses a NUL in a bound text parameter, so the query would fail as a 500. No stored
+    // name can hold one (the write DTOs refuse it), so the lookup answers 404 without querying.
+    it('should throw NotFoundException for a name containing NUL without querying', async () => {
+      await expect(service.resolve('sess-1', { templateName: 'promo\u0000' })).rejects.toThrow(NotFoundException);
+      expect(repository.findOne).not.toHaveBeenCalled();
+    });
+
+    // Ids are server-generated uuids, so none holds a NUL; the id lookup answers 404 the same way.
+    it('should throw NotFoundException for an id containing NUL without querying', async () => {
+      await expect(service.resolve('sess-1', { templateId: 'abc\u0000' })).rejects.toThrow(NotFoundException);
+      await expect(service.findOne('sess-1', 'abc\u0000')).rejects.toThrow(NotFoundException);
+      expect(repository.findOne).not.toHaveBeenCalled();
+    });
+
     // A malformed request, not a missing resource: a client reading 404 as "template deleted" would
     // take the wrong branch.
     it('should throw BadRequestException when neither id nor name is provided', async () => {

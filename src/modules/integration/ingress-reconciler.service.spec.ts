@@ -104,6 +104,22 @@ describe('IngressReconcilerService.sweep', () => {
     expect(event.lastDispatchAt).toBeInstanceOf(Date);
   });
 
+  it('replays the persisted HTTP method, and carries it into the dead-letter row', async () => {
+    await insertEvent({
+      payload: { headers: {}, query: {}, body: '{}', rawBody: '{}', method: 'PUT' },
+      dispatchAttempts: 4,
+    });
+    enqueue.mockResolvedValue({ outcome: 'failed', error: 'sandbox 5xx' });
+
+    await service.sweep(OPTS);
+
+    const [data] = enqueuedJobs()[0];
+    expect(data.method).toBe('PUT');
+    expect(data.payload).toEqual({ headers: {}, query: {}, body: '{}', rawBody: '{}' });
+    const [dlq] = await failures.find({ where: { deliveryId: 'd-1' } });
+    expect((dlq.payload as { method?: string }).method).toBe('PUT');
+  });
+
   it('retires the row payload once the replay is dispatched (the job data already carried it)', async () => {
     const id = await insertEvent();
 
@@ -366,6 +382,81 @@ describe('IngressReconcilerService.sweep', () => {
       expect((await stored(id)).dispatchState).toBe('failed');
     });
 
+    it('retires its dead-letter row when a re-queued copy settles the event during the sweep', async () => {
+      const id = await insertEvent();
+      // The copy dispatches after the state read, before the dead-letter write, while no row is open.
+      queue.getJobState.mockImplementation(async () => {
+        await events.update({ id }, { dispatchState: 'dispatched', payload: null });
+        return 'failed';
+      });
+
+      await service.sweep(OPTS);
+
+      expect((await stored(id)).dispatchState).toBe('dispatched');
+      expect(await failures.count({ where: { deliveryId: 'd-1', redriven: false } })).toBe(0);
+    });
+
+    it('keeps the dead-letter row open when another sweep already marked the event failed', async () => {
+      const id = await insertEvent();
+      queue.getJobState
+        .mockImplementationOnce(async () => {
+          await processorDeadLetter();
+          await events.update({ id }, { dispatchState: 'failed', payload: null });
+          return 'failed';
+        })
+        .mockResolvedValue('unknown');
+
+      await service.sweep(OPTS);
+
+      expect((await stored(id)).dispatchState).toBe('failed');
+      expect(await failures.count({ where: { deliveryId: 'd-1', redriven: false } })).toBe(1);
+    });
+
+    // 'dispatched' does not mean delivered: another node can mark it for a job that was still live, and
+    // the job can then spend its attempts and be dead-lettered by the processor.
+    it('keeps the processor dead-letter row open when the event was marked dispatched for a job that failed', async () => {
+      const id = await insertEvent();
+      queue.getJobState
+        .mockImplementationOnce(async () => {
+          await events.update({ id }, { dispatchState: 'dispatched', payload: null });
+          await processorDeadLetter();
+          return 'failed';
+        })
+        .mockResolvedValue('unknown');
+
+      const stats = await service.sweep(OPTS);
+
+      expect(stats).toMatchObject({ scanned: 1, replayed: 0, failed: 1 });
+      expect(await failures.count({ where: { deliveryId: 'd-1', redriven: false } })).toBe(1);
+    });
+
+    it('leaves a delivery to its live re-queued copy instead of writing a dead-letter row', async () => {
+      const id = await insertEvent();
+      const base = sanitizeIngressJobId('d-1', 'plug\u0000inst');
+      queue.getJobState.mockImplementation((jobId: string) =>
+        Promise.resolve(jobId === `${base}-requeued-1` ? 'delayed' : 'failed'),
+      );
+
+      const stats = await service.sweep(OPTS);
+
+      expect(queue.add).not.toHaveBeenCalled();
+      expect(stats.replayed).toBe(1);
+      expect(await failures.count({ where: { deliveryId: 'd-1' } })).toBe(0);
+      expect((await stored(id)).dispatchState).toBe('dispatched');
+    });
+
+    it('does not re-add a pruned original job while its re-queued copy is live', async () => {
+      await insertEvent();
+      const base = sanitizeIngressJobId('d-1', 'plug\u0000inst');
+      queue.getJobState.mockImplementation((jobId: string) =>
+        Promise.resolve(jobId === `${base}-requeued-2` ? 'waiting' : 'unknown'),
+      );
+
+      await service.sweep(OPTS);
+
+      expect(queue.add).not.toHaveBeenCalled();
+    });
+
     it('does not re-add a job that is still live, and closes the event row', async () => {
       const id = await insertEvent();
       queue.getJobState.mockResolvedValue('delayed');
@@ -478,7 +569,7 @@ describe('IngressReconcilerService.onModuleInit (scheduling)', () => {
     else process.env.INGRESS_RECONCILE_INTERVAL_MS = original;
   });
 
-  it('does not schedule a timer when INGRESS_RECONCILE_INTERVAL_MS <= 0', () => {
+  it('does not schedule a timer when INGRESS_RECONCILE_INTERVAL_MS=0', () => {
     process.env.INGRESS_RECONCILE_INTERVAL_MS = '0';
     const [events, failures] = repos();
     const svc = new IngressReconcilerService(

@@ -16,10 +16,10 @@ export class AddMessagesFts1782400000000 implements MigrationInterface {
   async up(qr: QueryRunner): Promise<void> {
     const isPostgres = qr.dataSource.options.type === 'postgres';
     if (isPostgres) {
-      // Lift the runtime statement_timeout (30000ms on the data pool — see app.module.ts) for this
-      // migration transaction: the STORED generated column is a full-table rewrite, and the GIN index
-      // build that follows is the heaviest boot migration. Without this, a large `messages` table can
-      // exceed 30s and be aborted → boot crash. SET LOCAL is transaction-scoped (auto-reverts) and is
+      // Boot and CLI migrations run on a pool without the runtime statement_timeout
+      // (pg-boot-migrations.ts). SET LOCAL guards this transaction against a role- or database-level
+      // default: the STORED generated column is a full-table rewrite, and the GIN index build that
+      // follows is the heaviest boot migration. SET LOCAL is transaction-scoped (auto-reverts) and is
       // guarded by the dialect since SQLite rejects it syntactically. Mirrors 1781100000000 /
       // 1781300000000 / 1782200000000.
       await qr.query('SET LOCAL statement_timeout = 0');

@@ -38,10 +38,12 @@ func (s *GroupsService) Get(ctx context.Context, sessionID, groupID string) (*Gr
 func (s *GroupsService) JoinInfo(ctx context.Context, sessionID, code string) (*GroupJoinInfo, error) {
 	var out GroupJoinInfo
 	err := s.client.do(ctx, "GET", s.base(sessionID)+"/join-info", url.Values{"code": {code}}, nil, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
-// Create creates a group.
 // Create makes a new group. It answers the group SUMMARY, not the detail shape Get returns — there is
 // no participant list, description, owner or creation time on a create response.
 func (s *GroupsService) Create(ctx context.Context, sessionID string, body CreateGroupRequest) (*GroupSummary, error) {

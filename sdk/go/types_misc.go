@@ -19,17 +19,19 @@ type DependencyStatus struct {
 // name (e.g. "mainDatabase", "dataDatabase") to its DependencyStatus.
 type HealthReadyResponse struct {
 	Status  string                      `json:"status"`
-	Details map[string]DependencyStatus `json:"details,omitempty"`
+	Details map[string]DependencyStatus `json:"details"`
 }
 
 // ── Auth ─────────────────────────────────────────────────
 
-// AuthValidateResponse reports whether the API key is valid, its role, and the
-// engine the gateway runs.
+// AuthValidateResponse reports whether the API key is valid, its role, the
+// engine the gateway runs, and whether the key is restricted to selected
+// sessions.
 type AuthValidateResponse struct {
 	Valid      bool   `json:"valid"`
 	Role       string `json:"role,omitempty"`
 	EngineType string `json:"engineType,omitempty"`
+	Scoped     bool   `json:"scoped,omitempty"`
 }
 
 // ── Template ───────────────────────────────────────────

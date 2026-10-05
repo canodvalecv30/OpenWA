@@ -81,8 +81,15 @@ export async function dispatchCapabilityVerb(
       return context.net.fetch(s(0), args[1] as Parameters<typeof context.net.fetch>[1]);
     case 'conversation.send':
       return context.conversations.send(args[0] as ConversationSendEnvelope);
-    case 'handover.set':
-      return context.handover.set(mappingKey(0), args[1] as HandoverState);
+    case 'handover.set': {
+      // Only 'human'/'closed' hold a chat, so any other value would be stored and silently never take over.
+      const key = mappingKey(0);
+      const state = args[1];
+      if (state !== 'bot' && state !== 'human' && state !== 'closed') {
+        throw new Error(`Capability ${verb}: argument 1 must be 'bot', 'human' or 'closed'`);
+      }
+      return context.handover.set(key, state);
+    }
     case 'mappings.upsert':
       return context.mappings.upsert(mappingKey(0), s(1));
     case 'mappings.get':

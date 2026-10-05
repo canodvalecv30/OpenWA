@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, MaxLength, IsOptional, Matches, ValidateIf } from 'class-validator';
+import { IsString, IsNotEmpty, MaxLength, IsOptional, Matches } from 'class-validator';
 import { IsMediaUrl } from '../../../common/media/media-url';
 import { stripBase64DataUri } from '../../message/media-cap.util';
 
@@ -41,7 +41,6 @@ export class SetProfilePictureDto {
   })
   @IsOptional()
   @IsString()
-  @ValidateIf((o: SetProfilePictureDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({

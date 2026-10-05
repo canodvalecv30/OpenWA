@@ -6,12 +6,13 @@ import { WebhookService } from './webhook.service';
 import { Webhook } from './entities/webhook.entity';
 import { Session } from '../session/entities/session.entity';
 import { REQUIRED_ROLE_KEY } from '../auth/decorators/auth.decorators';
-import { ApiKeyRole } from '../auth/entities/api-key.entity';
+import { ApiKey, ApiKeyRole } from '../auth/entities/api-key.entity';
+import { WebhookRedriveService } from './webhook-redrive.service';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../audit/entities/audit-log.entity';
 
 /**
- * Regression locks for the secret/headers leak and read authorization.
- * e2e coverage is deferred (the e2e harness is currently broken),
- * so these controller-level unit tests are the regression gate.
+ * Regression locks for the secret/headers leak and read authorization at the controller level.
  */
 
 function createSecretWebhook(overrides: Partial<Webhook> = {}): Webhook {
@@ -38,6 +39,8 @@ describe('Webhook controllers (secret leak + read authz)', () => {
   let listController: WebhooksListController;
   let reflector: Reflector;
   let service: jest.Mocked<Partial<WebhookService>>;
+  let redrive: { redrive: jest.Mock };
+  let audit: { logInfo: jest.Mock };
 
   beforeEach(async () => {
     service = {
@@ -48,9 +51,16 @@ describe('Webhook controllers (secret leak + read authz)', () => {
       update: jest.fn(),
     };
 
+    redrive = { redrive: jest.fn() };
+    audit = { logInfo: jest.fn().mockResolvedValue(null) };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [WebhookController, WebhooksListController],
-      providers: [{ provide: WebhookService, useValue: service }],
+      providers: [
+        { provide: WebhookService, useValue: service },
+        { provide: WebhookRedriveService, useValue: redrive },
+        { provide: AuditService, useValue: audit },
+      ],
     }).compile();
 
     controller = module.get<WebhookController>(WebhookController);
@@ -138,5 +148,30 @@ describe('Webhook controllers (secret leak + read authz)', () => {
     // eslint-disable-next-line @typescript-eslint/unbound-method -- reading route metadata, not invoking
     const role = reflector.get<ApiKeyRole>(REQUIRED_ROLE_KEY, listController.findAll);
     expect(role).toBe(ApiKeyRole.OPERATOR);
+  });
+
+  // ── redrive sends real events: ADMIN only, scoped by the key, audited ─────
+
+  it('delivery-failure redrive requires ADMIN role', () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- reading route metadata, not invoking
+    const role = reflector.get<ApiKeyRole>(REQUIRED_ROLE_KEY, listController.redriveDeliveryFailures);
+    expect(role).toBe(ApiKeyRole.ADMIN);
+  });
+
+  it("delivery-failure redrive passes the key's allowedSessions and audits the counts", async () => {
+    const result = { redriven: 2, delivered: 2, enqueued: 0, failed: 1, skipped: 0, remaining: 4 };
+    redrive.redrive.mockResolvedValue(result);
+    const apiKey = { id: 'key-1', allowedSessions: ['sess-1'] } as unknown as ApiKey;
+
+    await expect(listController.redriveDeliveryFailures({ sessionId: 'sess-1', limit: 10 }, apiKey)).resolves.toBe(
+      result,
+    );
+
+    expect(redrive.redrive).toHaveBeenCalledWith({ sessionId: 'sess-1', limit: 10 }, ['sess-1']);
+    expect(audit.logInfo).toHaveBeenCalledWith(AuditAction.WEBHOOK_DELIVERIES_REDRIVEN, {
+      apiKey,
+      sessionId: 'sess-1',
+      metadata: { webhookId: undefined, ids: undefined, redriven: 2, failed: 1, skipped: 0, remaining: 4 },
+    });
   });
 });

@@ -4,11 +4,11 @@
 services:
   # ===== CORE: Docker Socket Proxy (sole container with /var/run/docker.sock access) =====
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2
+    image: tecnativa/docker-socket-proxy:v0.5.0
     container_name: openwa-docker-proxy
     restart: unless-stopped
-    # Only on the isolated internal network — reachable solely by openwa-api, NOT the
-    # dashboard or any other peer. `internal: true` also denies the proxy
+    # Only on the isolated internal network, reachable solely by openwa-api (including any
+    # plugin loaded into it), NOT the dashboard or any other peer. `internal: true` also denies the proxy
     # outbound access; it only needs the locally-mounted docker socket.
     networks:
       - internal-docker
@@ -19,7 +19,7 @@ services:
       # PING (health), INFO (getSystemInfo), CONTAINERS (list/inspect/create/start/stop),
       # IMAGES (pull), VOLUMES (createVolume). POST is the proxy's single all-or-nothing
       # method gate for non-GET requests (haproxy.cfg: `deny unless METH_GET || env(POST)`).
-      # Two consequences of the pinned v0.4.2 config, accepted and documented in SECURITY.md:
+      # Two consequences of the pinned proxy config, accepted and documented in SECURITY.md:
       #  - its `DELETE` env flag is dead config (never read), so it is not set here; DELETE is
       #    admitted to enabled paths as a side effect of POST — OpenWA itself never issues
       #    deletes (profile teardown is stop-only, see DockerService.stopManagedService).
@@ -62,11 +62,10 @@ services:
       - internal-docker
     # Container hardening: Chromium runs with --no-sandbox, so the
     # container itself is the confinement boundary. cap_drop ALL + a minimal re-add
-    # ONLY for the root entrypoint's chown + gosu privilege-drop; once gosu setuids to
+    # for root entrypoint ownership, the gosu drop and init signal forwarding. Once gosu setuids to
     # the openwa user the node/Chromium process keeps NO effective capabilities.
     # read_only rootfs (Chromium's profile lives on the writable /app/data volume;
     # HOME=/tmp + tmpfs absorb stray writes). no-new-privileges blocks setuid escalation.
-    # NOTE: requires a live single-session smoke (Chromium must launch) before merge.
     security_opt:
       - 'no-new-privileges:true'
     cap_drop:
@@ -75,6 +74,7 @@ services:
       - CHOWN # entrypoint: chown openwa /app/data on the named volume
       - DAC_OVERRIDE # entrypoint: chown across pre-existing files
       - FOWNER
+      - KILL # dumb-init: forward signals to the openwa process after gosu drops uid
       - SETGID # gosu: drop to the openwa group
       - SETUID # gosu: drop to the openwa user
     read_only: true
@@ -194,6 +194,7 @@ services:
       - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - S3_REGION=${S3_REGION:-}
       - S3_BUCKET=${S3_BUCKET:-}
+      - S3_KEY_PREFIX=${S3_KEY_PREFIX:-}
       # Chat-media archiving (opt-in). Forwarded explicitly: this file has no env_file, so a
       # variable absent from this list simply never reaches the container and the feature stays off
       # no matter what the operator's .env says.
@@ -201,6 +202,7 @@ services:
       - CHAT_MEDIA_ARCHIVE_OUTBOUND=${CHAT_MEDIA_ARCHIVE_OUTBOUND:-}
       - CHAT_MEDIA_ARCHIVE_MAX_BYTES=${CHAT_MEDIA_ARCHIVE_MAX_BYTES:-}
       - CHAT_MEDIA_ARCHIVE_TTL_DAYS=${CHAT_MEDIA_ARCHIVE_TTL_DAYS:-}
+      - MESSAGE_INLINE_MEDIA=${MESSAGE_INLINE_MEDIA:-}
       - CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS=${CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS:-}
       - CHAT_MEDIA_ORPHAN_GRACE_MS=${CHAT_MEDIA_ORPHAN_GRACE_MS:-}
       # Send pacing (opt-in anti-ban governor). Forwarded explicitly for the same reason as the
@@ -218,6 +220,7 @@ services:
       - MEDIA_DOWNLOAD_MAX_BYTES=${MEDIA_DOWNLOAD_MAX_BYTES:-}
       - MEDIA_DOWNLOAD_TIMEOUT_MS=${MEDIA_DOWNLOAD_TIMEOUT_MS:-}
       - INBOUND_MEDIA_CONCURRENCY=${INBOUND_MEDIA_CONCURRENCY:-}
+      - INBOUND_MEDIA_GLOBAL_CONCURRENCY=${INBOUND_MEDIA_GLOBAL_CONCURRENCY:-}
       - SESSION_PROXY_URL_FETCH=${SESSION_PROXY_URL_FETCH:-}
       # Server-side media conversion (opt-in). The image ships ffmpeg, but without these forwards
       # the feature could not be switched on from .env at all.
@@ -302,7 +305,9 @@ services:
       - WEBHOOK_MAX_PAYLOAD_BYTES=${WEBHOOK_MAX_PAYLOAD_BYTES:-}
       - WEBHOOK_MAX_PER_SESSION=${WEBHOOK_MAX_PER_SESSION:-}
       - WEBHOOK_FAILURE_RETENTION_DAYS=${WEBHOOK_FAILURE_RETENTION_DAYS:-}
+      - WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS=${WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS:-}
       - WEBHOOK_WORKER_CONCURRENCY=${WEBHOOK_WORKER_CONCURRENCY:-}
+      - WEBHOOK_DEGRADED_SESSION_CONCURRENCY=${WEBHOOK_DEGRADED_SESSION_CONCURRENCY:-}
       # Integration Fabric ingress: per-instance fairness, retries, retention, reconciler, workers.
       - INGRESS_INSTANCE_LIMIT=${INGRESS_INSTANCE_LIMIT:-}
       - INGRESS_INSTANCE_TTL=${INGRESS_INSTANCE_TTL:-}
@@ -337,6 +342,8 @@ services:
       - REDIS_USERNAME=${REDIS_USERNAME:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_CONNECT_TIMEOUT_MS=${REDIS_CONNECT_TIMEOUT_MS:-}
+      - REDIS_TLS=${REDIS_TLS:-}
+      - REDIS_CACHE_DB=${REDIS_CACHE_DB:-}
       # Engine / session tuning.
       - MAX_CONCURRENT_SESSIONS=${MAX_CONCURRENT_SESSIONS:-}
       - BAILEYS_AUTH_DIR=${BAILEYS_AUTH_DIR:-}
@@ -378,6 +385,7 @@ services:
       - UPDATE_CHECK_ENABLED=${UPDATE_CHECK_ENABLED:-}
       # Misc application tuning.
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-}
+      - MESSAGE_RETENTION_DAYS=${MESSAGE_RETENTION_DAYS:-}
       - BULK_MAX_CONCURRENT_BATCHES=${BULK_MAX_CONCURRENT_BATCHES:-}
       - TEMPLATE_RENDER_MAX_CHARS=${TEMPLATE_RENDER_MAX_CHARS:-}
       - STATS_CACHE_TTL_MS=${STATS_CACHE_TTL_MS:-}
@@ -390,7 +398,6 @@ services:
       - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
       - openwa-data:/app/data
-      - ./docker-compose.yml:/app/docker-compose.yml:ro
     depends_on:
       docker-proxy:
         condition: service_started
@@ -404,13 +411,7 @@ services:
         condition: service_healthy
         required: false
     healthcheck:
-      test:
-        [
-          'CMD',
-          'node',
-          '-e',
-          "require('http').get('http://localhost:2785/api/health/ready', (r) => process.exit(r.statusCode === 200 ? 0 : 1))",
-        ]
+      test: ['CMD', 'curl', '-f', 'http://localhost:2785/api/health/ready']
       interval: 30s
       timeout: 10s
       retries: 3
@@ -435,7 +436,7 @@ services:
       - 'no-new-privileges:true'
     environment:
       POSTGRES_USER: ${DATABASE_USERNAME:-openwa}
-      # M16: no committed default secret. Empty unless the operator sets it; the postgres
+      # No committed default secret. Empty unless the operator sets it; the postgres
       # image refuses to initialize with an empty password (clear fail-fast), and the app's
       # production boot guard rejects empty/placeholder secrets before startup.
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-}
@@ -483,9 +484,12 @@ services:
       - 'com.openwa.service=cache'
       - 'com.openwa.builtin=true'
 
-  # ===== OPTIONAL: Built-in MinIO (S3-compatible) =====
+  # ===== OPTIONAL: Built-in S3-compatible storage (pgsty/silo, a maintained MinIO fork) =====
+  # Pinned by release tag and digest. Same server command, MINIO_ROOT_* variables, /data layout and
+  # health route as MinIO, so an existing openwa_minio-data volume is used as-is. The service,
+  # container and host name stay `minio`.
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     container_name: openwa-minio
     profiles: ['minio', 'full']
     restart: unless-stopped
@@ -495,12 +499,15 @@ services:
       - 'no-new-privileges:true'
     command: server /data --console-address ":9001"
     environment:
-      # M16: no committed default creds. MinIO refuses to start with empty root creds
-      # (clear fail-fast); the app's production boot guard rejects empty/placeholder secrets.
+      # No committed default credentials. With both left empty the server would start on its own
+      # built-in default pair, so the password falls back to a placeholder shorter than the
+      # 8-character minimum: every combination without a real secret stops at startup with a fatal
+      # credential error (with a user set and no secret it reads "Invalid credentials"). The user
+      # default stays empty on purpose: a non-empty placeholder would be a valid access key.
       # Canonical names, matching what the app/dashboard read (legacy S3_ACCESS_KEY/S3_SECRET_KEY
       # still accepted as a fallback so older .env files keep working).
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-${S3_ACCESS_KEY:-}}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-${S3_SECRET_KEY:-}}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-${S3_SECRET_KEY:-unset}}
     volumes:
       - minio-data:/data
     ports:
@@ -539,6 +546,7 @@ networks:
     name: openwa-network
   # Isolated network for the Docker socket proxy. `internal: true` means no external
   # connectivity; only openwa-api joins it, so nothing else can reach docker-proxy:2375.
+  # Plugins run inside openwa-api, so a loaded plugin can reach it too (see SECURITY.md).
   internal-docker:
     name: openwa-internal-docker
     internal: true

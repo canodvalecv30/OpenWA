@@ -71,6 +71,8 @@ export interface SessionEngineWiringHost {
   handleEngineDisconnected(id: string, engine: IWhatsAppEngine, reason: string): Promise<void>;
   updateStatus(id: string, status: SessionStatus): Promise<void>;
   cancelReconnect(id: string): void;
+  /** The live engine reported a non-READY state: record when its READY stretch ended. */
+  endReadyStretch(id: string): void;
   /**
    * Park an engine failure reported while a service-level reconnect awaits its re-init, instead of
    * applying it: `run` is the failure's side effects, and `reason` is set for an onError report.
@@ -163,7 +165,13 @@ export class SessionEngineEventWiring {
         });
         return;
       }
-      void host.updateStatus(id, status);
+      void host.updateStatus(id, status).catch(err =>
+        this.logger.warn('Failed to persist an engine status', {
+          sessionId: id,
+          status,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     };
 
     return {
@@ -282,7 +290,7 @@ export class SessionEngineEventWiring {
       },
       onCall: (event: IncomingCallEvent): void => {
         if (!host.isLiveEngine(id, engine)) return;
-        this.logger.log(`Incoming call from ${event.from}`, {
+        this.logger.log('Incoming call', {
           sessionId: id,
           callId: event.callId,
           isVideo: event.isVideo,
@@ -345,6 +353,7 @@ export class SessionEngineEventWiring {
       },
       onStateChanged: (engineState: EngineStatus): void => {
         if (!host.isLiveEngine(id, engine)) return;
+        if (engineState !== EngineStatus.READY) host.endReadyStretch(id);
         const statusMap: Record<EngineStatus, SessionStatus> = {
           [EngineStatus.DISCONNECTED]: SessionStatus.DISCONNECTED,
           [EngineStatus.INITIALIZING]: SessionStatus.INITIALIZING,

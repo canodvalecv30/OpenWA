@@ -1,10 +1,77 @@
-import { describe, expect, it } from 'vitest';
-import { OpenWAClient } from '../src';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import { OpenWAClient, type BatchCancelResponse } from '../src';
 import { MockTransport } from './helpers';
 
 function client(t: MockTransport): OpenWAClient {
   return new OpenWAClient({ baseUrl: 'http://x', apiKey: 'k', fetch: t.asFetch() });
 }
+
+describe('MessagesResource idempotency keys', () => {
+  const sends: Array<[string, (c: OpenWAClient, key?: string) => Promise<unknown>]> = [
+    ['send-text', (c, key) => c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi', mentions: ['1@c.us'] }, key)],
+    ['send-image', (c, key) => c.messages.sendImage('s', { chatId: 'c@c.us', url: 'http://image', caption: 'image' }, key)],
+    ['send-video', (c, key) => c.messages.sendVideo('s', { chatId: 'c@c.us', url: 'http://video', caption: 'video' }, key)],
+    ['send-audio', (c, key) => c.messages.sendAudio('s', { chatId: 'c@c.us', url: 'http://audio', ptt: true }, key)],
+    ['send-document', (c, key) => c.messages.sendDocument('s', { chatId: 'c@c.us', base64: 'YQ==', mimetype: 'application/pdf', filename: 'a.pdf' }, key)],
+    ['send-sticker', (c, key) => c.messages.sendSticker('s', { chatId: 'c@c.us', url: 'http://sticker', mimetype: 'image/webp' }, key)],
+    ['send-location', (c, key) => c.messages.sendLocation('s', { chatId: 'c@c.us', latitude: 1, longitude: 2 }, key)],
+    ['send-contact', (c, key) => c.messages.sendContact('s', { chatId: 'c@c.us', contactName: 'A', contactNumber: '628' }, key)],
+    ['send-template', (c, key) => c.messages.sendTemplate('s', { chatId: 'c@c.us', templateName: 'welcome', vars: { name: 'A' } }, key)],
+    ['send-poll', (c, key) => c.messages.sendPoll('s', { chatId: 'c@c.us', name: 'Question', options: ['A', 'B'] }, key)],
+    ['reply', (c, key) => c.messages.reply('s', { chatId: 'c@c.us', quotedMessageId: 'q', text: 'reply' }, key)],
+    ['forward', (c, key) => c.messages.forward('s', { fromChatId: 'a@c.us', toChatId: 'b@c.us', messageId: 'm' }, key)],
+  ];
+
+  it.each(sends)('%s keeps keys local to each call and preserves JSON', async (route, send) => {
+    const t = new MockTransport().on('POST', new RegExp(`/messages/${route}$`), { body: { messageId: 'm', timestamp: 1 } });
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+    await send(c);
+    const originalBody = t.lastCall!.body;
+    expect(t.lastCall!.headers['idempotency-key']).toBeUndefined();
+
+    for (const key of ['first-key', 'second-key']) {
+      await send(c, key);
+      expect(t.lastCall!.method).toBe('POST');
+      expect(t.lastCall!.url).toBe(`http://localhost/api/sessions/s/messages/${route}`);
+      expect(t.lastCall!.headers['idempotency-key']).toBe(key);
+      expect(t.lastCall!.body).toEqual(originalBody);
+    }
+
+    await send(c);
+    expect(t.lastCall!.headers['idempotency-key']).toBeUndefined();
+    expect(t.lastCall!.body).toEqual(originalBody);
+  });
+
+  it('overrides a mixed-case default without changing later calls', async () => {
+    const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+    const headers = { 'iDeMpOtEnCy-KeY': 'default-key', 'X-Trace': 'trace' };
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', defaultHeaders: headers, fetch: t.asFetch() });
+    const body = { chatId: 'c@c.us', text: 'hi' };
+    await c.messages.sendText('s', body, 'explicit-key');
+    expect(t.lastCall!.headers['idempotency-key']).toBe('explicit-key');
+    expect(t.lastCall!.headers['x-trace']).toBe('trace');
+    expect(headers['iDeMpOtEnCy-KeY']).toBe('default-key');
+    await c.messages.sendText('s', body);
+    expect(t.lastCall!.headers['idempotency-key']).toBe('default-key');
+  });
+
+  it.each(['', 'has space', ' key', 'key ', 'key\n', 'key\t', 'caf\u00e9', 'x'.repeat(256)])(
+    'rejects invalid key %j before transport',
+    async key => {
+      const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+      const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+      await expect(c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi' }, key)).rejects.toThrow(TypeError);
+      expect(t.calls).toHaveLength(0);
+    },
+  );
+
+  it.each(['!', 'x'.repeat(255)])('accepts visible ASCII key %j', async key => {
+    const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+    await c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi' }, key);
+    expect(t.lastCall!.headers['idempotency-key']).toBe(key);
+  });
+});
 
 describe('MessagesResource — exact paths', () => {
   it('sendText posts to /messages/send-text (NOT /messages/text)', async () => {
@@ -238,6 +305,8 @@ describe('MessagesResource — exact paths', () => {
     expect(status.progress?.sent).toBe(1);
     expect(t.lastCall!.url).toContain('/messages/batch/b');
     const cancelled = await c.messages.cancelBatch('s', 'b');
+    // The cancel route answers without the per-recipient `results` the status route carries.
+    expectTypeOf(cancelled).toEqualTypeOf<BatchCancelResponse>();
     expect(cancelled.status).toBe('cancelled');
     expect(t.lastCall!.url).toContain('/messages/batch/b/cancel');
     expect(t.lastCall!.method).toBe('POST');

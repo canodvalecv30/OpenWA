@@ -8,6 +8,13 @@ import { type ApiKey, ApiKeyRole } from './entities/api-key.entity';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from './../audit/entities/audit-log.entity';
 
+// A key stored before expiresAt was validated can hold an unparseable expiry, which SQLite reads back as
+// an Invalid Date. The gateway refuses such a key as expired, but JSON would serialize the expiry as null
+// (no expiry). Report it as the epoch instead, so the key shows as expired and can be given a new expiry.
+function readableExpiry(expiresAt: Date | null): Date | null {
+  return expiresAt && Number.isNaN(expiresAt.getTime()) ? new Date(0) : expiresAt;
+}
+
 @ApiTags('auth')
 @Controller('auth/api-keys')
 // Key lifecycle routes have no session dimension, so a session-scoped ADMIN key could otherwise
@@ -33,6 +40,35 @@ export class AuthController {
     };
   }
 
+  // The key's authorization scope as audited on create and update, so a key's scope can be read back
+  // from the audit log whether or not it was ever edited.
+  private authzSnapshot(key: ApiKey) {
+    return {
+      role: key.role,
+      allowedIps: key.allowedIps,
+      allowedSessions: key.allowedSessions,
+      allowedChats: key.allowedChats,
+      expiresAt: readableExpiry(key.expiresAt),
+    };
+  }
+
+  private toResponse(k: ApiKey): ApiKeyResponseDto {
+    return {
+      id: k.id,
+      name: k.name,
+      keyPrefix: k.keyPrefix,
+      role: k.role,
+      allowedIps: k.allowedIps || undefined,
+      allowedSessions: k.allowedSessions || undefined,
+      allowedChats: k.allowedChats || undefined,
+      isActive: k.isActive,
+      expiresAt: readableExpiry(k.expiresAt) || undefined,
+      lastUsedAt: k.lastUsedAt || undefined,
+      usageCount: k.usageCount,
+      createdAt: k.createdAt,
+    };
+  }
+
   @Post()
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Create a new API key (admin only)' })
@@ -41,6 +77,7 @@ export class AuthController {
     description: 'API key created',
     type: ApiKeyCreatedResponseDto,
   })
+  @ApiResponse({ status: 400, description: 'Validation failed, or the body carries a field the DTO does not declare.' })
   async create(
     @Body() dto: CreateApiKeyDto,
     @Req() req: Request,
@@ -49,23 +86,14 @@ export class AuthController {
     const { apiKey, rawKey } = await this.authService.createApiKey(dto);
     await this.auditService.logInfo(AuditAction.API_KEY_CREATED, {
       ...this.auditContext(req, actor),
-      metadata: { targetKeyId: apiKey.id, targetKeyName: apiKey.name, role: apiKey.role },
+      metadata: {
+        targetKeyId: apiKey.id,
+        targetKeyName: apiKey.name,
+        role: apiKey.role,
+        scope: this.authzSnapshot(apiKey),
+      },
     });
-    return {
-      id: apiKey.id,
-      name: apiKey.name,
-      keyPrefix: apiKey.keyPrefix,
-      role: apiKey.role,
-      allowedIps: apiKey.allowedIps || undefined,
-      allowedSessions: apiKey.allowedSessions || undefined,
-      allowedChats: apiKey.allowedChats || undefined,
-      isActive: apiKey.isActive,
-      expiresAt: apiKey.expiresAt || undefined,
-      lastUsedAt: apiKey.lastUsedAt || undefined,
-      usageCount: apiKey.usageCount,
-      createdAt: apiKey.createdAt,
-      apiKey: rawKey,
-    };
+    return { ...this.toResponse(apiKey), apiKey: rawKey };
   }
 
   @Get()
@@ -78,20 +106,7 @@ export class AuthController {
   })
   async findAll(): Promise<ApiKeyResponseDto[]> {
     const keys = await this.authService.findAll();
-    return keys.map(k => ({
-      id: k.id,
-      name: k.name,
-      keyPrefix: k.keyPrefix,
-      role: k.role,
-      allowedIps: k.allowedIps || undefined,
-      allowedSessions: k.allowedSessions || undefined,
-      allowedChats: k.allowedChats || undefined,
-      isActive: k.isActive,
-      expiresAt: k.expiresAt || undefined,
-      lastUsedAt: k.lastUsedAt || undefined,
-      usageCount: k.usageCount,
-      createdAt: k.createdAt,
-    }));
+    return keys.map(k => this.toResponse(k));
   }
 
   @Get(':id')
@@ -102,29 +117,22 @@ export class AuthController {
     description: 'The API key (plaintext never returned; only the keyPrefix).',
     type: ApiKeyResponseDto,
   })
+  @ApiResponse({ status: 404, description: 'No API key with this id.' })
   async findOne(@Param('id') id: string): Promise<ApiKeyResponseDto> {
     const k = await this.authService.findOne(id);
-    return {
-      id: k.id,
-      name: k.name,
-      keyPrefix: k.keyPrefix,
-      role: k.role,
-      allowedIps: k.allowedIps || undefined,
-      allowedSessions: k.allowedSessions || undefined,
-      allowedChats: k.allowedChats || undefined,
-      isActive: k.isActive,
-      expiresAt: k.expiresAt || undefined,
-      lastUsedAt: k.lastUsedAt || undefined,
-      usageCount: k.usageCount,
-      createdAt: k.createdAt,
-    };
+    return this.toResponse(k);
   }
 
   @Put(':id')
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Update API key (admin only)' })
   @ApiResponse({ status: 200, description: 'The updated API key.', type: ApiKeyResponseDto })
-  @ApiResponse({ status: 409, description: 'The change would remove the last usable admin key.' })
+  @ApiResponse({ status: 400, description: 'Validation failed, or the body carries a field the DTO does not declare.' })
+  @ApiResponse({ status: 404, description: 'No API key with this id.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The change would remove the last usable admin key: no other usable admin key lasts at least as long.',
+  })
   async update(
     @Param('id') id: string,
     @Body() dto: UpdateApiKeyDto,
@@ -133,36 +141,16 @@ export class AuthController {
   ): Promise<ApiKeyResponseDto> {
     const before = await this.authService.findOne(id);
     const k = await this.authService.update(id, dto);
-    const authzSnapshot = (key: ApiKey) => ({
-      role: key.role,
-      allowedIps: key.allowedIps,
-      allowedSessions: key.allowedSessions,
-      allowedChats: key.allowedChats,
-      expiresAt: key.expiresAt,
-    });
     await this.auditService.logInfo(AuditAction.API_KEY_UPDATED, {
       ...this.auditContext(req, actor),
       metadata: {
         targetKeyId: k.id,
         targetKeyName: k.name,
-        before: authzSnapshot(before),
-        after: authzSnapshot(k),
+        before: this.authzSnapshot(before),
+        after: this.authzSnapshot(k),
       },
     });
-    return {
-      id: k.id,
-      name: k.name,
-      keyPrefix: k.keyPrefix,
-      role: k.role,
-      allowedIps: k.allowedIps || undefined,
-      allowedSessions: k.allowedSessions || undefined,
-      allowedChats: k.allowedChats || undefined,
-      isActive: k.isActive,
-      expiresAt: k.expiresAt || undefined,
-      lastUsedAt: k.lastUsedAt || undefined,
-      usageCount: k.usageCount,
-      createdAt: k.createdAt,
-    };
+    return this.toResponse(k);
   }
 
   @Delete(':id')
@@ -170,7 +158,11 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete API key (admin only)' })
   @ApiResponse({ status: 204, description: 'API key deleted' })
-  @ApiResponse({ status: 409, description: 'The key is the last usable admin key.' })
+  @ApiResponse({ status: 404, description: 'No API key with this id.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The key is the last usable admin key: no other usable admin key lasts at least as long.',
+  })
   async delete(@Param('id') id: string, @Req() req: Request, @CurrentApiKey() actor?: ApiKey): Promise<void> {
     const target = await this.authService.findOne(id);
     await this.authService.delete(id);
@@ -185,7 +177,11 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Revoke API key (admin only)' })
   @ApiResponse({ status: 200, description: 'The revoked API key (isActive now false).', type: ApiKeyResponseDto })
-  @ApiResponse({ status: 409, description: 'The key is the last usable admin key.' })
+  @ApiResponse({ status: 404, description: 'No API key with this id.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The key is the last usable admin key: no other usable admin key lasts at least as long.',
+  })
   async revoke(
     @Param('id') id: string,
     @Req() req: Request,
@@ -196,19 +192,6 @@ export class AuthController {
       ...this.auditContext(req, actor),
       metadata: { targetKeyId: k.id, targetKeyName: k.name },
     });
-    return {
-      id: k.id,
-      name: k.name,
-      keyPrefix: k.keyPrefix,
-      role: k.role,
-      allowedIps: k.allowedIps || undefined,
-      allowedSessions: k.allowedSessions || undefined,
-      allowedChats: k.allowedChats || undefined,
-      isActive: k.isActive,
-      expiresAt: k.expiresAt || undefined,
-      lastUsedAt: k.lastUsedAt || undefined,
-      usageCount: k.usageCount,
-      createdAt: k.createdAt,
-    };
+    return this.toResponse(k);
   }
 }

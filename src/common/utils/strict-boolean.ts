@@ -9,7 +9,7 @@ import { Transform, TransformFnParams } from 'class-transformer';
  * cast *any* non-empty string to `true` — `'false'`, `'0'` and `'no'` all become `true` — and it
  * happens before `@IsBoolean()` ever runs, so the validator can never reject it. Requests reach a
  * DTO as strings whenever the body arrives through the global `express.urlencoded` parser
- * (`src/main.ts`), whose scalars are always strings.
+ * (`src/configure-app.ts`), whose leaf values are always strings.
  *
  * The callback deliberately reads `obj[key]` (the untouched plain source) instead of `value`:
  * implicit conversion has already run by the time a `@Transform` callback is invoked, so `value`

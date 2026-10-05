@@ -34,7 +34,7 @@ export class StatusDto {
   })
   type!: string;
 
-  @ApiPropertyOptional({ description: 'Caption, for an image or video status.' })
+  @ApiPropertyOptional({ description: 'Text of a text status, or the caption of an image or video status.' })
   caption?: string;
 
   @ApiPropertyOptional({

@@ -22,6 +22,11 @@ describe('SearchProviderRegistry', () => {
     r.register(mk('b'));
     r.setActive('b');
     expect(r.active()?.id).toBe('b');
+    // A plugin re-enable registers the same id again: no duplicate, and the active choice stands.
+    r.register(mk('a'));
+    expect(r.active()?.id).toBe('b');
+    expect(r.list()).toHaveLength(2);
+    expect(() => r.setActive('zz')).toThrow(/unknown search provider/);
     r.unregister('b');
     expect(r.active()?.id).toBe('a');
     r.unregister('a');

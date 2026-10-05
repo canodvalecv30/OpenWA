@@ -115,6 +115,9 @@ export class SendPollDto {
   @ApiProperty({
     description: 'Options to vote on (WhatsApp allows between 2 and 12)',
     type: [String],
+    minItems: 2,
+    maxItems: 12,
+    items: { type: 'string', maxLength: 100 },
     example: ['Park', 'Beach', 'Downtown'],
   })
   @IsArray()
@@ -159,7 +162,13 @@ export class ReplyMessageDto {
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -374,7 +383,13 @@ export class EditMessageDto {
 
   // An edit REPLACES the message content, so tags are re-applied rather than preserved: omitting
   // this drops whatever the original body carried.
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)

@@ -19,7 +19,7 @@ export interface SendPacingConfig {
   /**
    * Daily allowance for **cold reachouts** — the first message to a chat this account has no history
    * with in either direction. Same by-age shape as `warmupSchedule`, and a single number is a flat
-   * cap. Empty disables the rule.
+   * cap. `0` or `off` disables the rule (an empty value does too, outside a container env).
    *
    * Separate from the overall cap because the two bound different risks. Answering people who
    * already wrote to you is not what gets numbers banned; starting conversations with strangers is,
@@ -54,9 +54,12 @@ const MIN_BREAKER_COOLDOWN_MS = 1000;
  * failure this feature exists to prevent.
  */
 function parseSchedule(raw: string | undefined, fallback: number[]): number[] {
-  // An explicit empty value is a deliberate "no rule", distinct from an unset one. Only the cold cap
-  // uses it; the overall cap has no off switch short of disabling pacing.
-  if (raw !== undefined && raw.trim() === '') return fallback === DEFAULT_COLD_SCHEDULE ? [] : fallback;
+  // An explicit off value is a deliberate "no rule", distinct from an unset one. Only the cold cap
+  // uses it; the overall cap has no off switch short of disabling pacing. `0` and `off` exist because
+  // boot deletes a blank container env var, so the empty value only ever reaches here from a .env file.
+  if (raw !== undefined && ['', '0', 'off'].includes(raw.trim().toLowerCase())) {
+    return fallback === DEFAULT_COLD_SCHEDULE ? [] : fallback;
+  }
   if (!raw) return fallback;
   const parts = raw.split(',').map(part => Number(part.trim()));
   if (parts.length === 0 || parts.some(n => !Number.isFinite(n) || n < MIN_DAILY_CAP || n > MAX_DAILY_CAP)) {

@@ -13,10 +13,12 @@ export function writeSecretFile(filePath: string, content: string): void {
   try {
     chmodSync(filePath, 0o600);
   } catch (error) {
-    // file not present yet, or chmod unsupported — create-mode below covers a new file. Log the
-    // failure so a world-readable secret on a chmod-unsupported FS (or an unexpected error) is
-    // not silently left world-readable after a rewrite.
-    console.warn(`[OpenWA] pre-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
+    // A file not present yet is expected: create-mode below covers it. Log any other failure so a
+    // world-readable secret on a chmod-unsupported FS (or an unexpected error) is not silently left
+    // world-readable after a rewrite.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(`[OpenWA] pre-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
+    }
   }
   writeFileSync(filePath, content, { mode: 0o600 });
   try {

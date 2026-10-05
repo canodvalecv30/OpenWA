@@ -105,6 +105,21 @@ describe('PluginLoaderService — a plugin loaded from the legacy plugins direct
     expect(next.getPlugin(manifest.id)).toBeUndefined();
   });
 
+  it('uninstalls a legacy package that failed to load, so it does not load once the fault is fixed', async () => {
+    // A package the boot scan could not load has no runtime record, so no recorded directory; the
+    // loader must hand the uninstaller the legacy root or only the configured tree is cleaned.
+    const broken = path.join(legacyDir, 'broken-plg');
+    fs.mkdirSync(broken, { recursive: true });
+    fs.writeFileSync(path.join(broken, 'manifest.json'), '{ not json');
+    const fresh = makeLoader();
+    fresh.onModuleInit();
+    expect(fresh.getPlugin('broken-plg')).toBeUndefined();
+
+    await fresh.uninstallPlugin('broken-plg');
+
+    expect(fs.existsSync(broken)).toBe(false);
+  });
+
   it('resolves its package directory to the legacy tree', () => {
     expect(loader.getPluginPackageDir(manifest.id)).toBe(path.resolve(legacyDir, manifest.id));
   });

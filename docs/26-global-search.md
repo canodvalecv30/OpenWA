@@ -60,8 +60,10 @@ whitespace-separated token is quoted (internal quotes doubled) before it reaches
 query grammar (phrases, bare `OR`/`AND`/`NOT`/`NEAR`, parentheses, `*`) is neutralised and inputs such
 as phone numbers or `…@lid` ids match as plain text; multiple tokens are still implicitly ANDed.
 Snippets are emitted with `<mark>`/`</mark>` highlight markers on both dialects so the
-`SearchHit.snippet` contract is dialect-agnostic — and the snippet is already XSS-safe text; render it
-as text, never as HTML.
+`SearchHit.snippet` contract is dialect-agnostic. The body text inside the snippet is **not**
+HTML-escaped: split on the literal `<mark>`/`</mark>` markers and render each segment as text (the
+dashboard does this with `renderHighlightedSnippet` in `dashboard/src/utils/search-highlight.ts`), and
+never assign the raw snippet to `innerHTML`.
 
 ## 26.4 Dual-database switching safety
 
@@ -89,7 +91,7 @@ it into Postgres). Concretely:
 
 ## 26.5 Configuration
 
-All search configuration lives in the environment (`.env` / Compose / dashboard Infrastructure form):
+All search configuration lives in the environment (`.env` / Compose):
 
 | Variable           | Default        | Meaning                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -135,9 +137,10 @@ GET /api/search?q=<term>&sessionId=<id>&chatId=<id>&direction=<incoming|outgoing
   are coerced and validated; a non-numeric `limit`/`offset`/`dateFrom`/`dateTo` surfaces as `400`,
   never as a `NaN` SQL parameter.
 - **Auth scoping is authoritative.** The caller's API-key `allowedSessions` is injected by
-  `SearchService` — **never** accepted from the query — so a scoped key cannot broaden its reach. An
-  ADMIN / null-allowlist key searches all sessions; a scoped key sees only its allowlist even if it
-  passes `sessionId`. The DTO carries no `sessionIds` field (it would be rejected as non-whitelisted).
+  `SearchService` — **never** accepted from the query — so a scoped key cannot broaden its reach. A
+  key with a non-empty `allowedSessions` searches only those sessions, whatever its role, even if it
+  passes `sessionId`; a key with a null or empty `allowedSessions` searches all sessions. The DTO
+  carries no `sessionIds` field (it would be rejected as non-whitelisted).
 - **Response** is a `SearchResults` object: `{ hits: SearchHit[], total, tookMs, provider }`. Each hit
   carries `messageId`, `waMessageId`, `sessionId`, `chatId`, `body`, `snippet`, `timestamp`, `type`,
   `direction`, `from`, and optional `score`. `total` is an exact count (bounded; computed lazily only
@@ -176,11 +179,15 @@ Because the route and the response shape are identical across providers, dashboa
 keep working unchanged when you switch backends.
 
 > **Backfill is the plugin's responsibility.** The `message:persisted` hook fires only for **live**
-> traffic — outbound on send, inbound on receive — never for history-backfill persistence. So a plugin
-> provider installed on a deployment that already has message history must perform its own one-time
-> backfill (read `messages` and index) at enablement; its index will otherwise miss pre-installation
-> rows. The built-in DB-FTS provider is unaffected — its index is DB-synced via triggers on every
-> insert, including backfill.
+> traffic — outbound on send, inbound on receive, and again when a stored message is revoked (see
+> [27.3](./27-plugin-search-providers.md#273-indexing-via-the-messagepersisted-hook)) — never for
+> history-backfill persistence. So a plugin provider installed on a deployment that already has message
+> history must perform its own one-time backfill at enablement, through `ctx.engine.getChats` +
+> `getChatHistory` (needs `engine:read`, works on whatsapp-web.js only and returns at most 100 messages
+> per chat; Baileys has no backfill path, see
+> [27.3](./27-plugin-search-providers.md#273-indexing-via-the-messagepersisted-hook)); its index
+> will otherwise miss pre-installation rows. The built-in DB-FTS provider is
+> unaffected — its index is DB-synced via triggers on every insert, including backfill.
 
 ## 26.8 Migration and backfill
 

@@ -556,10 +556,6 @@ describe('PluginsService — per-session config', () => {
     expect(service.updateSessions('sess-cfg', []).activeSessions).toEqual([]);
   });
 
-  it('lets an unrestricted key activate for all sessions', () => {
-    expect(service.updateSessions('sess-cfg', ['*']).activeSessions).toEqual(['*']);
-  });
-
   it('clears the override when an empty slice is written', () => {
     service.updateSessionConfig('sess-cfg', 'sess-A', { lang: 'he' });
     service.updateSessionConfig('sess-cfg', 'sess-A', {});

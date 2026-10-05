@@ -7,6 +7,7 @@ namespace OpenWA\Tests;
 use OpenWA\Exceptions\OpenWAApiException;
 use OpenWA\Exceptions\OpenWAAuthException;
 use OpenWA\Exceptions\OpenWANotFoundException;
+use OpenWA\Exceptions\OpenWARateLimitException;
 use OpenWA\Exceptions\OpenWAServiceUnavailableException;
 use OpenWA\Exceptions\OpenWATimeoutException;
 use PHPUnit\Framework\TestCase;
@@ -235,6 +236,76 @@ class ClientTest extends TestCase
         }
     }
 
+    public function testErrorCarriesCodeRetryAfterAndHeaders(): void
+    {
+        $fail = function (int $status, $body = null, array $headers = [], ?string $raw = null): OpenWAApiException {
+            $backend = new MockBackend();
+            $raw === null ? $backend->on($status, $body, $headers) : $backend->onRaw($status, $raw, $headers);
+            try {
+                $backend->makeClient()->sessions->list();
+            } catch (OpenWAApiException $e) {
+                return $e;
+            }
+            $this->fail('Expected exception');
+        };
+
+        $throttled = $fail(429, ['statusCode' => 429, 'message' => 'ThrottlerException: Too Many Requests'], [
+            'retry-after' => '7',
+        ]);
+        $this->assertInstanceOf(OpenWARateLimitException::class, $throttled);
+        $this->assertSame(7, $throttled->getRetryAfterSeconds());
+        $this->assertNull($throttled->getErrorCode());
+        $this->assertSame(['7'], $throttled->getHeaders()['retry-after']);
+        $this->assertSame(0, $throttled->getCode());
+
+        // Send pacing puts its wait in the body; a header must not shorten it.
+        $pacing = [
+            'statusCode' => 429,
+            'error' => 'Too Many Requests',
+            'message' => 'Daily send cap reached',
+            'code' => 'SEND_PACING_LIMITED',
+            'retryAfterSeconds' => 34521,
+        ];
+        foreach ([[], ['Retry-After' => '1']] as $headers) {
+            $e = $fail(429, $pacing, $headers);
+            $this->assertSame('SEND_PACING_LIMITED', $e->getErrorCode());
+            $this->assertSame(34521, $e->getRetryAfterSeconds());
+        }
+
+        $dated = $fail(503, null, ['Retry-After' => gmdate('D, d M Y H:i:s', time() + 2) . ' GMT'])
+            ->getRetryAfterSeconds();
+        $this->assertTrue($dated !== null && $dated >= 0 && $dated <= 3, "HTTP-date Retry-After gave {$dated}");
+        $this->assertNull($fail(503, null, ['Retry-After' => 'soon'])->getRetryAfterSeconds());
+
+        $logout = $fail(502, ['statusCode' => 502, 'message' => 'x', 'code' => 'SESSION_LOGOUT_INCOMPLETE']);
+        $this->assertSame('SESSION_LOGOUT_INCOMPLETE', $logout->getErrorCode());
+        $plain = $fail(500, null, ['Content-Type' => 'text/plain'], 'oops');
+        $this->assertNull($plain->getErrorCode());
+        $this->assertNull($plain->getRetryAfterSeconds());
+
+        // The four-argument constructor still works and has no headers.
+        $this->assertSame([], (new OpenWARateLimitException('m', 429))->getHeaders());
+    }
+
+    public function testRetryAfterParsesWithoutTheCtypeExtension(): void
+    {
+        // The SDK does not require ext-ctype, so a build without it must still
+        // classify a Retry-After response. Run the check in a child process
+        // with the ctype functions disabled.
+        $autoload = var_export(dirname(__DIR__) . '/vendor/autoload.php', true);
+        $script = "require {$autoload};"
+            . "\$e = \\OpenWA\\Exceptions\\OpenWAApiException::classify(429, 'm', null, null, ['Retry-After' => '7']);"
+            . "echo get_class(\$e), ' ', var_export(\$e->getRetryAfterSeconds(), true);";
+        $ctype = 'ctype_alnum,ctype_alpha,ctype_cntrl,ctype_digit,ctype_graph,'
+            . 'ctype_lower,ctype_print,ctype_punct,ctype_space,ctype_upper,ctype_xdigit';
+        $command = escapeshellarg(PHP_BINARY) . ' -d ' . escapeshellarg("disable_functions={$ctype}")
+            . ' -r ' . escapeshellarg($script) . ' 2>&1';
+        exec($command, $output, $exitCode);
+
+        $this->assertSame(0, $exitCode, implode("\n", $output));
+        $this->assertSame(OpenWARateLimitException::class . ' 7', implode("\n", $output));
+    }
+
     public function testNonEnvelopeErrorBodyMapsToTypedException(): void
     {
         // The readiness probe answers 503 with {status, details}: no statusCode/message, and a
@@ -255,12 +326,33 @@ class ClientTest extends TestCase
     public function testTimeoutWithErrno28MapsToTimeoutException(): void
     {
         // Regression guard: cURL error 28 (CURLE_OPERATION_TIMEDOUT) must map to
-        // OpenWATimeoutException, regardless of the message wording.
+        // OpenWATimeoutException, regardless of the message wording. The message
+        // deliberately avoids 'timed out' so only the errno check can match it.
         $timeoutRequest = new \GuzzleHttp\Exception\ConnectException(
-            'cURL error 28: Operation timed out',
+            'cURL error 28: Zeitlimit für Vorgang überschritten',
             new \GuzzleHttp\Psr7\Request('GET', '/api/sessions'),
             null,
             ['errno' => 28],
+        );
+        $mock = new \GuzzleHttp\Handler\MockHandler([$timeoutRequest]);
+        $httpClient = new \GuzzleHttp\Client(['handler' => \GuzzleHttp\HandlerStack::create($mock)]);
+        $client = new \OpenWA\Client([
+            'baseUrl' => 'http://localhost:2785',
+            'apiKey' => 'k',
+            'httpClient' => $httpClient,
+        ]);
+
+        $this->expectException(OpenWATimeoutException::class);
+        $client->sessions->list();
+    }
+
+    public function testTimedOutMessageWithoutErrnoMapsToTimeoutException(): void
+    {
+        // Transports that leave the handler context empty (e.g. the stream handler)
+        // are classified by the 'timed out' message instead.
+        $timeoutRequest = new \GuzzleHttp\Exception\ConnectException(
+            'Connection timed out after 10001 milliseconds',
+            new \GuzzleHttp\Psr7\Request('GET', '/api/sessions'),
         );
         $mock = new \GuzzleHttp\Handler\MockHandler([$timeoutRequest]);
         $httpClient = new \GuzzleHttp\Client(['handler' => \GuzzleHttp\HandlerStack::create($mock)]);

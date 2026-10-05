@@ -1,5 +1,14 @@
-import { INestApplication, ValidationPipe, ValidationPipeOptions } from '@nestjs/common';
+import {
+  ArgumentMetadata,
+  BadRequestException,
+  INestApplication,
+  PipeTransform,
+  ValidationPipe,
+  ValidationPipeOptions,
+} from '@nestjs/common';
 import { isValidationErrorDetailEnabled } from './bootstrap-security';
+import { containsNul } from '../common/validation/no-nul-character';
+import { ImportDataDto } from '../modules/infra/dto/import-data.dto';
 
 /**
  * The DTO validation contract itself, without the one option that depends on the environment.
@@ -20,6 +29,21 @@ export const GLOBAL_VALIDATION_OPTIONS: ValidationPipeOptions = {
   transformOptions: { enableImplicitConversion: true },
 };
 
+/**
+ * Refuses a request body holding U+0000 anywhere. PostgreSQL rejects it in every text and varchar value
+ * and bound parameter, so it failed the lookup or write behind the route as a 500 while SQLite took it.
+ * The restore is exempt: a SQLite backup may hold one in a message, and the importers drop it from the
+ * same free-text columns the entities clean.
+ */
+export class NulBodyPipe implements PipeTransform {
+  transform(value: unknown, { type, metatype }: ArgumentMetadata): unknown {
+    if (type === 'body' && metatype !== ImportDataDto && containsNul(value)) {
+      throw new BadRequestException('Request body must not contain a NUL character');
+    }
+    return value;
+  }
+}
+
 /** Apply the HTTP prefix and DTO validation contract shared by production and e2e applications. */
 export function applyGlobalValidation(app: INestApplication): void {
   app.setGlobalPrefix('api');
@@ -28,5 +52,6 @@ export function applyGlobalValidation(app: INestApplication): void {
       ...GLOBAL_VALIDATION_OPTIONS,
       disableErrorMessages: !isValidationErrorDetailEnabled(process.env.VALIDATION_ERROR_DETAIL, process.env.NODE_ENV),
     }),
+    new NulBodyPipe(),
   );
 }

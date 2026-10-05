@@ -21,7 +21,10 @@ export class CatalogDto {
   @ApiPropertyOptional({ description: 'Collection description, when the engine reports one.' })
   description?: string;
 
-  @ApiProperty({ description: 'How many products the first collection holds.', example: 12 })
+  @ApiProperty({
+    description: 'How many products the first collection holds, counting at most the first 51 on Baileys.',
+    example: 12,
+  })
   productCount!: number;
 
   @ApiProperty({ description: 'Public catalog link for the account.', example: 'https://wa.me/c/628123456789' })
@@ -55,7 +58,7 @@ export class ProductDto {
       'Price rendered for display. Synthesized by the gateway from price + currency, so an ' +
       'unrecognised currency code falls back to a plain "CODE amount" pair, and a product with no ' +
       'currency shows the bare amount. Present only when price is.',
-    example: 'IDR 85,000.00',
+    example: 'IDR 85,000',
   })
   priceFormatted?: string;
 

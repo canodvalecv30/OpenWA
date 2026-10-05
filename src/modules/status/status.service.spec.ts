@@ -328,6 +328,17 @@ describe('StatusService media validation and selection', () => {
     });
   });
 
+  // The status adapters fetch a URL with no fallback type of their own, so a host serving a generic
+  // Content-Type would leave the bytes labelled octet-stream; the route default is the only label they get.
+  it('labels an untyped URL with the route default for its kind', async () => {
+    const url = 'https://example.com/banner';
+    await service.postImageStatus('s1', { url }, { recipients: ['1@c.us'] });
+    await service.postVideoStatus('s1', { url }, { recipients: ['1@c.us'] });
+
+    expect(engine.postImageStatus).toHaveBeenCalledWith({ mimetype: 'image/jpeg', data: url }, expect.anything());
+    expect(engine.postVideoStatus).toHaveBeenCalledWith({ mimetype: 'video/mp4', data: url }, expect.anything());
+  });
+
   it('strips a data-URI prefix before handing base64 bytes to either engine path', async () => {
     const prefixed = 'data:image/png;base64,QUJD';
     await service.postImageStatus('s1', { base64: prefixed, mimetype: 'image/png' }, { recipients: ['1@c.us'] });
@@ -375,14 +386,16 @@ describe('StatusService media validation and selection', () => {
   // A status post publishes content from the account, so it passes the same `message:sending`
   // moderation gate as a chat send rather than going out unseen by plugins.
   describe('message:sending gate', () => {
-    it('consults the gate for text, image and video status posts', async () => {
+    it('consults the gate and the pacing check for text, image, video and voice status posts', async () => {
       await service.postTextStatus('s1', 'hello', { recipients: [] });
       await service.postImageStatus('s1', { base64: 'QUJD', mimetype: 'image/png' }, { recipients: [] });
       await service.postVideoStatus('s1', { base64: 'QUJD', mimetype: 'video/mp4' }, { recipients: [] });
+      await service.postVoiceStatus('s1', { base64: 'QUJD' }, { recipients: [] });
 
       const types = hookManager.execute.mock.calls.map(([, data]) => (data as { type: string }).type);
-      expect(types).toEqual(['status-text', 'status-image', 'status-video']);
+      expect(types).toEqual(['status-text', 'status-image', 'status-video', 'status-voice']);
       expect(hookManager.execute.mock.calls.every(([event]) => event === 'message:sending')).toBe(true);
+      expect(pacing.assertSendAllowed).toHaveBeenCalledTimes(4);
     });
 
     it('identifies itself as StatusService so a plugin can tell it from a chat send', async () => {
@@ -398,7 +411,11 @@ describe('StatusService media validation and selection', () => {
       await expect(service.postTextStatus('s1', 'spam', { recipients: [] })).rejects.toBeInstanceOf(
         BadRequestException,
       );
+      await expect(service.postVoiceStatus('s1', { base64: 'QUJD' }, { recipients: [] })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
       expect(engine.postTextStatus).not.toHaveBeenCalled();
+      expect(engine.postVoiceStatus).not.toHaveBeenCalled();
     });
 
     it('sends the plugin-rewritten text rather than the original', async () => {

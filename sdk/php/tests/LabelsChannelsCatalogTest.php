@@ -22,6 +22,8 @@ class LabelsChannelsCatalogTest extends TestCase
         $client->labels->get('s', 'l1');
         $this->assertStringContainsString('/labels/l1', $backend->calls()[1]['path']);
         $client->labels->forChat('s', 'a@c.us');
+        $this->assertSame('GET', $backend->lastCall()['method']);
+        $this->assertSame('/api/sessions/s/labels/chat/a@c.us', $backend->lastCall()['path']);
         $client->labels->addToChat('s', 'a@c.us', ['labelId' => 'l1']);
         $this->assertSame('POST', $backend->calls()[3]['method']);
         $this->assertSame(['labelId' => 'l1'], $backend->calls()[3]['body']);
@@ -41,6 +43,8 @@ class LabelsChannelsCatalogTest extends TestCase
         $client->channels->list('s');
         $this->assertStringContainsString('/sessions/s/channels', $backend->calls()[0]['path']);
         $client->channels->get('s', '123@newsletter');
+        $this->assertSame('GET', $backend->lastCall()['method']);
+        $this->assertSame('/api/sessions/s/channels/123@newsletter', $backend->lastCall()['path']);
         $client->channels->messages('s', '123@newsletter', ['limit' => 10]);
         $this->assertStringContainsString('limit=10', $backend->calls()[2]['query']);
         $client->channels->subscribe('s', ['inviteCode' => 'ABCxyz']);
@@ -63,9 +67,21 @@ class LabelsChannelsCatalogTest extends TestCase
         $client->catalog->products('s', ['page' => 1, 'limit' => 20]);
         $this->assertStringContainsString('page=1', $backend->calls()[1]['query']);
         $client->catalog->product('s', 'p1');
+        $this->assertSame('GET', $backend->lastCall()['method']);
+        $this->assertSame('/api/sessions/s/catalog/products/p1', $backend->lastCall()['path']);
         $client->catalog->sendProduct('s', ['chatId' => 'a@c.us', 'productId' => 'p1', 'body' => 'x']);
         $this->assertStringContainsString('/messages/send-product', $backend->calls()[3]['path']);
         $this->assertSame(['chatId' => 'a@c.us', 'productId' => 'p1', 'body' => 'x'], $backend->calls()[3]['body']);
+    }
+
+    public function testCatalogInfoAndProductReturnNullOnAnEmptyBody(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200);
+        $backend->on(200);
+        $client = $backend->makeClient();
+        $this->assertNull($client->catalog->info('s'));
+        $this->assertNull($client->catalog->product('s', 'missing'));
     }
 
     public function testClientExposesAll11Resources(): void

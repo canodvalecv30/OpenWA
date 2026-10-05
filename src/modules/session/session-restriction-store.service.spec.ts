@@ -62,6 +62,21 @@ describe('SessionRestrictionStore', () => {
       expect(store.set('s1', timelock({ expiresAt: refreshed }))).toBe(false);
       expect(store.get('s1')?.expiresAt).toBe(refreshed);
     });
+
+    // The lapsed one already reads as no restriction, so the new one flips the session to restricted.
+    it('is news when the same restriction is imposed again after the last one lapsed', () => {
+      store.set('s1', timelock({ expiresAt: Date.now() - 1000 }));
+
+      expect(store.set('s1', timelock({ expiresAt: Date.now() + 60_000 }))).toBe(true);
+    });
+
+    // A clock ahead of WhatsApp's sees the re-read timelock as already over on every connect.
+    it('is not news when the engine re-reports a restriction that has already lapsed', () => {
+      const lapsed = Date.now() - 1000;
+      expect(store.set('s1', timelock({ expiresAt: lapsed }))).toBe(true);
+
+      expect(store.set('s1', timelock({ expiresAt: lapsed }))).toBe(false);
+    });
   });
 
   describe('expiry', () => {

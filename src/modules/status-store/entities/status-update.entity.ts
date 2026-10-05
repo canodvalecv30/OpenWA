@@ -1,5 +1,6 @@
 import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 import { bigintToNumberTransformer } from '../../message/entities/message.entity';
+import { NulFreeTransformer } from '../../../common/transformers/nul-free.transformer';
 
 @Entity('status_updates')
 @Index(['sessionId', 'contactJid'])
@@ -15,10 +16,10 @@ export class StatusUpdate {
   @Column()
   contactJid!: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, transformer: NulFreeTransformer })
   contactName?: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, transformer: NulFreeTransformer })
   contactPushName?: string;
 
   /** Engine status id, e.g. false_status@broadcast_<hash>. */
@@ -28,14 +29,14 @@ export class StatusUpdate {
   @Column()
   type!: 'text' | 'image' | 'video' | 'voice';
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: 'text', nullable: true, transformer: NulFreeTransformer })
   caption?: string;
 
   /** Relative path under the media store; null for text or omitted media. */
   @Column({ nullable: true })
   mediaPath?: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, transformer: NulFreeTransformer })
   mediaMimetype?: string;
 
   @Column({ default: false })

@@ -34,10 +34,11 @@ class HealthResourceTest {
 
     @Test
     void readyHitsReadyPath() {
-        tx.respond(200, "{\"status\":\"ok\",\"details\":{\"mainDatabase\":\"up\",\"dataDatabase\":\"up\"}}");
+        tx.respond(200, "{\"status\":\"ok\",\"details\":{\"mainDatabase\":{\"status\":\"up\"},\"dataDatabase\":{\"status\":\"down\"}}}");
         HealthReadyResponse res = client.health.ready();
         assertEquals("http://h/api/health/ready", tx.lastRequest().url());
         assertEquals(HttpMethod.GET, tx.lastRequest().method());
-        assertEquals("up", res.details().mainDatabase());
+        assertEquals("up", res.details().mainDatabase().status());
+        assertEquals("down", res.details().dataDatabase().status());
     }
 }
